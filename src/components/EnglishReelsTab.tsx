@@ -56,6 +56,12 @@ import { ExportAbortedError, exportProjectToVideo } from '../engine/mp4Exporter'
 import { FlexibleSceneDocument } from '../engine/scenePlanAdapter';
 import { synthesizeAudioWithProgressJob } from '../engine/ttsSyncHelper';
 import {
+  mixVoiceWithBgmPreset,
+  STUDIO_BGM_PRESETS,
+  StudioBgmPresetId,
+} from '../engine/audioMixHelper';
+import { cleanReadingWorksheetInput } from '../engine/readingPromptBuilder';
+import {
   CANVAS_THEMES,
   CanvasThemeId,
   IllustrationSceneIcon,
@@ -166,6 +172,8 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
   const [ttsStageLabel, setTtsStageLabel] = useState('');
   const [studioError, setStudioError] = useState<string | null>(null);
   const [previewAudioUrl, setPreviewAudioUrl] = useState<string | null>(null);
+  const [bgmPreset, setBgmPreset] = useState<StudioBgmPresetId>('lofi-calm');
+  const [bgmVolume, setBgmVolume] = useState<number>(0.18);
   const [watermarkConfig, setWatermarkConfig] = useState<WatermarkOutroConfig>({
     watermarkEnabled: false,
     watermarkText: '@EnglishReels',
@@ -183,6 +191,7 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
   const [generatedAudioUrl, setGeneratedAudioUrl] = useState<string | null>(null);
   const [generatedDurations, setGeneratedDurations] = useState<number[] | undefined>(undefined);
   const [generatedTimings, setGeneratedTimings] = useState<ReelCardTimingMeta[] | undefined>(undefined);
+  const [synthesizedAudioSig, setSynthesizedAudioSig] = useState<string>('');
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
   const [videoTime, setVideoTime] = useState(0.5);
   const [isExportingVideo, setIsExportingVideo] = useState(false);
@@ -192,6 +201,42 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
   const [mp4Resolution, setMp4Resolution] = useState<ExportResolutionId>(DEFAULT_MP4_EXPORT_SETTINGS.resolution);
   const [mp4Quality, setMp4Quality] = useState<ExportQualityId>(DEFAULT_MP4_EXPORT_SETTINGS.quality);
   const [mp4Fps, setMp4Fps] = useState<ExportFpsOption>(DEFAULT_MP4_EXPORT_SETTINGS.fps);
+
+  const currentAudioSignature = useMemo(
+    () =>
+      JSON.stringify({
+        cards: cards.map((c) => ({
+          id: c.id,
+          type: c.type,
+          ttsText: c.ttsText,
+          content: c.content,
+          ttsAnswerText: c.ttsAnswerText,
+          options: c.options,
+          answerIndex: c.answerIndex,
+          thinkSec: c.thinkSec,
+          explanation: c.explanation,
+        })),
+        ttsProvider,
+        ttsVoice,
+        ttsRate,
+        bgmPreset,
+        bgmVolume,
+        outroSeconds: watermarkConfig.outroSeconds,
+        outroLine1: watermarkConfig.outroLine1,
+        outroLine2: watermarkConfig.outroLine2,
+      }),
+    [
+      cards,
+      ttsProvider,
+      ttsVoice,
+      ttsRate,
+      bgmPreset,
+      bgmVolume,
+      watermarkConfig.outroSeconds,
+      watermarkConfig.outroLine1,
+      watermarkConfig.outroLine2,
+    ],
+  );
 
   const videoCanvasRef = useRef<HTMLCanvasElement>(null);
   const lessonAudioRef = useRef<HTMLAudioElement>(null);
@@ -415,6 +460,12 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
     }
   };
 
+  const invalidateSynthesizedAudio = () => {
+    setSynthesizedAudioSig('');
+    setGeneratedDurations(undefined);
+    setGeneratedTimings(undefined);
+  };
+
   const handleApplyPastedAiJson = () => {
     setAiJsonError(null);
     setAiJsonNotice(null);
@@ -430,6 +481,7 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
     setCards(parsed.cards);
     setSceneJsonOverride(parsed.sceneJson ?? null);
     setActiveCardIdx(0);
+    invalidateSynthesizedAudio();
     setAiJsonNotice(
       `Đã nạp ${parsed.cards.length} thẻ (${parsed.mode.toUpperCase()})${parsed.sceneJson ? ' kèm Scene JSON KineticSub' : ''}!`,
     );
@@ -437,14 +489,19 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
 
   const handleQuickRuleExtract = () => {
     setAiJsonError(null);
+    const cleaned = cleanReadingWorksheetInput(rawText, lessonTitle);
     const built = buildReelCardsRuleBased(rawText, {
-      title: lessonTitle,
+      title: cleaned.title || lessonTitle,
       mode,
       targetLang,
     });
+    if (built.title) {
+      setLessonTitle(built.title);
+    }
     setCards(built.cards);
     setActiveCardIdx(0);
     setSceneJsonOverride(null);
+    invalidateSynthesizedAudio();
     setAiJsonNotice(`Đã tách nhanh ${built.cards.length} thẻ (${built.mode.toUpperCase()}) từ nội dung.`);
   };
 
@@ -593,18 +650,25 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
     }
   };
 
-  const synthesizeLessonAudioBundle = async (): Promise<{
+  const synthesizeLessonAudioBundle = async (
+    quizPositionByCard?: Map<number, number>,
+  ): Promise<{
     audioFile: File;
     durations: number[] | undefined;
     timings: ReelCardTimingMeta[] | undefined;
     project: LessonProject;
   }> => {
+    const signatureAtStart = currentAudioSignature;
     const segments: Array<{ id: string; text: string; pauseAfterSec?: number }> = [];
-    const cardMapping: Array<{ qIdx: number; aIdx: number | null; thinkSec: number }> = [];
+    const cardMapping: Array<{ qIdx: number; aIdx: number | null; thinkSec: number; isOutro: boolean }> = [];
+    let quizOrd = 0;
 
-    for (const c of cards) {
+    for (let i = 0; i < cards.length; i++) {
+      const c = cards[i];
       if (c.type === 'quiz' && c.options && c.options.length > 0) {
-        const { questionSpeech, answerSpeech, thinkSec } = getQuizCardSpeechParts(c);
+        quizOrd += 1;
+        const pos = quizPositionByCard?.get(i) ?? quizOrd;
+        const { questionSpeech, answerSpeech, thinkSec } = getQuizCardSpeechParts(c, pos);
         const qIdx = segments.length;
         segments.push({
           id: `${c.id}-q`,
@@ -620,14 +684,24 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
             pauseAfterSec: 0,
           });
         }
-        cardMapping.push({ qIdx, aIdx, thinkSec });
+        cardMapping.push({ qIdx, aIdx, thinkSec, isOutro: false });
       } else {
         const cleanSpeech =
           sanitizeTtsSpeech(c.ttsText || c.content || c.title) || 'Next lesson point.';
         const qIdx = segments.length;
         segments.push({ id: c.id, text: cleanSpeech, pauseAfterSec: 0 });
-        cardMapping.push({ qIdx, aIdx: null, thinkSec: 0 });
+        cardMapping.push({ qIdx, aIdx: null, thinkSec: 0, isOutro: c.type === 'outro' });
       }
+    }
+
+    const extraOutroSpeech =
+      watermarkConfig.outroSeconds > 0 &&
+      !cards.some((c) => c.type === 'outro') &&
+      (watermarkConfig.outroLine1.trim() || watermarkConfig.outroLine2.trim())
+        ? sanitizeTtsSpeech([watermarkConfig.outroLine1, watermarkConfig.outroLine2].filter(Boolean).join('. '))
+        : '';
+    if (extraOutroSpeech) {
+      segments.push({ id: 'watermark-outro-speech', text: extraOutroSpeech, pauseAfterSec: 0.4 });
     }
 
     setTtsProgress(4);
@@ -649,8 +723,9 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
       throw new Error(data?.error || 'Không thể tạo audio TTS từ server.');
     }
 
-    const safeFileName = `${lessonTitle.replace(/[^a-zA-Z0-9-_]+/g, '_').slice(0, 32) || 'english_reels'}.mp3`;
-    const audioFile = base64ToMp3File(data.audioBase64, safeFileName);
+    const safeSlug = lessonTitle.replace(/[^a-zA-Z0-9-_]+/g, '_').slice(0, 32) || 'english_reels';
+    const rawFileName = `${safeSlug}.mp3`;
+    const rawAudioFile = base64ToMp3File(data.audioBase64, rawFileName);
 
     const segDurs: number[] = Array.isArray(data.segmentDurations) ? data.segmentDurations : [];
     const spokenDurs: number[] = Array.isArray(data.spokenDurations) ? data.spokenDurations : segDurs;
@@ -658,12 +733,25 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
 
     let timings: ReelCardTimingMeta[] | undefined;
     let durations: number[] | undefined;
-    if (segDurs.length === segments.length) {
+    const speechWindows: Array<{ start: number; end: number }> = [];
+    let outroStartSec: number | undefined;
+
+    if (segDurs.length >= cardMapping.length) {
+      let winCursor = 0;
       timings = cardMapping.map((m) => {
         const qSpoken = spokenDurs[m.qIdx] ?? segDurs[m.qIdx] ?? 2.8;
         const pDur = pauseDurs[m.qIdx] ?? 0;
         const aSpoken = m.aIdx !== null ? segDurs[m.aIdx] ?? 2.6 : undefined;
         const totalSec = Number((qSpoken + pDur + (aSpoken ?? 0)).toFixed(3));
+        if (m.isOutro) outroStartSec = winCursor;
+        if (qSpoken > 0.05) {
+          speechWindows.push({ start: winCursor, end: winCursor + qSpoken });
+        }
+        if (aSpoken && aSpoken > 0.05) {
+          const ansStart = winCursor + qSpoken + pDur;
+          speechWindows.push({ start: ansStart, end: ansStart + aSpoken });
+        }
+        winCursor += totalSec + 0.08;
         return {
           totalSec,
           questionSec: m.aIdx !== null ? qSpoken : undefined,
@@ -672,16 +760,11 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
         };
       });
       durations = timings.map((t) => t.totalSec);
+      if (extraOutroSpeech && segDurs[cardMapping.length]) {
+        outroStartSec = winCursor;
+        speechWindows.push({ start: winCursor, end: winCursor + segDurs[cardMapping.length] });
+      }
     }
-
-    const nextAudioUrl = URL.createObjectURL(audioFile);
-    setGeneratedAudioUrl((prev) => {
-      if (prev) URL.revokeObjectURL(prev);
-      return nextAudioUrl;
-    });
-    setGeneratedAudioFile(audioFile);
-    setGeneratedDurations(durations);
-    setGeneratedTimings(timings);
 
     const proj = reelCardsToLessonProject(cards, {
       title: lessonTitle,
@@ -689,11 +772,43 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
       compositionId: sceneJsonOverride ? undefined : selectedComposition,
       cardDurationsSec: durations,
       cardTimings: timings,
-      audioFileName: safeFileName,
+      audioFileName: rawFileName,
       sceneJsonOverride,
       watermark: watermarkConfig,
     });
-    return { audioFile, durations, timings, project: proj };
+
+    let finalAudioFile: File = rawAudioFile;
+    if (bgmPreset !== 'none' && bgmVolume > 0) {
+      setTtsStageLabel('Đang hòa âm nhạc nền + giọng đọc...');
+      const mixed = await mixVoiceWithBgmPreset({
+        voiceFile: rawAudioFile,
+        bgmPreset,
+        bgmVolume,
+        speechWindows,
+        outroStartSec,
+        minTotalDurationSec: proj.duration,
+        outputFileName: `${safeSlug}_bgm.wav`,
+      });
+      if (mixed.file) {
+        finalAudioFile = mixed.file;
+      }
+    }
+
+    const nextAudioUrl = URL.createObjectURL(finalAudioFile);
+    setGeneratedAudioUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return nextAudioUrl;
+    });
+    setGeneratedAudioFile(finalAudioFile);
+    setGeneratedDurations(durations);
+    setGeneratedTimings(timings);
+    setSynthesizedAudioSig(signatureAtStart);
+
+    const syncedProj: LessonProject = {
+      ...proj,
+      audioFileName: finalAudioFile.name,
+    };
+    return { audioFile: finalAudioFile, durations, timings, project: syncedProj };
   };
 
   const handleGeneratePreviewVideoAudio = async () => {
@@ -706,7 +821,7 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
       setPreviewViewMode('video');
       setVideoTime(0);
       setIsVideoPlaying(true);
-      setExportNotice('Đã tạo giọng đọc chuẩn & đồng bộ vào Video 9:16 xem thử!');
+      setExportNotice('Đã tạo giọng đọc chuẩn kèm nhạc nền & đồng bộ vào Video 9:16!');
     } catch (err) {
       setStudioError(err instanceof Error ? err.message : 'Lỗi khi tạo Audio TTS.');
     } finally {
@@ -732,8 +847,8 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
       let targetProject = previewProject;
       let targetAudio = generatedAudioFile;
 
-      if (!targetAudio) {
-        setExportStageLabel('Đang tạo giọng đọc bài học (TTS)...');
+      if (!targetAudio || synthesizedAudioSig !== currentAudioSignature) {
+        setExportStageLabel('Đang tạo lại giọng đọc & nhạc nền cho video mới...');
         const bundled = await synthesizeLessonAudioBundle();
         targetProject = bundled.project;
         targetAudio = bundled.audioFile;
@@ -742,6 +857,10 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
       if (controller.signal.aborted) {
         throw new ExportAbortedError();
       }
+
+      const safeSlug =
+        lessonTitle.replace(/[^a-zA-Z0-9-_]+/g, '_').slice(0, 32) || 'english_reels';
+      const uniqueExportBase = `${safeSlug}_reels_${Date.now().toString(36).slice(-5)}`;
 
       const result = await exportProjectToVideo(
         targetProject,
@@ -758,6 +877,7 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
         },
         {
           signal: controller.signal,
+          customFileBase: uniqueExportBase,
           alsoSaveToServerOutput: true,
           sourceTab: 'English Reels',
         },
@@ -1259,28 +1379,41 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
                   <div className="grid grid-cols-2 gap-2">
                     <div>
                       <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                        Phiên âm IPA (tùy chọn)
-                      </label>
-                      <input
-                        type="text"
-                        value={activeCard.phonetic || ''}
-                        onChange={(e) => updateCard(safeActiveIdx, { phonetic: e.target.value })}
-                        placeholder="/ˈnætʃ.ər.əl/"
-                        className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-lg font-mono"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                        Bản dịch / Nghĩa
+                        Dịch nghĩa / Giải thích từ vựng
                       </label>
                       <input
                         type="text"
                         value={activeCard.translation || ''}
                         onChange={(e) => updateCard(safeActiveIdx, { translation: e.target.value })}
-                        placeholder="Điền bản dịch tiếng Việt..."
+                        placeholder="Giải thích nghĩa từ khó / câu..."
                         className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-lg"
                       />
                     </div>
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                        Ghi chú ngữ pháp (tùy chọn)
+                      </label>
+                      <input
+                        type="text"
+                        value={activeCard.grammarNote || ''}
+                        onChange={(e) => updateCard(safeActiveIdx, { grammarNote: e.target.value })}
+                        placeholder="vd: be going to + V (dự định)..."
+                        className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-lg"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                      Phiên âm IPA (chỉ dùng nếu bài học từ vựng cần)
+                    </label>
+                    <input
+                      type="text"
+                      value={activeCard.phonetic || ''}
+                      onChange={(e) => updateCard(safeActiveIdx, { phonetic: e.target.value })}
+                      placeholder="Để trống nếu là bài đọc hiểu..."
+                      className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-lg font-mono"
+                    />
                   </div>
 
                   <div>
@@ -1297,6 +1430,20 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
 
                   {activeCard.type === 'quiz' && (
                     <div className="pt-2 border-t border-slate-200 space-y-2">
+                      <div>
+                        <label className="block text-[11px] font-semibold text-indigo-800 mb-1">
+                          Đoạn văn đối chiếu hiển thị trên thẻ Quiz (giúp người xem đọc lại khi trả lời)
+                        </label>
+                        <textarea
+                          rows={3}
+                          value={activeCard.contextExcerpt || ''}
+                          onChange={(e) =>
+                            updateCard(safeActiveIdx, { contextExcerpt: e.target.value })
+                          }
+                          placeholder="Full paragraph / reading passage shown during question & 5s countdown..."
+                          className="w-full p-2 text-xs bg-white border border-slate-200 rounded-lg leading-relaxed"
+                        />
+                      </div>
                       <label className="block text-[11px] font-semibold text-amber-800">
                         Lựa chọn đáp án Quiz &amp; Đếm ngược suy nghĩ
                       </label>
@@ -1877,6 +2024,42 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
                 onChange={(e) => setTtsRate(Number(e.target.value))}
                 className="w-full accent-indigo-600 h-1.5"
               />
+            </div>
+
+            <div className="grid grid-cols-2 gap-2 pt-1 border-t border-slate-200/80">
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                  Nhạc nền (Outro &amp; Bài học)
+                </label>
+                <select
+                  aria-label="Nhạc nền English Reels"
+                  value={bgmPreset}
+                  onChange={(e) => setBgmPreset(e.target.value as StudioBgmPresetId)}
+                  className="w-full px-2 py-1.5 text-xs bg-white border border-slate-200 rounded-lg"
+                >
+                  {STUDIO_BGM_PRESETS.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                  Âm lượng nhạc ({Math.round(bgmVolume * 100)}%)
+                </label>
+                <input
+                  type="range"
+                  aria-label="Âm lượng nhạc nền English Reels"
+                  disabled={bgmPreset === 'none'}
+                  min={0}
+                  max={0.45}
+                  step={0.02}
+                  value={bgmVolume}
+                  onChange={(e) => setBgmVolume(Number(e.target.value))}
+                  className="w-full accent-indigo-600 h-1.5 mt-2 disabled:opacity-40"
+                />
+              </div>
             </div>
 
             <div className="grid grid-cols-2 gap-2">

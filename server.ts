@@ -34,6 +34,49 @@ import {
   translateLinesWithGeminiOrFree,
 } from './src/server/mediaHelpers.ts';
 
+const PERSISTED_API_KEYS_FILE = path.resolve('.studio-tmp', 'api-keys.json');
+
+interface PersistedApiKeys {
+  elevenLabsApiKey: string;
+  geminiApiKey: string;
+  updatedAt?: number;
+}
+
+function loadPersistedApiKeysSync(): PersistedApiKeys {
+  try {
+    if (!fs.existsSync(PERSISTED_API_KEYS_FILE)) {
+      return { elevenLabsApiKey: '', geminiApiKey: '' };
+    }
+    const raw = fs.readFileSync(PERSISTED_API_KEYS_FILE, 'utf8');
+    const parsed = JSON.parse(raw) as Partial<PersistedApiKeys>;
+    return {
+      elevenLabsApiKey: typeof parsed?.elevenLabsApiKey === 'string' ? parsed.elevenLabsApiKey.trim() : '',
+      geminiApiKey: typeof parsed?.geminiApiKey === 'string' ? parsed.geminiApiKey.trim() : '',
+      updatedAt: typeof parsed?.updatedAt === 'number' ? parsed.updatedAt : undefined,
+    };
+  } catch {
+    return { elevenLabsApiKey: '', geminiApiKey: '' };
+  }
+}
+
+async function savePersistedApiKeys(partial: Partial<PersistedApiKeys>): Promise<PersistedApiKeys> {
+  const current = loadPersistedApiKeysSync();
+  const next: PersistedApiKeys = {
+    elevenLabsApiKey:
+      partial.elevenLabsApiKey !== undefined
+        ? String(partial.elevenLabsApiKey || '').trim()
+        : current.elevenLabsApiKey,
+    geminiApiKey:
+      partial.geminiApiKey !== undefined
+        ? String(partial.geminiApiKey || '').trim()
+        : current.geminiApiKey,
+    updatedAt: Date.now(),
+  };
+  await fs.promises.mkdir(path.dirname(PERSISTED_API_KEYS_FILE), { recursive: true });
+  await fs.promises.writeFile(PERSISTED_API_KEYS_FILE, JSON.stringify(next, null, 2), 'utf8');
+  return next;
+}
+
 function resolveClientAndEnvKeys(
   req: express.Request,
   body?: Record<string, any> | null,
@@ -54,10 +97,13 @@ function resolveClientAndEnvKeys(
       : '';
   const bodyGemini =
     typeof body?.geminiApiKey === 'string' ? body.geminiApiKey.trim() : '';
+  const persisted = loadPersistedApiKeysSync();
 
   return {
-    elevenLabsApiKey: headerEleven || bodyEleven || (process.env.ELEVENLABS_API_KEY || '').trim(),
-    geminiApiKey: headerGemini || bodyGemini || (process.env.GEMINI_API_KEY || '').trim(),
+    elevenLabsApiKey:
+      headerEleven || bodyEleven || persisted.elevenLabsApiKey || (process.env.ELEVENLABS_API_KEY || '').trim(),
+    geminiApiKey:
+      headerGemini || bodyGemini || persisted.geminiApiKey || (process.env.GEMINI_API_KEY || '').trim(),
   };
 }
 
@@ -742,16 +788,51 @@ async function startServer(): Promise<void> {
   const app = express();
   const port = Number(process.env.PORT) || 3000;
 
-  app.get('/api/health', (_req, res) => {
+  app.get('/api/health', (req, res) => {
     const { baseDir } = resolveSafeOutputDir();
+    const resolved = resolveClientAndEnvKeys(req);
     res.json({
       ok: true,
       encoder: 'ffmpeg-h264-aac',
-      hasGeminiKey: Boolean(process.env.GEMINI_API_KEY),
-      hasElevenLabsKey: Boolean(process.env.ELEVENLABS_API_KEY),
+      hasGeminiKey: Boolean(resolved.geminiApiKey),
+      hasElevenLabsKey: Boolean(resolved.elevenLabsApiKey),
       hasWhisperLocal: true,
       outputDir: baseDir,
     });
+  });
+
+  app.get('/api/settings/api-keys', (_req, res) => {
+    const persisted = loadPersistedApiKeysSync();
+    res.json({
+      ok: true,
+      elevenLabsApiKey: persisted.elevenLabsApiKey,
+      geminiApiKey: persisted.geminiApiKey,
+      hasElevenLabsKey: Boolean(persisted.elevenLabsApiKey || process.env.ELEVENLABS_API_KEY),
+      hasGeminiKey: Boolean(persisted.geminiApiKey || process.env.GEMINI_API_KEY),
+    });
+  });
+
+  app.post('/api/settings/api-keys', express.json({ limit: '64kb' }), async (req, res) => {
+    try {
+      const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, unknown>;
+      const patch: Partial<PersistedApiKeys> = {};
+      if (typeof body.elevenLabsApiKey === 'string') {
+        patch.elevenLabsApiKey = body.elevenLabsApiKey;
+      } else if (typeof body.elevenlabsApiKey === 'string') {
+        patch.elevenLabsApiKey = body.elevenlabsApiKey;
+      }
+      if (typeof body.geminiApiKey === 'string') {
+        patch.geminiApiKey = body.geminiApiKey;
+      }
+      const saved = await savePersistedApiKeys(patch);
+      res.json({
+        ok: true,
+        hasElevenLabsKey: Boolean(saved.elevenLabsApiKey || process.env.ELEVENLABS_API_KEY),
+        hasGeminiKey: Boolean(saved.geminiApiKey || process.env.GEMINI_API_KEY),
+      });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Không lưu được API key.' });
+    }
   });
 
   // ── Direct Output Folder Save / List / Preview / Open API ─────────────────
@@ -2394,6 +2475,7 @@ async function startServer(): Promise<void> {
         mode === 'adapt-url'
           ? `You are an expert ESL curriculum designer for Read-Along karaoke videos.
 Convert and adapt the scraped webpage content below into a clean, engaging English read-along passage tailored to ${levelGuidance[level]}
+CRITICAL: Strip out any worksheet scaffolding or exercise labels (such as "Practice Reading English Exercises", "English Reading Exercises for Beginner", "## Exercise 1", "Part 1", "Task 1", navigation menus, or instructions). Keep ONLY the clean story title and body sentences.
 Target total length: around ${wordCount} words.
 Source title: ${sourceTitle || 'Web Article'}
 Source content:
@@ -2409,6 +2491,7 @@ Return ONLY valid JSON with keys:
 }`
           : `You are an expert ESL curriculum designer for Read-Along karaoke videos.
 Write an original, engaging English read-along passage about: "${topic}"
+CRITICAL: Do NOT include worksheet labels like "Practice Reading Exercises", "Exercise 1", "Part 1", or markdown headings inside the title or body text.
 Target proficiency: ${levelGuidance[level]}
 Target total length: around ${wordCount} words.
 Return ONLY valid JSON with keys:
@@ -2442,17 +2525,24 @@ Return ONLY valid JSON with keys:
         level?: string;
         text?: string;
       };
+      const isScaffolding = (line: string) =>
+        /^(?:#{1,6}\s*)?(?:(?:practice\s+reading|english\s+reading)\b.*|(?:exercise|part|task|section|unit|lesson|reading)\s*(?:#|no\.?)?\s*\d+\b[:.\-\s]*)$/i.test(
+          line.trim(),
+        );
       const cleanLines = (parsed.text || '')
         .split(/\r?\n/)
-        .map((line) => line.replace(/^[-•*\d.)\s]+/, '').trim())
-        .filter(Boolean);
+        .map((line) => line.replace(/^[#*\-\u2022\d.)\s]+/, '').trim())
+        .filter((line) => Boolean(line) && !isScaffolding(line));
       if (cleanLines.length === 0) {
         res.status(502).json({ error: 'AI trả về bài đọc rỗng.' });
         return;
       }
+      const cleanTitle = (parsed.title || sourceTitle || topic || 'Reading Along')
+        .replace(/^#+\s*/, '')
+        .trim();
       res.json({
         ok: true,
-        title: (parsed.title || sourceTitle || topic || 'Reading Along').trim(),
+        title: isScaffolding(cleanTitle) ? 'Reading Along' : cleanTitle,
         topicBadge: (parsed.topicBadge || `CEFR ${level} · READING`).trim(),
         level,
         text: cleanLines.join('\n'),

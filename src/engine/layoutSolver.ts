@@ -109,6 +109,10 @@ export function estimateElementHalfExtents(el: SceneElement): {
         variant === 'syllable-stress'
       ) {
         baseHalfH = 128;
+      } else if (variant === 'css-browser-mockup') {
+        const speechLen = (data?.speechText || data?.subtitle || '').length;
+        const estLines = Math.min(5, Math.max(2, Math.ceil(speechLen / 52)));
+        baseHalfH = Math.round((256 + (estLines - 2) * 32) / 2);
       } else {
         baseHalfH = 132;
       }
@@ -163,16 +167,16 @@ export function estimateElementBounds(el: SceneElement): ElementBounds {
   };
 }
 
-function getZoneTier(type: SceneElementType): number {
-  switch (type) {
+function getZoneTier(el: SceneElement): number {
+  switch (el.type) {
     case 'comparison-strip':
-      return 0;
+      return el.layout.y >= 320 ? 3.5 : 0;
     case 'topic-pill':
       return 1;
     case 'illustration-prop':
     case 'word-stack':
     case 'shape-3d':
-      return 2;
+      return el.layout.y >= 1150 ? 3.8 : 2;
     case 'sentence-card':
       return 3;
     case 'tone-meter':
@@ -219,7 +223,7 @@ export function resolveProjectOverlaps(elements: SceneElement[]): SceneElement[]
 
   // Sort strictly by zone tier -> original Y -> startTime for deterministic topological packing
   visualEls.sort((a, b) => {
-    const tierDiff = getZoneTier(a.type) - getZoneTier(b.type);
+    const tierDiff = getZoneTier(a) - getZoneTier(b);
     if (tierDiff !== 0) return tierDiff;
     const yDiff = a.layout.y - b.layout.y;
     if (Math.abs(yDiff) > 4) return yDiff;

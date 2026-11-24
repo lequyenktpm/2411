@@ -408,6 +408,10 @@ export interface ReadingAlongRenderOptions {
   currentTime: number;
   totalDuration: number;
   contentDuration?: number;
+  introEnabled?: boolean;
+  introSeconds?: number;
+  introTitle?: string;
+  introSubtitle?: string;
   paletteId: ReadingBookPalette['id'];
   illustrationStyle: ReadingIllustrationStyle;
   bookFrame?: ReadingBookFrameId;
@@ -416,6 +420,8 @@ export interface ReadingAlongRenderOptions {
 }
 
 export interface ReadingTimelineMetrics {
+  introEnd: number;
+  hasIntro: boolean;
   lastWordEnd: number;
   contentEnd: number;
   outroStart: number;
@@ -425,17 +431,24 @@ export interface ReadingTimelineMetrics {
 
 /**
  * Guarantees Outro never overlaps active words by placing outroStart strictly
- * after both contentDuration and the last spoken word's end timestamp.
+ * after both contentDuration and the last spoken word's end timestamp,
+ * and accounts for optional spoken Intro window before words start.
  */
 export function computeReadingTimelineMetrics(params: {
   words: WordTiming[];
   totalDuration?: number;
   contentDuration?: number;
+  introEnabled?: boolean;
+  introSeconds?: number;
   outroSeconds: number;
   outroText?: string;
 }): ReadingTimelineMetrics {
+  const introSec =
+    params.introEnabled !== false && Number(params.introSeconds) > 0
+      ? Number(params.introSeconds)
+      : 0;
   const lastWordEnd = params.words.reduce((mx, w) => Math.max(mx, Number(w.end) || 0), 0);
-  const contentEnd = Math.max(Number(params.contentDuration) || 0, lastWordEnd, 1);
+  const contentEnd = Math.max(introSec + 1, Number(params.contentDuration) || 0, lastWordEnd);
   const outroSec = Math.max(0, Number(params.outroSeconds) || 0);
   const hasOutroText = params.outroText === undefined ? true : params.outroText.trim().length > 0;
   const hasOutro = outroSec > 0 && hasOutroText;
@@ -447,6 +460,8 @@ export function computeReadingTimelineMetrics(params: {
     ? Math.max(baseTotal, outroStart + outroSec)
     : baseTotal;
   return {
+    introEnd: Number(introSec.toFixed(3)),
+    hasIntro: introSec > 0.15,
     lastWordEnd: Number(lastWordEnd.toFixed(3)),
     contentEnd: Number(contentEnd.toFixed(3)),
     outroStart: Number(outroStart.toFixed(3)),
@@ -942,162 +957,263 @@ export function renderReadingAlongFrame(
     words: opts.words,
     totalDuration: opts.totalDuration,
     contentDuration: opts.contentDuration,
+    introEnabled: opts.introEnabled,
+    introSeconds: opts.introSeconds,
     outroSeconds: wm.outroSeconds,
     outroText,
   });
 
-  const wordsList =
-    opts.words.length > 0
-      ? opts.words
-      : buildEstimatedReadingWords(opts.text, timeline.contentEnd);
-
-  const fontSize = Math.max(15, Math.round(refH * 0.0235));
-  const lineHeight = Math.round(fontSize * 1.72);
-  const wordGap = Math.round(fontSize * 0.34);
-  ctx.font = `600 ${fontSize}px "Plus Jakarta Sans", sans-serif`;
-
   const startBodyY = dividerY + refH * 0.026;
   const maxBodyY = bookY + bookH - refH * 0.075;
+  const inIntroPhase = timeline.hasIntro && opts.currentTime < timeline.introEnd;
 
-  const pages = paginateReadingWords(
-    wordsList,
-    (w) => ctx.measureText(w).width,
-    {
-      startX: padX,
-      maxW: contentW,
-      startY: startBodyY,
-      maxY: maxBodyY,
-      lineHeight,
-      wordGap,
-    },
-  );
-
-  // Spiral notebook ruled lines
-  if (bookFrame === 'spiral-notebook') {
+  if (inIntroPhase) {
+    // Dedicated Intro card ("Hôm nay học gì?") inside the book before words start
     ctx.save();
-    ctx.strokeStyle = 'rgba(148, 163, 184, 0.25)';
-    ctx.lineWidth = 1.5;
-    for (let ly = startBodyY + fontSize + 8; ly <= maxBodyY + fontSize; ly += lineHeight) {
-      ctx.beginPath();
-      ctx.moveTo(padX, ly);
-      ctx.lineTo(padX + contentW, ly);
-      ctx.stroke();
-    }
-    ctx.restore();
-  }
-
-  // Find global active word index
-  const clampedWordTime = Math.min(opts.currentTime, Math.max(0, timeline.contentEnd - 0.001));
-  let globalActiveIdx = wordsList.findIndex(
-    (w) => clampedWordTime >= w.start && clampedWordTime <= w.end,
-  );
-  if (globalActiveIdx === -1 && wordsList.length > 0) {
-    for (let i = wordsList.length - 1; i >= 0; i--) {
-      if (clampedWordTime >= wordsList[i].start) {
-        globalActiveIdx = i;
-        break;
-      }
-    }
-    if (globalActiveIdx === -1) globalActiveIdx = 0;
-  }
-
-  // Pick page holding globalActiveIdx
-  const activePageIdx = Math.max(
-    0,
-    pages.findIndex((pg) => pg.some((p) => p.index === globalActiveIdx)),
-  );
-  const activePageWords = pages[activePageIdx] ?? pages[0] ?? [];
-
-  // Draw words on current page
-  for (let i = 0; i < activePageWords.length; i++) {
-    const p = activePageWords[i];
-    const isActive = p.index === globalActiveIdx;
-    const isSpoken = p.index < globalActiveIdx;
-
-    if (isActive) {
-      ctx.save();
-      ctx.fillStyle =
-        pointerStyle === 'highlighter'
-          ? 'rgba(250, 204, 21, 0.9)'
-          : isChalkboard
-            ? '#F59E0B'
-            : palette.highlightBg;
-      roundRectPath(
-        ctx,
-        p.x - 8,
-        p.y - 6,
-        p.w + 16,
-        fontSize + 12,
-        10,
-      );
-      ctx.fill();
-      ctx.restore();
-      ctx.fillStyle =
-        pointerStyle === 'highlighter'
-          ? '#0F172A'
-          : isChalkboard
-            ? '#0F172A'
-            : palette.highlightText;
-    } else if (isSpoken) {
-      ctx.fillStyle = isChalkboard ? '#CBD5E1' : palette.spokenText;
-    } else {
-      ctx.fillStyle = isChalkboard ? '#F8FAFC' : palette.bodyText;
-    }
-    ctx.font = `${isActive ? 700 : 600} ${fontSize}px "Plus Jakarta Sans", sans-serif`;
-    ctx.textBaseline = 'top';
-    ctx.fillText(p.item.word, p.x, p.y);
-  }
-
-  // Multi-page indicator if >= 2 pages
-  if (pages.length > 1) {
-    ctx.save();
-    const pgLabel = `Trang ${activePageIdx + 1}/${pages.length}`;
-    ctx.font = `700 ${Math.max(12, Math.round(refH * 0.014))}px "Plus Jakarta Sans", sans-serif`;
-    ctx.fillStyle = isChalkboard ? 'rgba(255,255,255,0.65)' : palette.spokenText;
-    ctx.textAlign = 'right';
-    ctx.textBaseline = 'bottom';
-    ctx.fillText(pgLabel, bookX + bookW - bookW * 0.05, bookY + bookH - Math.max(14, bookH * 0.026));
-    ctx.restore();
-  }
-
-  // Pointer cursor smoothly glided toward next word on the same page
-  const activePosIdx = activePageWords.findIndex((p) => p.index === globalActiveIdx);
-  if (activePosIdx >= 0 && activePageWords[activePosIdx]) {
-    const target = activePageWords[activePosIdx];
-    const nextTarget =
-      activePosIdx + 1 < activePageWords.length ? activePageWords[activePosIdx + 1] : null;
-    let handX = target.x + target.w / 2;
-    let handY = target.y + fontSize + 10;
-    let interpW = target.w;
-
-    if (nextTarget) {
-      const wordDur = Math.max(0.08, target.item.end - target.item.start);
-      const transitionWindow = Math.min(0.14, wordDur * 0.34);
-      const timeRemaining = target.item.end - clampedWordTime;
-      if (timeRemaining >= 0 && timeRemaining < transitionWindow) {
-        const rawT = 1 - timeRemaining / transitionWindow;
-        const ease = rawT * rawT * (3 - 2 * rawT);
-        const nextX = nextTarget.x + nextTarget.w / 2;
-        const nextY = nextTarget.y + fontSize + 10;
-        handX = handX + (nextX - handX) * ease;
-        handY = handY + (nextY - handY) * ease;
-        interpW = target.w + (nextTarget.w - target.w) * ease;
-      }
-    }
-
-    const scale = Math.max(0.6, Math.min(width, height) / 1080);
-    drawReadingPointer(
-      ctx,
-      pointerStyle,
-      handX,
-      handY,
-      interpW,
-      fontSize,
-      palette,
-      scale,
-      opts.currentTime,
-      isChalkboard,
+    const introProgress = Math.max(
+      0,
+      Math.min(1, opts.currentTime / Math.max(0.25, timeline.introEnd)),
     );
+    const introFade = Math.min(1, opts.currentTime / 0.35 + 0.15);
+    ctx.globalAlpha = introFade;
+
+    const cardPad = Math.max(18, contentW * 0.05);
+    const introBoxY = startBodyY + Math.max(8, (maxBodyY - startBodyY) * 0.06);
+    const introBoxH = Math.max(160, (maxBodyY - startBodyY) * 0.78);
+    ctx.fillStyle = isChalkboard ? 'rgba(15, 23, 42, 0.55)' : palette.headerBg;
+    roundRectPath(ctx, padX, introBoxY, contentW, introBoxH, 20);
+    ctx.fill();
+    ctx.strokeStyle = isChalkboard ? 'rgba(253, 230, 138, 0.35)' : palette.pageBorder;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Intro header pill
+    const introKicker = (opts.introTitle || 'HÔM NAY HỌC GÌ? · TODAY GOAL').trim();
+    const kickerFs = Math.max(13, Math.round(refH * 0.016));
+    ctx.font = `800 ${kickerFs}px "Plus Jakarta Sans", sans-serif`;
+    const kickerW = Math.min(contentW - cardPad * 2, ctx.measureText(introKicker).width + 28);
+    const kickerH = Math.max(28, Math.round(refH * 0.032));
+    const kickerX = padX + (contentW - kickerW) / 2;
+    const kickerY = introBoxY + cardPad;
+    ctx.fillStyle = isChalkboard ? '#F59E0B' : palette.accent;
+    roundRectPath(ctx, kickerX, kickerY, kickerW, kickerH, kickerH / 2);
+    ctx.fill();
+    ctx.fillStyle = '#FFFFFF';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(introKicker, padX + contentW / 2, kickerY + kickerH / 2, kickerW - 18);
+
+    // Big lesson title
+    const heroTitleFs = Math.max(22, Math.round(refH * 0.032));
+    ctx.font = `800 ${heroTitleFs}px "Outfit", "Plus Jakarta Sans", sans-serif`;
+    ctx.fillStyle = isChalkboard ? '#F8FAFC' : palette.headerText;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    const titleStartY = kickerY + kickerH + Math.max(16, refH * 0.024);
+    ctx.fillText(opts.title || 'Reading Practice', padX + contentW / 2, titleStartY, contentW - cardPad * 2);
+
+    // Wrapped intro subtitle / goal
+    const introSub =
+      (opts.introSubtitle || `Today we are going to read "${opts.title || 'this story'}". Listen carefully and follow word by word!`).trim();
+    const subFs = Math.max(15, Math.round(refH * 0.019));
+    ctx.font = `600 ${subFs}px "Plus Jakarta Sans", sans-serif`;
+    ctx.fillStyle = isChalkboard ? '#CBD5E1' : palette.bodyText;
+    const maxSubW = contentW - cardPad * 2.2;
+    const wordsArr = introSub.split(/\s+/).filter(Boolean);
+    const wrappedSubLines: string[] = [];
+    let curLine = '';
+    for (const word of wordsArr) {
+      const candidate = curLine ? `${curLine} ${word}` : word;
+      if (ctx.measureText(candidate).width <= maxSubW) {
+        curLine = candidate;
+      } else {
+        if (curLine) wrappedSubLines.push(curLine);
+        curLine = word;
+      }
+    }
+    if (curLine) wrappedSubLines.push(curLine);
+
+    const subLineH = Math.round(subFs * 1.48);
+    const subStartY = titleStartY + heroTitleFs + Math.max(16, refH * 0.022);
+    wrappedSubLines.slice(0, 4).forEach((ln, idx) => {
+      ctx.fillText(ln, padX + contentW / 2, subStartY + idx * subLineH, maxSubW);
+    });
+
+    // Progress bar at bottom of Intro card
+    const barW = Math.min(contentW * 0.68, 460);
+    const barH = 10;
+    const barX = padX + (contentW - barW) / 2;
+    const barY = introBoxY + introBoxH - cardPad - 24;
+    ctx.fillStyle = isChalkboard ? 'rgba(255,255,255,0.16)' : 'rgba(15,23,42,0.1)';
+    roundRectPath(ctx, barX, barY, barW, barH, barH / 2);
+    ctx.fill();
+    ctx.fillStyle = isChalkboard ? '#FACC15' : palette.accent;
+    roundRectPath(ctx, barX, barY, Math.max(16, barW * introProgress), barH, barH / 2);
+    ctx.fill();
+
+    ctx.font = `700 ${Math.max(12, Math.round(refH * 0.014))}px "Plus Jakarta Sans", sans-serif`;
+    ctx.fillStyle = isChalkboard ? '#FDE68A' : palette.spokenText;
+    ctx.fillText('Chuẩn bị bắt đầu đọc...', padX + contentW / 2, barY + barH + 10);
+    ctx.restore();
+  } else {
+    const bodyDuration = Math.max(1, timeline.contentEnd - timeline.introEnd);
+    const wordsList =
+      opts.words.length > 0
+        ? opts.words
+        : buildEstimatedReadingWords(opts.text, bodyDuration).map((w) => ({
+            ...w,
+            start: Number((w.start + timeline.introEnd).toFixed(3)),
+            end: Number((w.end + timeline.introEnd).toFixed(3)),
+          }));
+
+    const fontSize = Math.max(15, Math.round(refH * 0.0235));
+    const lineHeight = Math.round(fontSize * 1.72);
+    const wordGap = Math.round(fontSize * 0.34);
+    ctx.font = `600 ${fontSize}px "Plus Jakarta Sans", sans-serif`;
+
+    const pages = paginateReadingWords(
+      wordsList,
+      (w) => ctx.measureText(w).width,
+      {
+        startX: padX,
+        maxW: contentW,
+        startY: startBodyY,
+        maxY: maxBodyY,
+        lineHeight,
+        wordGap,
+      },
+    );
+
+    // Spiral notebook ruled lines
+    if (bookFrame === 'spiral-notebook') {
+      ctx.save();
+      ctx.strokeStyle = 'rgba(148, 163, 184, 0.25)';
+      ctx.lineWidth = 1.5;
+      for (let ly = startBodyY + fontSize + 8; ly <= maxBodyY + fontSize; ly += lineHeight) {
+        ctx.beginPath();
+        ctx.moveTo(padX, ly);
+        ctx.lineTo(padX + contentW, ly);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    // Find global active word index
+    const clampedWordTime = Math.max(
+      timeline.introEnd,
+      Math.min(opts.currentTime, Math.max(timeline.introEnd, timeline.contentEnd - 0.001)),
+    );
+    let globalActiveIdx = wordsList.findIndex(
+      (w) => clampedWordTime >= w.start && clampedWordTime <= w.end,
+    );
+    if (globalActiveIdx === -1 && wordsList.length > 0) {
+      for (let i = wordsList.length - 1; i >= 0; i--) {
+        if (clampedWordTime >= wordsList[i].start) {
+          globalActiveIdx = i;
+          break;
+        }
+      }
+      if (globalActiveIdx === -1) globalActiveIdx = 0;
+    }
+
+    // Pick page holding globalActiveIdx
+    const activePageIdx = Math.max(
+      0,
+      pages.findIndex((pg) => pg.some((p) => p.index === globalActiveIdx)),
+    );
+    const activePageWords = pages[activePageIdx] ?? pages[0] ?? [];
+
+    // Draw words on current page
+    for (let i = 0; i < activePageWords.length; i++) {
+      const p = activePageWords[i];
+      const isActive = p.index === globalActiveIdx;
+      const isSpoken = p.index < globalActiveIdx;
+
+      if (isActive) {
+        ctx.save();
+        ctx.fillStyle =
+          pointerStyle === 'highlighter'
+            ? 'rgba(250, 204, 21, 0.9)'
+            : isChalkboard
+              ? '#F59E0B'
+              : palette.highlightBg;
+        roundRectPath(
+          ctx,
+          p.x - 8,
+          p.y - 6,
+          p.w + 16,
+          fontSize + 12,
+          10,
+        );
+        ctx.fill();
+        ctx.restore();
+        ctx.fillStyle =
+          pointerStyle === 'highlighter'
+            ? '#0F172A'
+            : isChalkboard
+              ? '#0F172A'
+              : palette.highlightText;
+      } else if (isSpoken) {
+        ctx.fillStyle = isChalkboard ? '#CBD5E1' : palette.spokenText;
+      } else {
+        ctx.fillStyle = isChalkboard ? '#F8FAFC' : palette.bodyText;
+      }
+      ctx.font = `${isActive ? 700 : 600} ${fontSize}px "Plus Jakarta Sans", sans-serif`;
+      ctx.textBaseline = 'top';
+      ctx.fillText(p.item.word, p.x, p.y);
+    }
+
+    // Multi-page indicator if >= 2 pages
+    if (pages.length > 1) {
+      ctx.save();
+      const pgLabel = `Trang ${activePageIdx + 1}/${pages.length}`;
+      ctx.font = `700 ${Math.max(12, Math.round(refH * 0.014))}px "Plus Jakarta Sans", sans-serif`;
+      ctx.fillStyle = isChalkboard ? 'rgba(255,255,255,0.65)' : palette.spokenText;
+      ctx.textAlign = 'right';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText(pgLabel, bookX + bookW - bookW * 0.05, bookY + bookH - Math.max(14, bookH * 0.026));
+      ctx.restore();
+    }
+
+    // Pointer cursor smoothly glided toward next word on the same page
+    const activePosIdx = activePageWords.findIndex((p) => p.index === globalActiveIdx);
+    if (activePosIdx >= 0 && activePageWords[activePosIdx]) {
+      const target = activePageWords[activePosIdx];
+      const nextTarget =
+        activePosIdx + 1 < activePageWords.length ? activePageWords[activePosIdx + 1] : null;
+      let handX = target.x + target.w / 2;
+      let handY = target.y + fontSize + 10;
+      let interpW = target.w;
+
+      if (nextTarget) {
+        const wordDur = Math.max(0.08, target.item.end - target.item.start);
+        const transitionWindow = Math.min(0.14, wordDur * 0.34);
+        const timeRemaining = target.item.end - clampedWordTime;
+        if (timeRemaining >= 0 && timeRemaining < transitionWindow) {
+          const rawT = 1 - timeRemaining / transitionWindow;
+          const ease = rawT * rawT * (3 - 2 * rawT);
+          const nextX = nextTarget.x + nextTarget.w / 2;
+          const nextY = nextTarget.y + fontSize + 10;
+          handX = handX + (nextX - handX) * ease;
+          handY = handY + (nextY - handY) * ease;
+          interpW = target.w + (nextTarget.w - target.w) * ease;
+        }
+      }
+
+      const scale = Math.max(0.6, Math.min(width, height) / 1080);
+      drawReadingPointer(
+        ctx,
+        pointerStyle,
+        handX,
+        handY,
+        interpW,
+        fontSize,
+        palette,
+        scale,
+        opts.currentTime,
+        isChalkboard,
+      );
+    }
   }
 
   // Watermark overlay (always visible if enabled & non-empty)

@@ -6,3 +6,8 @@ coverage/
 *.log
 .env*
 !.env.example
+.studio-tmp/api-keys.json
+.studio-tmp/output-meta.json
+.render-tmp/
+output/
+data/

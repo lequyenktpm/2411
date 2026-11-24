@@ -66,7 +66,7 @@ export const ApiKeyInlineControl: React.FC<ApiKeyInlineControlProps> = ({
       <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
         <span className="inline-flex items-center gap-1.5 font-semibold text-slate-800">
           <KeyRound className="w-3.5 h-3.5 text-indigo-600" />
-          <span>{label} (Lưu trực tiếp tại trình duyệt local)</span>
+          <span>{label} (Tự động lưu trên máy, không cần nhập lại)</span>
         </span>
         <span
           className={`px-1.5 py-0.5 text-[10px] font-bold rounded ${
@@ -78,9 +78,9 @@ export const ApiKeyInlineControl: React.FC<ApiKeyInlineControlProps> = ({
           }`}
         >
           {storedKey
-            ? 'Đã lưu trong App'
+            ? 'Đã lưu vĩnh viễn'
             : hasServerKey
-              ? 'Đang dùng từ .env'
+              ? 'Đã lưu từ Server / .env'
               : 'Chưa nhập Key'}
         </span>
       </div>

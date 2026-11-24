@@ -230,9 +230,11 @@ async function exportWithWebCodecsMp4(
   },
 ): Promise<ExportVideoResult | null> {
   checkAborted(options?.signal);
+  const safeWidth = encoding.width & ~1;
+  const safeHeight = encoding.height & ~1;
   const videoSpec = await pickSupportedVideoCodec(
-    encoding.width,
-    encoding.height,
+    safeWidth,
+    safeHeight,
     encoding.fps,
     encoding.videoBitrate,
   );
@@ -259,9 +261,17 @@ async function exportWithWebCodecsMp4(
     }
   }
 
+  const totalAudioFrames = preparedAudio
+    ? Math.min(
+        preparedAudio.buffer.length,
+        Math.ceil(Math.max(0.1, project.duration) * preparedAudio.spec.sampleRate),
+      )
+    : 0;
+  const hasValidAudio = Boolean(preparedAudio && totalAudioFrames > 0);
+
   const offscreenCanvas = document.createElement('canvas');
-  offscreenCanvas.width = encoding.width;
-  offscreenCanvas.height = encoding.height;
+  offscreenCanvas.width = safeWidth;
+  offscreenCanvas.height = safeHeight;
   const ctx = offscreenCanvas.getContext('2d', { alpha: false });
   if (!ctx) {
     return null;
@@ -271,11 +281,11 @@ async function exportWithWebCodecsMp4(
     target: new ArrayBufferTarget(),
     video: {
       codec: videoSpec.muxerCodec,
-      width: encoding.width,
-      height: encoding.height,
+      width: safeWidth,
+      height: safeHeight,
       frameRate: encoding.fps,
     },
-    audio: preparedAudio
+    audio: hasValidAudio && preparedAudio
       ? {
           codec: preparedAudio.spec.muxerCodec,
           numberOfChannels: preparedAudio.spec.channels,
@@ -296,14 +306,14 @@ async function exportWithWebCodecsMp4(
 
   videoEncoder.configure({
     codec: videoSpec.webCodec,
-    width: encoding.width,
-    height: encoding.height,
+    width: safeWidth,
+    height: safeHeight,
     bitrate: encoding.videoBitrate,
     framerate: encoding.fps,
   });
 
   let audioEncoder: AudioEncoder | null = null;
-  if (preparedAudio) {
+  if (hasValidAudio && preparedAudio) {
     audioEncoder = new AudioEncoder({
       output: (chunk, meta) => muxer.addAudioChunk(chunk, meta),
       error: (err) => {
@@ -329,9 +339,9 @@ async function exportWithWebCodecsMp4(
 
       const t = Math.min(project.duration, i / encoding.fps);
       if (options?.customRenderFrame) {
-        options.customRenderFrame(ctx, t, encoding.width, encoding.height);
+        options.customRenderFrame(ctx, t, safeWidth, safeHeight);
       } else {
-        renderScaledProjectFrame(ctx, project, t, encoding.width, encoding.height);
+        renderScaledProjectFrame(ctx, project, t, safeWidth, safeHeight);
       }
 
       const frame = new VideoFrame(offscreenCanvas, {
@@ -353,22 +363,18 @@ async function exportWithWebCodecsMp4(
 
       if (i % 4 === 0 || i === totalFrames - 1) {
         onProgress({
-          progress: 0.05 + ((i + 1) / totalFrames) * (preparedAudio ? 0.78 : 0.88),
-          stageLabel: `Đang dựng & nén MP4 ${encoding.width}×${encoding.height} (${i + 1}/${totalFrames})...`,
+          progress: 0.05 + ((i + 1) / totalFrames) * (hasValidAudio ? 0.78 : 0.88),
+          stageLabel: `Đang dựng & nén MP4 ${safeWidth}×${safeHeight} (${i + 1}/${totalFrames})...`,
         });
         await new Promise((r) => setTimeout(r, 0));
       }
     }
 
-    if (audioEncoder && preparedAudio) {
+    if (audioEncoder && preparedAudio && hasValidAudio) {
       checkAborted(options?.signal);
       onProgress({ progress: 0.86, stageLabel: 'Đang ghép track Audio vào MP4...' });
       const { buffer, spec } = preparedAudio;
       const chunkFrames = 4096;
-      const totalAudioFrames = Math.min(
-        buffer.length,
-        Math.ceil(project.duration * spec.sampleRate),
-      );
 
       for (let offset = 0; offset < totalAudioFrames; offset += chunkFrames) {
         checkAborted(options?.signal);
@@ -407,7 +413,7 @@ async function exportWithWebCodecsMp4(
     muxer.finalize();
     const mp4Blob = new Blob([muxer.target.buffer], { type: 'video/mp4' });
     const base = sanitizeFileBase(options?.customFileBase || project.id);
-    const fileName = options?.customFileBase ? `${base}.mp4` : `${base}_${encoding.height}p.mp4`;
+    const fileName = options?.customFileBase ? `${base}.mp4` : `${base}_${safeHeight}p.mp4`;
     if (!options?.skipDownload) {
       triggerBlobDownload(mp4Blob, fileName);
       onProgress({ progress: 1, stageLabel: 'Đã tải xong file MP4!' });
@@ -418,8 +424,8 @@ async function exportWithWebCodecsMp4(
       format: 'mp4',
       fileName,
       byteLength: mp4Blob.size,
-      width: encoding.width,
-      height: encoding.height,
+      width: safeWidth,
+      height: safeHeight,
       fps: encoding.fps,
       qualityLabel: encoding.qualityLabel,
       blob: mp4Blob,
@@ -435,6 +441,8 @@ async function exportWithWebCodecsMp4(
     } catch {
       // ignore
     }
+    offscreenCanvas.width = 0;
+    offscreenCanvas.height = 0;
   }
 }
 
@@ -546,6 +554,7 @@ async function exportWithServerFfmpeg(
   encoding: ResolvedMp4Encoding,
   onProgress: (info: ExportVideoProgress) => void,
   signal?: AbortSignal,
+  customFileBase?: string,
 ): Promise<ExportVideoResult> {
   checkAborted(signal);
   await ensureProjectAssetsLoaded(project);
@@ -563,6 +572,7 @@ async function exportWithServerFfmpeg(
   }
 
   const { jobId } = (await startRes.json()) as { jobId: string };
+  let offscreenCanvas: HTMLCanvasElement | null = null;
 
   try {
     if (audioFile) {
@@ -587,9 +597,11 @@ async function exportWithServerFfmpeg(
       }
     }
 
-    const offscreenCanvas = document.createElement('canvas');
-    offscreenCanvas.width = encoding.width;
-    offscreenCanvas.height = encoding.height;
+    const safeWidth = encoding.width & ~1;
+    const safeHeight = encoding.height & ~1;
+    offscreenCanvas = document.createElement('canvas');
+    offscreenCanvas.width = safeWidth;
+    offscreenCanvas.height = safeHeight;
     const ctx = offscreenCanvas.getContext('2d', { alpha: false });
     if (!ctx) {
       throw new Error('Không khởi tạo được Canvas 2D để dựng khung hình.');
@@ -618,7 +630,7 @@ async function exportWithServerFfmpeg(
     for (let i = 0; i < totalFrames; i++) {
       checkAborted(signal);
       const t = Math.min(project.duration, i / encoding.fps);
-      renderScaledProjectFrame(ctx, project, t, encoding.width, encoding.height);
+      renderScaledProjectFrame(ctx, project, t, safeWidth, safeHeight);
       const jpeg = await canvasToJpegBlob(offscreenCanvas, 0.85);
 
       if (
@@ -635,7 +647,7 @@ async function exportWithServerFfmpeg(
       if (i % 6 === 0 || i === totalFrames - 1) {
         onProgress({
           progress: 0.05 + ((i + 1) / totalFrames) * 0.8,
-          stageLabel: `Đang dựng khung hình ${encoding.width}×${encoding.height} (${i + 1}/${totalFrames})...`,
+          stageLabel: `Đang dựng khung hình ${safeWidth}×${safeHeight} (${i + 1}/${totalFrames})...`,
         });
       }
 
@@ -652,11 +664,12 @@ async function exportWithServerFfmpeg(
       stageLabel: 'Đang ghép MP4 (FFmpeg H.264 / AAC)...',
     });
 
-    const baseName = sanitizeFileBase(project.id);
+    const baseName = sanitizeFileBase(customFileBase || project.id);
+    const exportBaseName = customFileBase ? baseName : `${baseName}_${safeHeight}p`;
     const finishRes = await fetch(`/api/render/${jobId}/finish`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fileName: `${baseName}_${encoding.height}p` }),
+      body: JSON.stringify({ fileName: exportBaseName }),
       signal,
     });
 
@@ -666,7 +679,7 @@ async function exportWithServerFfmpeg(
     }
 
     const mp4Blob = await finishRes.blob();
-    const fileName = `${baseName}_${encoding.height}p.mp4`;
+    const fileName = `${exportBaseName}.mp4`;
     triggerBlobDownload(mp4Blob, fileName);
 
     onProgress({ progress: 1, stageLabel: 'Đã tải xong file MP4!' });
@@ -674,8 +687,8 @@ async function exportWithServerFfmpeg(
       format: 'mp4',
       fileName,
       byteLength: mp4Blob.size,
-      width: encoding.width,
-      height: encoding.height,
+      width: safeWidth,
+      height: safeHeight,
       fps: encoding.fps,
       qualityLabel: encoding.qualityLabel,
       blob: mp4Blob,
@@ -686,6 +699,11 @@ async function exportWithServerFfmpeg(
       throw new ExportAbortedError();
     }
     throw err;
+  } finally {
+    if (offscreenCanvas) {
+      offscreenCanvas.width = 0;
+      offscreenCanvas.height = 0;
+    }
   }
 }
 
@@ -862,7 +880,14 @@ export async function exportProjectToVideo(
 
   // 2. Fallback path: Server FFmpeg or WebM MediaRecorder
   try {
-    const serverRes = await exportWithServerFfmpeg(project, audioFile, encoding, onProgress, options?.signal);
+    const serverRes = await exportWithServerFfmpeg(
+      project,
+      audioFile,
+      encoding,
+      onProgress,
+      options?.signal,
+      options?.customFileBase,
+    );
     return await finalizeArchive(serverRes);
   } catch (err) {
     if (err instanceof ExportAbortedError || options?.signal?.aborted) {
@@ -952,6 +977,8 @@ export async function exportProjectToServerDisk(
 
   const { jobId } = (await startRes.json()) as { jobId: string };
 
+  let offscreenCanvas: HTMLCanvasElement | null = null;
+
   try {
     if (audioFile) {
       checkAborted(options?.signal);
@@ -975,9 +1002,11 @@ export async function exportProjectToServerDisk(
       }
     }
 
-    const offscreenCanvas = document.createElement('canvas');
-    offscreenCanvas.width = encoding.width;
-    offscreenCanvas.height = encoding.height;
+    const safeWidth = encoding.width & ~1;
+    const safeHeight = encoding.height & ~1;
+    offscreenCanvas = document.createElement('canvas');
+    offscreenCanvas.width = safeWidth;
+    offscreenCanvas.height = safeHeight;
     const ctx = offscreenCanvas.getContext('2d', { alpha: false });
     if (!ctx) {
       throw new Error('Không khởi tạo được Canvas 2D.');
@@ -1007,9 +1036,9 @@ export async function exportProjectToServerDisk(
       checkAborted(options?.signal);
       const t = Math.min(project.duration, i / encoding.fps);
       if (options?.customRenderFrame) {
-        options.customRenderFrame(ctx, t, encoding.width, encoding.height);
+        options.customRenderFrame(ctx, t, safeWidth, safeHeight);
       } else {
-        renderScaledProjectFrame(ctx, project, t, encoding.width, encoding.height);
+        renderScaledProjectFrame(ctx, project, t, safeWidth, safeHeight);
       }
       const jpeg = await canvasToJpegBlob(offscreenCanvas, 0.85);
 
@@ -1066,5 +1095,10 @@ export async function exportProjectToServerDisk(
       throw new ExportAbortedError();
     }
     throw err;
+  } finally {
+    if (offscreenCanvas) {
+      offscreenCanvas.width = 0;
+      offscreenCanvas.height = 0;
+    }
   }
 }

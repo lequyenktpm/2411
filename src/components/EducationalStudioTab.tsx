@@ -52,14 +52,23 @@ import {
 } from '../engine/mp4Config';
 import { ExportAbortedError, exportProjectToServerDisk } from '../engine/mp4Exporter';
 import {
+  cleanReadingWorksheetInput,
   buildReadingWebAiPrompt,
   parseReadingWebAiResponse,
 } from '../engine/readingPromptBuilder';
+import {
+  concatAudioFilesWithGaps,
+  mixVoiceWithBgmPreset,
+  shiftReadingWordsForIntro,
+  STUDIO_BGM_PRESETS,
+  StudioBgmPresetId,
+} from '../engine/audioMixHelper';
 import { parseTranscriptAuto } from '../engine/transcriptParser';
 import {
   alignAudioWithProgressJob,
   fetchTtsVoicesCatalog,
   synthesizeAudioAndSyncCues,
+  synthesizeAudioWithProgressJob,
   TtsProviderItem,
 } from '../engine/ttsSyncHelper';
 import { LessonProject, TranscriptCue, WordTiming } from '../engine/types';
@@ -1074,6 +1083,17 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
   const [readingText, setReadingText] = useState(
     `Tom wakes up early every morning.\nHe opens the window and makes his bed.\nThen he drinks a glass of water and eats breakfast.\nHe checks the time, takes his bag, and leaves home.\nA good morning helps him start the day with energy.`,
   );
+  const [readingIntroEnabled, setReadingIntroEnabled] = useState(true);
+  const [readingIntroText, setReadingIntroText] = useState(
+    "Today's reading lesson: A Simple Morning Routine. Listen carefully and read along word by word.",
+  );
+  const [isReadingIntroCustom, setIsReadingIntroCustom] = useState(false);
+  const [readingIntroSeconds, setReadingIntroSeconds] = useState(3.4);
+  const [readingOutroSpeechEnabled, setReadingOutroSpeechEnabled] = useState(true);
+  const [readingBgmPreset, setReadingBgmPreset] = useState<StudioBgmPresetId>('lofi-calm');
+  const [readingBgmVolume, setReadingBgmVolume] = useState(0.18);
+  const [isCustomAlignAudio, setIsCustomAlignAudio] = useState(false);
+  const [synthesizedReadingSig, setSynthesizedReadingSig] = useState('');
   const [alignFile, setAlignFile] = useState<File | null>(null);
   const [alignAudioUrl, setAlignAudioUrl] = useState<string | null>(null);
   const [alignAudioDur, setAlignAudioDur] = useState<number>(14);
@@ -1176,31 +1196,99 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
     };
   }, [alignAudioUrl]);
 
+  useEffect(() => {
+    if (!isReadingIntroCustom) {
+      const cleanTitle = readingTitle.trim() || 'English Reading Practice';
+      setReadingIntroText(
+        `Today's reading lesson: ${cleanTitle}. Listen carefully and read along word by word.`,
+      );
+    }
+  }, [readingTitle, isReadingIntroCustom]);
+
+  const outroSpeechText = useMemo(
+    () => [watermarkOutro.outroLine1.trim(), watermarkOutro.outroLine2.trim()].filter(Boolean).join('. '),
+    [watermarkOutro.outroLine1, watermarkOutro.outroLine2],
+  );
+
+  const currentReadingSig = useMemo(
+    () =>
+      JSON.stringify({
+        readingTitle: readingTitle.trim(),
+        readingText: readingText.trim(),
+        readingProvider,
+        readingVoice,
+        readingTtsRate,
+        readingIntroEnabled,
+        readingIntroText: readingIntroEnabled ? readingIntroText.trim() : '',
+        readingOutroSpeechEnabled,
+        outroSpeechText:
+          readingOutroSpeechEnabled && watermarkOutro.outroSeconds > 0 ? outroSpeechText : '',
+        outroSeconds: watermarkOutro.outroSeconds,
+        readingBgmPreset,
+        readingBgmVolume: Number(readingBgmVolume.toFixed(2)),
+      }),
+    [
+      readingTitle,
+      readingText,
+      readingProvider,
+      readingVoice,
+      readingTtsRate,
+      readingIntroEnabled,
+      readingIntroText,
+      readingOutroSpeechEnabled,
+      outroSpeechText,
+      watermarkOutro.outroSeconds,
+      readingBgmPreset,
+      readingBgmVolume,
+    ],
+  );
+
+  const activeIntroSec =
+    readingIntroEnabled && readingIntroText.trim().length > 0 ? readingIntroSeconds : 0;
+
   const effectiveReadingWords = useMemo(() => {
     if (alignResult && alignResult.words.length > 0) return alignResult.words;
-    return buildEstimatedReadingWords(readingText, alignAudioUrl ? alignAudioDur : undefined);
-  }, [alignResult, readingText, alignAudioDur, alignAudioUrl]);
+    const estTotal = alignAudioUrl
+      ? Math.max(4, alignAudioDur - activeIntroSec)
+      : Math.max(6, readingText.split(/\s+/).filter(Boolean).length * 0.42);
+    return shiftReadingWordsForIntro(
+      buildEstimatedReadingWords(readingText, estTotal),
+      activeIntroSec,
+    );
+  }, [alignResult, readingText, alignAudioDur, alignAudioUrl, activeIntroSec]);
 
   const effectiveReadingContentDuration = useMemo(() => {
     const lastWordEnd =
       effectiveReadingWords.length > 0
         ? effectiveReadingWords[effectiveReadingWords.length - 1].end
-        : 8;
+        : activeIntroSec + 8;
+    if (alignResult?.durationSec && alignResult.durationSec > activeIntroSec + 0.5) {
+      return Math.max(activeIntroSec + 1.5, alignResult.durationSec, lastWordEnd + 0.3);
+    }
     const audioBound = alignAudioUrl ? alignAudioDur : 0;
-    return Math.max(3, alignResult?.durationSec || audioBound || lastWordEnd + 0.5, lastWordEnd + 0.35);
-  }, [effectiveReadingWords, alignResult, alignAudioDur, alignAudioUrl]);
+    return Math.max(activeIntroSec + 2, audioBound, lastWordEnd + 0.35);
+  }, [effectiveReadingWords, alignResult, alignAudioDur, alignAudioUrl, activeIntroSec]);
 
   const readingTimeline = useMemo(
     () =>
       computeReadingTimelineMetrics({
         words: effectiveReadingWords,
         contentDuration: effectiveReadingContentDuration,
+        introEnabled: readingIntroEnabled && readingIntroText.trim().length > 0,
+        introSeconds: activeIntroSec,
         outroSeconds: watermarkOutro.outroSeconds,
         outroText: [watermarkOutro.outroLine1.trim(), watermarkOutro.outroLine2.trim()]
           .filter(Boolean)
           .join('\n'),
       }),
-    [effectiveReadingWords, effectiveReadingContentDuration, watermarkOutro],
+    [
+      effectiveReadingWords,
+      effectiveReadingContentDuration,
+      readingIntroEnabled,
+      readingIntroText,
+      activeIntroSec,
+      watermarkOutro,
+    ],
   );
 
   const readingWebAiPrompt = useMemo(
@@ -1249,7 +1337,7 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
     }
   }, [readingAspect]);
 
-  // Draw live Book + Pointer Hand + Watermark/Outro Canvas Preview
+  // Draw live Book + Pointer Hand + Intro/Outro Canvas Preview
   useEffect(() => {
     const canvas = readingCanvasRef.current;
     if (!canvas) return;
@@ -1265,6 +1353,10 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
       currentTime: alignCurrentSec,
       contentDuration: readingTimeline.contentEnd,
       totalDuration: readingTimeline.effectiveTotalDuration,
+      introEnabled: readingIntroEnabled && readingIntroText.trim().length > 0,
+      introSeconds: activeIntroSec,
+      introTitle: 'HÔM NAY HỌC GÌ? · TODAY GOAL',
+      introSubtitle: readingIntroText.trim() || readingTitle,
       paletteId: readingPaletteId,
       illustrationStyle: readingIllustration,
       bookFrame: readingBookFrame,
@@ -1279,6 +1371,9 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
     alignCurrentSec,
     readingTimeline.contentEnd,
     readingTimeline.effectiveTotalDuration,
+    readingIntroEnabled,
+    readingIntroText,
+    activeIntroSec,
     readingPaletteId,
     readingIllustration,
     readingBookFrame,
@@ -1321,48 +1416,278 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
     return () => cancelAnimationFrame(rafId);
   }, [isPlayingReadingPreview, alignAudioUrl, readingTimeline.effectiveTotalDuration]);
 
-  const handleGenerateReadingTts = async () => {
-    if (isGeneratingReadingTts || !readingText.trim()) return;
+  interface GeneratedReadingBundle {
+    audioFile: File;
+    title: string;
+    text: string;
+    words: WordTiming[];
+    contentEnd: number;
+    totalDuration: number;
+    introEnabled: boolean;
+    introSeconds: number;
+    introSubtitle: string;
+    watermarkOutro: EduWatermarkOutroConfig;
+  }
+
+  const decodeBase64AudioClip = (
+    base64: string,
+    fileName: string,
+    mimeType = 'audio/mpeg',
+  ): File => {
+    const bin = atob(base64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) {
+      bytes[i] = bin.charCodeAt(i);
+    }
+    return new File([bytes], fileName, { type: mimeType });
+  };
+
+  const handleGenerateReadingTts = async (): Promise<GeneratedReadingBundle | null> => {
+    if (isGeneratingReadingTts || !readingText.trim()) return null;
     setAlignError(null);
     setIsGeneratingReadingTts(true);
     setReadingTtsProgress(4);
-    setReadingTtsStageLabel('Đang khởi tạo tổng hợp giọng đọc...');
+    setReadingTtsStageLabel('Đang làm sạch văn bản & tổng hợp giọng đọc...');
     try {
+      // Strip worksheet scaffolding lines before reading aloud so audio & text match 1:1
+      const cleanedInput = cleanReadingWorksheetInput(readingText, readingTitle);
+      const cleanTitle = cleanedInput.title || readingTitle;
+      const cleanBody = cleanedInput.bodyText || readingText.trim();
+      if (cleanBody !== readingText.trim()) {
+        setReadingText(cleanBody);
+      }
+      if (cleanTitle && cleanTitle !== readingTitle) {
+        setReadingTitle(cleanTitle);
+      }
+
+      const safeSlug =
+        cleanTitle.replace(/[^a-zA-Z0-9-_]+/g, '_').slice(0, 32) || 'reading_along';
       const voiceObj = allReadingVoices.find((v) => v.id === readingVoice);
+      const baseLang = voiceObj?.lang || 'en-US';
+      const activeIntroText = readingIntroEnabled
+        ? (!isReadingIntroCustom
+            ? `Today's reading lesson: ${cleanTitle}. Listen carefully and read along word by word.`
+            : readingIntroText.trim())
+        : '';
+
       const res = await synthesizeAudioAndSyncCues({
-        rawScript: readingText,
-        title: readingTitle,
+        rawScript: cleanBody,
+        title: cleanTitle,
         provider: readingProvider,
         voice: readingVoice,
-        lang: voiceObj?.lang || 'en-US',
+        lang: baseLang,
         rate: readingTtsRate,
         alignWithWhisper: true,
         whisperModel: alignModel,
         onProgress: (pct, label) => {
-          setReadingTtsProgress(pct);
+          setReadingTtsProgress(Math.round(pct * 0.7));
           setReadingTtsStageLabel(label);
         },
       });
-      setAlignFile(res.audioFile);
-      setAlignAudioDur(Math.max(3, res.durationSec));
+
+      const bodyWords = res.cues.flatMap((c) => c.words);
+      const partsToConcat: Array<{ file: File; pauseAfterSec?: number; role: 'intro' | 'body' | 'outro' }> = [];
+
+      const hasVietnameseChars = (s: string) =>
+        /[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/i.test(s);
+
+      if (activeIntroText) {
+        setReadingTtsProgress(74);
+        setReadingTtsStageLabel('Đang tạo giọng Intro "Hôm nay học gì?"...');
+        const useViVoice =
+          hasVietnameseChars(activeIntroText) &&
+          (readingProvider === 'auto' || readingProvider === 'edge');
+        const introRes = await synthesizeAudioWithProgressJob({
+          provider: readingProvider,
+          voice: useViVoice ? 'vi-VN-HoaiMyNeural' : readingVoice,
+          lang: useViVoice ? 'vi-VN' : baseLang,
+          rate: readingTtsRate,
+          segments: [{ id: 'reading-intro', text: activeIntroText, pauseAfterSec: 0 }],
+        });
+        if (introRes.audioBase64) {
+          partsToConcat.push({
+            file: decodeBase64AudioClip(introRes.audioBase64, `${safeSlug}_intro.mp3`, introRes.mimeType || 'audio/mpeg'),
+            pauseAfterSec: 0.45,
+            role: 'intro',
+          });
+        }
+      }
+
+      partsToConcat.push({
+        file: res.audioFile,
+        pauseAfterSec: 0.35,
+        role: 'body',
+      });
+
+      const outroText = [watermarkOutro.outroLine1.trim(), watermarkOutro.outroLine2.trim()]
+        .filter(Boolean)
+        .join('. ');
+      if (readingOutroSpeechEnabled && watermarkOutro.outroSeconds > 0 && outroText) {
+        setReadingTtsProgress(82);
+        setReadingTtsStageLabel('Đang tạo giọng đọc Outro...');
+        const useViOutro =
+          hasVietnameseChars(outroText) &&
+          (readingProvider === 'auto' || readingProvider === 'edge');
+        const outroRes = await synthesizeAudioWithProgressJob({
+          provider: readingProvider,
+          voice: useViOutro ? 'vi-VN-HoaiMyNeural' : readingVoice,
+          lang: useViOutro ? 'vi-VN' : baseLang,
+          rate: readingTtsRate,
+          segments: [{ id: 'reading-outro', text: outroText, pauseAfterSec: 0 }],
+        });
+        if (outroRes.audioBase64) {
+          partsToConcat.push({
+            file: decodeBase64AudioClip(outroRes.audioBase64, `${safeSlug}_outro.mp3`, outroRes.mimeType || 'audio/mpeg'),
+            pauseAfterSec: 0.45,
+            role: 'outro',
+          });
+        }
+      }
+
+      setReadingTtsProgress(88);
+      setReadingTtsStageLabel('Đang nối Intro · Bài đọc · Outro & hòa nhạc nền...');
+
+      const combined = await concatAudioFilesWithGaps(
+        partsToConcat.map((p) => ({ file: p.file, pauseAfterSec: p.pauseAfterSec })),
+        `${safeSlug}_speech.wav`,
+      );
+
+      const introIdx = partsToConcat.findIndex((p) => p.role === 'intro');
+      const bodyIdx = partsToConcat.findIndex((p) => p.role === 'body');
+      const outroIdx = partsToConcat.findIndex((p) => p.role === 'outro');
+
+      const exactIntroEndSec = bodyIdx >= 0 ? combined.segmentOffsets[bodyIdx] : 0;
+      const bodyDurSec = bodyIdx >= 0 ? combined.segmentDurations[bodyIdx] : res.durationSec;
+      const bodyEndWithIntro = Number((exactIntroEndSec + bodyDurSec + 0.35).toFixed(3));
+      const outroStartSec = outroIdx >= 0 ? combined.segmentOffsets[outroIdx] : undefined;
+      const outroSpeechDur = outroIdx >= 0 ? combined.segmentDurations[outroIdx] + 0.55 : 0;
+
+      const updatedOutroSec =
+        readingOutroSpeechEnabled && outroIdx >= 0
+          ? Math.max(watermarkOutro.outroSeconds, Number(outroSpeechDur.toFixed(1)))
+          : watermarkOutro.outroSeconds;
+      const updatedWatermark: EduWatermarkOutroConfig =
+        updatedOutroSec !== watermarkOutro.outroSeconds
+          ? { ...watermarkOutro, outroSeconds: updatedOutroSec }
+          : watermarkOutro;
+
+      if (updatedWatermark !== watermarkOutro) {
+        setWatermarkOutro(updatedWatermark);
+      }
+
+      const shiftedWords = shiftReadingWordsForIntro(bodyWords, exactIntroEndSec);
+      const shiftedCues = res.cues.map((cue) => ({
+        ...cue,
+        start: Number((cue.start + exactIntroEndSec).toFixed(3)),
+        end: Number((cue.end + exactIntroEndSec).toFixed(3)),
+        words: shiftReadingWordsForIntro(cue.words, exactIntroEndSec),
+      }));
+
+      const speechWindows: Array<{ start: number; end: number }> = [];
+      if (introIdx >= 0) {
+        speechWindows.push({
+          start: combined.segmentOffsets[introIdx],
+          end: combined.segmentOffsets[introIdx] + combined.segmentDurations[introIdx],
+        });
+      }
+      if (bodyIdx >= 0) {
+        speechWindows.push({
+          start: combined.segmentOffsets[bodyIdx],
+          end: combined.segmentOffsets[bodyIdx] + combined.segmentDurations[bodyIdx],
+        });
+      }
+      if (outroIdx >= 0) {
+        speechWindows.push({
+          start: combined.segmentOffsets[outroIdx],
+          end: combined.segmentOffsets[outroIdx] + combined.segmentDurations[outroIdx],
+        });
+      }
+
+      const metrics = computeReadingTimelineMetrics({
+        words: shiftedWords,
+        contentDuration: bodyEndWithIntro,
+        introEnabled: introIdx >= 0,
+        introSeconds: exactIntroEndSec,
+        outroSeconds: updatedWatermark.outroSeconds,
+        outroText,
+      });
+
+      let finalAudioFile = combined.file;
+      let finalTotalDur = Math.max(combined.durationSec, metrics.effectiveTotalDuration);
+
+      if (readingBgmPreset !== 'none' && readingBgmVolume > 0) {
+        const mixed = await mixVoiceWithBgmPreset({
+          voiceFile: combined.file,
+          bgmPreset: readingBgmPreset,
+          bgmVolume: readingBgmVolume,
+          speechWindows,
+          introEndSec: exactIntroEndSec,
+          outroStartSec: outroStartSec ?? metrics.outroStart,
+          minTotalDurationSec: metrics.effectiveTotalDuration,
+          outputFileName: `${safeSlug}_reading_mix.wav`,
+        });
+        if (mixed.file) {
+          finalAudioFile = mixed.file;
+          finalTotalDur = Math.max(finalTotalDur, mixed.durationSec);
+        }
+      }
+
+      const nextSig = JSON.stringify({
+        readingTitle: cleanTitle.trim(),
+        readingText: cleanBody.trim(),
+        readingProvider,
+        readingVoice,
+        readingTtsRate,
+        readingIntroEnabled,
+        readingIntroText: activeIntroText,
+        readingOutroSpeechEnabled,
+        outroSpeechText:
+          readingOutroSpeechEnabled && updatedWatermark.outroSeconds > 0 ? outroText : '',
+        outroSeconds: updatedWatermark.outroSeconds,
+        readingBgmPreset,
+        readingBgmVolume: Number(readingBgmVolume.toFixed(2)),
+      });
+
+      if (introIdx >= 0) {
+        setReadingIntroSeconds(Number(exactIntroEndSec.toFixed(2)));
+      }
+      setIsCustomAlignAudio(false);
+      setSynthesizedReadingSig(nextSig);
+      setAlignFile(finalAudioFile);
+      setAlignAudioDur(Math.max(3, finalTotalDur));
       setAlignAudioUrl((prev) => {
         if (prev) URL.revokeObjectURL(prev);
-        return URL.createObjectURL(res.audioFile);
+        return URL.createObjectURL(finalAudioFile);
       });
-      const flatWords = res.cues.flatMap((c) => c.words);
       setAlignResult({
         language: res.detectedLanguage,
         modelUsed: res.whisperAligned ? 'fast-forced' : res.providerUsed,
         backendUsed: res.providerUsed,
-        durationSec: res.durationSec,
-        text: readingText,
-        words: flatWords,
-        cues: res.cues,
+        durationSec: metrics.contentEnd,
+        text: cleanBody,
+        words: shiftedWords,
+        cues: shiftedCues,
         srt: res.srt,
       });
       setAlignCurrentSec(0);
+      setReadingTtsProgress(100);
+      setReadingTtsStageLabel('Hoàn tất Intro · Bài đọc · Outro có nhạc nền!');
+
+      return {
+        audioFile: finalAudioFile,
+        title: cleanTitle,
+        text: cleanBody,
+        words: shiftedWords,
+        contentEnd: metrics.contentEnd,
+        totalDuration: metrics.effectiveTotalDuration,
+        introEnabled: introIdx >= 0,
+        introSeconds: exactIntroEndSec,
+        introSubtitle: activeIntroText || cleanTitle,
+        watermarkOutro: updatedWatermark,
+      };
     } catch (err) {
       setAlignError(err instanceof Error ? err.message : 'Lỗi tạo Audio TTS cho bài đọc.');
+      return null;
     } finally {
       setIsGeneratingReadingTts(false);
     }
@@ -1431,32 +1756,65 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
     setAlignError(null);
     setIsExportingReadingMp4(true);
     setReadingExportProgress(0);
-    setReadingExportStatus('Đang dựng video Reading Along + Watermark/Outro...');
+    setReadingExportStatus('Đang dựng video Reading Along + Intro/Outro + Nhạc nền...');
     const controller = new AbortController();
     readingAbortRef.current = controller;
 
     try {
-      const baseStem =
-        (alignFile?.name.replace(/\.[^.]+$/, '') || readingTitle || 'reading_along')
+      let targetAudio = alignFile;
+      let targetTitle = readingTitle;
+      let targetText = readingText;
+      let targetWords = effectiveReadingWords;
+      let targetContentEnd = readingTimeline.contentEnd;
+      let targetTotalDur = readingTimeline.effectiveTotalDuration;
+      let targetIntroEnabled = readingIntroEnabled && readingIntroText.trim().length > 0;
+      let targetIntroSec = activeIntroSec;
+      let targetIntroSub = readingIntroText.trim() || readingTitle;
+      let targetWatermark = watermarkOutro;
+
+      if (!targetAudio || (!isCustomAlignAudio && synthesizedReadingSig !== currentReadingSig)) {
+        setReadingExportStatus('Đang tạo lại giọng đọc Intro/Outro & hòa nhạc nền mới nhất...');
+        const bundle = await handleGenerateReadingTts();
+        if (!bundle) {
+          throw new Error('Không thể tạo audio bài đọc trước khi xuất MP4.');
+        }
+        targetAudio = bundle.audioFile;
+        targetTitle = bundle.title;
+        targetText = bundle.text;
+        targetWords = bundle.words;
+        targetContentEnd = bundle.contentEnd;
+        targetTotalDur = bundle.totalDuration;
+        targetIntroEnabled = bundle.introEnabled;
+        targetIntroSec = bundle.introSeconds;
+        targetIntroSub = bundle.introSubtitle;
+        targetWatermark = bundle.watermarkOutro;
+      }
+
+      if (controller.signal.aborted) {
+        throw new ExportAbortedError();
+      }
+
+      const uniqueSuffix = Date.now().toString(36).slice(-5);
+      const baseStem = `${
+        (targetTitle || 'reading_along')
           .replace(/[^a-zA-Z0-9-_]+/g, '_')
-          .slice(0, 48) || 'reading_along';
+          .slice(0, 38) || 'reading_along'
+      }_${uniqueSuffix}`;
 
       const dummyProject: LessonProject = {
-        id: 'reading-along-export',
-        title: readingTitle,
+        id: `reading-along-${uniqueSuffix}`,
+        title: targetTitle,
         subtitle: readingTopic,
         theme: 'pastel-sunrise',
-        duration: readingTimeline.effectiveTotalDuration,
-        fps: 30,
+        duration: targetTotalDur,
+        fps: readingFps === 60 ? 60 : 30,
         cues: [],
         elements: [],
       };
 
-      const totalWithOutro = dummyProject.duration;
-
       const saved = await exportProjectToServerDisk(
         dummyProject,
-        alignFile,
+        targetAudio,
         ({ progress, stageLabel }) => {
           setReadingExportProgress(progress);
           setReadingExportStatus(stageLabel);
@@ -1477,18 +1835,22 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
             renderReadingAlongFrame(ctx, {
               width,
               height,
-              title: readingTitle,
+              title: targetTitle,
               topicBadge: readingTopic,
-              text: readingText,
-              words: effectiveReadingWords,
+              text: targetText,
+              words: targetWords,
               currentTime: time,
-              contentDuration: readingTimeline.contentEnd,
-              totalDuration: totalWithOutro,
+              contentDuration: targetContentEnd,
+              totalDuration: targetTotalDur,
+              introEnabled: targetIntroEnabled,
+              introSeconds: targetIntroSec,
+              introTitle: 'HÔM NAY HỌC GÌ? · TODAY GOAL',
+              introSubtitle: targetIntroSub,
               paletteId: readingPaletteId,
               illustrationStyle: readingIllustration,
               bookFrame: readingBookFrame,
               pointerStyle: readingPointerStyle,
-              watermarkOutro,
+              watermarkOutro: targetWatermark,
             });
           },
         },
@@ -3016,26 +3378,46 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                     </div>
 
                     <div>
-                      <div className="flex items-center justify-between mb-1">
+                      <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
                         <label htmlFor="reading-passage-textarea" className="text-[11px] font-semibold text-slate-700">
                           Nội dung bài đọc
                         </label>
-                        <label className="text-[11px] font-semibold text-indigo-600 hover:text-indigo-700 cursor-pointer">
-                          Nhập TXT / SRT...
-                          <input
-                            type="file"
-                            accept=".txt,.md,.srt,.vtt"
-                            className="hidden"
-                            onChange={async (e) => {
-                              const f = e.target.files?.[0];
-                              if (f) {
-                                setReadingText(await f.text());
-                                setAlignResult(null);
-                                setAlignCurrentSec(0);
-                              }
+                        <div className="flex items-center gap-3">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const cleaned = cleanReadingWorksheetInput(readingText, readingTitle);
+                              if (cleaned.title) setReadingTitle(cleaned.title);
+                              if (cleaned.bodyText) setReadingText(cleaned.bodyText);
+                              setAlignResult(null);
+                              setAlignCurrentSec(0);
+                              setSynthesizedReadingSig('');
                             }}
-                          />
-                        </label>
+                            className="text-[11px] font-semibold text-emerald-700 hover:text-emerald-800"
+                          >
+                            Làm sạch tiêu đề bài tập
+                          </button>
+                          <label className="text-[11px] font-semibold text-indigo-600 hover:text-indigo-700 cursor-pointer">
+                            Nhập TXT / SRT...
+                            <input
+                              type="file"
+                              accept=".txt,.md,.srt,.vtt"
+                              className="hidden"
+                              onChange={async (e) => {
+                                const f = e.target.files?.[0];
+                                if (f) {
+                                  const raw = await f.text();
+                                  const cleaned = cleanReadingWorksheetInput(raw);
+                                  if (cleaned.title) setReadingTitle(cleaned.title);
+                                  setReadingText(cleaned.bodyText || raw);
+                                  setAlignResult(null);
+                                  setAlignCurrentSec(0);
+                                  setSynthesizedReadingSig('');
+                                }
+                              }}
+                            />
+                          </label>
+                        </div>
                       </div>
                       <textarea
                         id="reading-passage-textarea"
@@ -3048,6 +3430,101 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                         }}
                         className="w-full p-2.5 text-xs bg-slate-50 border border-slate-200 rounded-lg leading-relaxed"
                       />
+                    </div>
+
+                    {/* Intro "Hôm nay học gì?", Spoken Outro & Background Music */}
+                    <div className="p-3 rounded-xl bg-indigo-50/50 border border-indigo-200 space-y-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="text-[11px] font-bold text-indigo-950">
+                          Intro (&quot;Hôm nay học gì?&quot;) · Outro có lời · Nhạc nền
+                        </span>
+                        <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-700">
+                          <label className="inline-flex items-center gap-1.5 font-semibold cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={readingIntroEnabled}
+                              onChange={(e) => setReadingIntroEnabled(e.target.checked)}
+                              className="rounded border-slate-300 text-indigo-600"
+                            />
+                            <span>Bật Intro</span>
+                          </label>
+                          <label className="inline-flex items-center gap-1.5 font-semibold cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={readingOutroSpeechEnabled}
+                              onChange={(e) => setReadingOutroSpeechEnabled(e.target.checked)}
+                              className="rounded border-slate-300 text-indigo-600"
+                            />
+                            <span>Đọc Outro bằng AI</span>
+                          </label>
+                        </div>
+                      </div>
+
+                      {readingIntroEnabled && (
+                        <div className="space-y-1">
+                          <div className="flex items-center justify-between">
+                            <label htmlFor="reading-intro-input" className="text-[10px] font-semibold text-indigo-900">
+                              Lời mở đầu Intro (hiển thị &amp; đọc đầu video)
+                            </label>
+                            {isReadingIntroCustom && (
+                              <button
+                                type="button"
+                                onClick={() => setIsReadingIntroCustom(false)}
+                                className="text-[10px] font-semibold text-indigo-600 hover:text-indigo-800"
+                              >
+                                Tự động theo tiêu đề
+                              </button>
+                            )}
+                          </div>
+                          <input
+                            id="reading-intro-input"
+                            type="text"
+                            value={readingIntroText}
+                            onChange={(e) => {
+                              setIsReadingIntroCustom(true);
+                              setReadingIntroText(e.target.value);
+                            }}
+                            className="w-full px-2.5 py-1.5 text-xs bg-white border border-indigo-200 rounded-lg"
+                          />
+                        </div>
+                      )}
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <div>
+                          <label htmlFor="reading-bgm-select" className="block text-[10px] font-semibold text-slate-700 mb-0.5">
+                            Nhạc nền (BGM)
+                          </label>
+                          <select
+                            id="reading-bgm-select"
+                            value={readingBgmPreset}
+                            onChange={(e) => setReadingBgmPreset(e.target.value as StudioBgmPresetId)}
+                            className="w-full px-2 py-1.5 text-xs bg-white border border-slate-200 rounded-lg"
+                          >
+                            {STUDIO_BGM_PRESETS.map((p) => (
+                              <option key={p.id} value={p.id}>
+                                {p.label}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <div>
+                          <div className="flex items-center justify-between text-[10px] font-semibold text-slate-700 mb-0.5">
+                            <label htmlFor="reading-bgm-vol">Âm lượng nhạc nền</label>
+                            <span className="font-mono">{Math.round(readingBgmVolume * 100)}%</span>
+                          </div>
+                          <input
+                            id="reading-bgm-vol"
+                            type="range"
+                            min={0}
+                            max={0.45}
+                            step={0.02}
+                            value={readingBgmVolume}
+                            disabled={readingBgmPreset === 'none'}
+                            onChange={(e) => setReadingBgmVolume(Number(e.target.value))}
+                            className="w-full accent-indigo-600 mt-1"
+                          />
+                        </div>
+                      </div>
                     </div>
 
                     {/* TTS / Audio + Fast Forced Align & Whisper */}
@@ -3066,6 +3543,7 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                             onChange={(e) => {
                               const f = e.target.files?.[0] ?? null;
                               setAlignFile(f);
+                              setIsCustomAlignAudio(Boolean(f));
                               setAlignError(null);
                               setAlignResult(null);
                               setAlignCurrentSec(0);
@@ -3242,9 +3720,22 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                           <button
                             type="button"
                             onClick={() => {
-                              alignAudioRef.current?.pause();
-                              setAlignCurrentSec(Math.min(readingTimeline.effectiveTotalDuration - 0.1, readingTimeline.outroStart + 0.1));
+                              const targetSec = Math.min(
+                                readingTimeline.effectiveTotalDuration - 0.1,
+                                readingTimeline.outroStart + 0.05,
+                              );
+                              setAlignCurrentSec(targetSec);
                               setIsPlayingReadingPreview(true);
+                              if (
+                                alignAudioRef.current &&
+                                alignAudioUrl &&
+                                alignAudioDur > readingTimeline.outroStart + 0.1
+                              ) {
+                                alignAudioRef.current.currentTime = Math.min(targetSec, alignAudioDur);
+                                void alignAudioRef.current.play().catch(() => undefined);
+                              } else {
+                                alignAudioRef.current?.pause();
+                              }
                             }}
                             className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 text-[10px] font-bold"
                           >
@@ -3259,13 +3750,21 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                               setIsPlayingReadingPreview(false);
                               alignAudioRef.current?.pause();
                             } else {
-                              if (alignCurrentSec >= readingTimeline.effectiveTotalDuration - 0.05) {
-                                setAlignCurrentSec(0);
+                              const startAt =
+                                alignCurrentSec >= readingTimeline.effectiveTotalDuration - 0.05
+                                  ? 0
+                                  : alignCurrentSec;
+                              if (startAt !== alignCurrentSec) {
+                                setAlignCurrentSec(startAt);
                               }
                               setIsPlayingReadingPreview(true);
                               if (alignAudioRef.current && alignAudioUrl) {
-                                if (alignCurrentSec < readingTimeline.contentEnd) {
-                                  alignAudioRef.current.currentTime = alignCurrentSec;
+                                const audioLimit = Math.max(
+                                  readingTimeline.contentEnd,
+                                  alignAudioDur || readingTimeline.effectiveTotalDuration,
+                                );
+                                if (startAt < audioLimit) {
+                                  alignAudioRef.current.currentTime = Math.min(startAt, audioLimit);
                                   void alignAudioRef.current.play().catch(() => undefined);
                                 }
                               }
@@ -3310,8 +3809,15 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                           const t = Number(e.target.value);
                           setAlignCurrentSec(t);
                           if (alignAudioRef.current && alignAudioUrl) {
-                            if (t < readingTimeline.contentEnd) {
-                              alignAudioRef.current.currentTime = Math.min(t, alignAudioRef.current.duration || t);
+                            const audioLimit = Math.max(
+                              readingTimeline.contentEnd,
+                              alignAudioDur || readingTimeline.effectiveTotalDuration,
+                            );
+                            if (t < audioLimit) {
+                              alignAudioRef.current.currentTime = Math.min(
+                                t,
+                                alignAudioRef.current.duration || t,
+                              );
                             } else {
                               alignAudioRef.current.pause();
                             }
@@ -3323,10 +3829,19 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                         {alignCurrentSec.toFixed(1)}s / {readingTimeline.effectiveTotalDuration.toFixed(1)}s
                       </span>
                     </div>
-                    {readingTimeline.hasOutro && (
-                      <div className="text-[10px] text-slate-400 flex items-center justify-between">
-                        <span>Chữ kết thúc: {readingTimeline.lastWordEnd.toFixed(1)}s</span>
-                        <span className="text-amber-300">Outro bắt đầu: {readingTimeline.outroStart.toFixed(1)}s (không đè chữ)</span>
+                    {(readingTimeline.hasIntro || readingTimeline.hasOutro) && (
+                      <div className="text-[10px] text-slate-400 flex flex-wrap items-center justify-between gap-1">
+                        <span>
+                          {readingTimeline.hasIntro
+                            ? `Intro: 0→${readingTimeline.introEnd.toFixed(1)}s · `
+                            : ''}
+                          Chữ kết thúc: {readingTimeline.lastWordEnd.toFixed(1)}s
+                        </span>
+                        {readingTimeline.hasOutro && (
+                          <span className="text-amber-300">
+                            Outro: {readingTimeline.outroStart.toFixed(1)}s (không đè chữ)
+                          </span>
+                        )}
                       </div>
                     )}
 
@@ -3346,8 +3861,11 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                           }
                         }}
                         onEnded={() => {
-                          if (readingTimeline.hasOutro) {
-                            setAlignCurrentSec(readingTimeline.contentEnd);
+                          if (
+                            readingTimeline.hasOutro &&
+                            alignCurrentSec < readingTimeline.effectiveTotalDuration - 0.15
+                          ) {
+                            setAlignCurrentSec((prev) => Math.max(prev, readingTimeline.contentEnd));
                             setIsPlayingReadingPreview(true);
                           } else {
                             setIsPlayingReadingPreview(false);

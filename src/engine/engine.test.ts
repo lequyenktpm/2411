@@ -79,6 +79,7 @@ import {
   buildEnglishReelsWebAiPrompt,
   buildReelCardsRuleBased,
   detectReelMode,
+  getQuizCardSpeechParts,
   parseEnglishReelsAiJson,
   reelCardsToLessonProject,
   sanitizeTtsSpeech,
@@ -90,13 +91,22 @@ import {
   VISUAL_LAYOUT_PRESETS,
 } from './visualComponentBuilder';
 import { alignKnownTextToPcmFloat, parseWavBufferToMonoFloat32 } from './forcedAligner';
-import { buildReadingWebAiPrompt, parseReadingWebAiResponse } from './readingPromptBuilder';
+import {
+  buildReadingWebAiPrompt,
+  cleanReadingWorksheetInput,
+  parseReadingWebAiResponse,
+} from './readingPromptBuilder';
 import {
   computeReadingTimelineMetrics,
   paginateReadingWords,
   READING_BOOK_FRAMES,
   READING_POINTER_STYLES,
 } from './eduStudioEffects';
+import {
+  computeDuckingGainAtTime,
+  encodeStereoFloatChannelsToWavArrayBuffer,
+  shiftReadingWordsForIntro,
+} from './audioMixHelper';
 
 test('interpolateWordTimings distributes word timestamps across cue duration', () => {
   const words = interpolateWordTimings('Give me water please', 1.0, 3.0);
@@ -1537,5 +1547,123 @@ test('illustrationLayouts produces distinct built-in presets and applies custom 
   assert.ok(customPrompt.includes('css-sticky-note'));
   assert.ok(customPrompt.includes('Pro Phrasing Tip'));
 });
+
+test('worksheet cleanup, English Reels Intro/Outro/Quiz context, and Reading Along Intro timeline have zero overlaps', () => {
+  const sampleWorksheet = `## Practice Reading English Exercises for Beginner – Plans
+English Reading Exercises for Beginner
+## Exercise 1
+Outside the COMFORT ZONE
+In this exciting new TV programme, ten people go and live in the mountains for ten days.
+Every day they do something difficult and sometimes dangerous.
+They need to stay safe and comfortable (if possible!), but it’s not easy.
+The two people who do the best win a prize of £25,000!
+It’s Day 5 on Outside the comfort zone and everyone is thinking about the first thing they’re going to do after the programme finishes.
+I’m going to eat a big meal of steak and chips.
+I’m going to have a long hot bath.
+
+True / False Quiz
+1. Ten people live in the mountains for ten days.
+(A) True
+(B) False
+Answer: (A) The passage says ten people go and live in the mountains for ten days.`;
+
+  const cleaned = cleanReadingWorksheetInput(sampleWorksheet);
+  assert.equal(cleaned.title, 'Outside the COMFORT ZONE');
+  assert.ok(!cleaned.bodyText.includes('Practice Reading English Exercises'));
+  assert.ok(!cleaned.bodyText.includes('Exercise 1'));
+  assert.ok(cleaned.bodyText.includes('In this exciting new TV programme'));
+
+  const reels = buildReelCardsRuleBased(sampleWorksheet);
+  assert.equal(reels.title, 'Outside the COMFORT ZONE');
+  assert.equal(reels.cards[0].type, 'intro');
+  assert.ok(reels.cards[0].content.includes('Hôm nay học gì?'));
+  assert.ok(reels.cards[reels.cards.length - 1].type === 'outro');
+
+  for (const card of reels.cards) {
+    assert.ok(!card.content.includes('Practice Reading English Exercises'));
+    assert.ok(!card.content.includes('## Exercise 1'));
+    assert.ok(!card.ttsText.includes('Practice Reading English Exercises'));
+    assert.ok(!card.ttsText.includes('Exercise 1'));
+    assert.equal(card.phonetic, undefined);
+  }
+
+  const vocabCards = reels.cards.filter((c) => c.type === 'vocab');
+  assert.ok(vocabCards.length >= 3);
+  assert.ok(vocabCards.some((c) => Boolean(c.translation || c.grammarNote)));
+
+  const quizCards = reels.cards.filter((c) => c.type === 'quiz');
+  assert.equal(quizCards.length, 1);
+  assert.ok(quizCards[0].contextExcerpt && quizCards[0].contextExcerpt.includes('In this exciting new TV programme'));
+
+  const quizSpeech = getQuizCardSpeechParts(quizCards[0], 1);
+  assert.ok(quizSpeech.questionSpeech.toLowerCase().includes('question'));
+  assert.ok(quizSpeech.thinkSec >= 5);
+  assert.ok(quizSpeech.answerSpeech.toLowerCase().includes('correct answer'));
+
+  const proj = reelCardsToLessonProject(reels.cards, { title: reels.title });
+  assert.equal(findVisualOverlaps(proj.elements).length, 0);
+
+  // Reading Along Intro shifting + Outro spacing
+  const shifted = shiftReadingWordsForIntro(
+    [
+      { word: 'In', start: 0.1, end: 0.4 },
+      { word: 'this', start: 0.5, end: 0.9 },
+    ],
+    3.4,
+  );
+  assert.equal(shifted[0].start, 3.5);
+  assert.equal(shifted[1].end, 4.3);
+
+  const metrics = computeReadingTimelineMetrics({
+    words: shifted,
+    contentDuration: 5.0,
+    introEnabled: true,
+    introSeconds: 3.4,
+    outroSeconds: 3.5,
+    outroText: 'Thanks for watching!\nSee you next time',
+  });
+  assert.equal(metrics.hasIntro, true);
+  assert.equal(metrics.introEnd, 3.4);
+  assert.ok(metrics.outroStart >= metrics.lastWordEnd);
+  assert.ok(metrics.effectiveTotalDuration >= metrics.outroStart + 3.5);
+});
+
+test('audioMixHelper ducks BGM during speech, boosts during outro tail, and writes valid RIFF WAV headers', () => {
+  const baseVol = 0.2;
+  const duringSpeech = computeDuckingGainAtTime({
+    timeSec: 2.0,
+    speechWindows: [{ start: 1.0, end: 4.0 }],
+    baseVolume: baseVol,
+    outroStartSec: 8.0,
+    totalDurationSec: 12.0,
+  });
+  const inOutroTail = computeDuckingGainAtTime({
+    timeSec: 9.5,
+    speechWindows: [{ start: 1.0, end: 4.0 }],
+    baseVolume: baseVol,
+    outroStartSec: 8.0,
+    totalDurationSec: 12.0,
+  });
+  const fadeOutEdge = computeDuckingGainAtTime({
+    timeSec: 11.9,
+    speechWindows: [{ start: 1.0, end: 4.0 }],
+    baseVolume: baseVol,
+    outroStartSec: 8.0,
+    totalDurationSec: 12.0,
+  });
+
+  assert.ok(duringSpeech < baseVol * 0.55);
+  assert.ok(inOutroTail > duringSpeech * 2);
+  assert.ok(fadeOutEdge < inOutroTail * 0.35);
+
+  const left = new Float32Array([0, 0.25, -0.25, 0.5]);
+  const right = new Float32Array([0, -0.25, 0.25, -0.5]);
+  const wav = encodeStereoFloatChannelsToWavArrayBuffer(left, right, 48000);
+  assert.equal(wav.byteLength, 44 + 4 * 4);
+  const bytes = new Uint8Array(wav);
+  assert.equal(String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]), 'RIFF');
+  assert.equal(String.fromCharCode(bytes[8], bytes[9], bytes[10], bytes[11]), 'WAVE');
+});
+
 
 

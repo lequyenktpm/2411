@@ -860,10 +860,19 @@ function drawComparisonStrip(
       fontSize -= 2;
       ctx.font = `700 ${fontSize}px ${FONT_DISPLAY}`;
     }
+    const showSublabel = Boolean(
+      item.sublabel &&
+        !(
+          !isActive &&
+          item.activateAt !== undefined &&
+          time < item.activateAt &&
+          /đáp\s*án/i.test(item.sublabel)
+        ),
+    );
     ctx.fillStyle = isActive ? accent : '#475569';
-    ctx.fillText(item.label, x + itemW / 2, item.sublabel ? startY + 42 : startY + itemH / 2);
+    ctx.fillText(item.label, x + itemW / 2, showSublabel ? startY + 42 : startY + itemH / 2);
 
-    if (item.sublabel) {
+    if (showSublabel && item.sublabel) {
       ctx.font = `600 22px ${FONT_SANS}`;
       ctx.fillStyle = isActive ? '#334155' : '#94A3B8';
       ctx.fillText(item.sublabel, x + itemW / 2, startY + 84);
@@ -2593,50 +2602,63 @@ function drawIllustrationProp(
     ctx.textAlign = 'center';
     ctx.fillText(isOn ? 'ON' : 'OFF', isOn ? tx + 86 : tx + 140, ty + 48);
   } else if (props.variant === 'css-browser-mockup') {
-    // Modern Browser Window Card with macOS Dots + URL bar
-    fillCardWithShadow(ctx, -415, -132, 830, 264, 24, '#FFFFFF', 0.11);
+    // Modern Browser Window Card with macOS Dots + URL bar + Multi-line Passage Context support
+    const bodyText =
+      props.data?.speechText ||
+      props.data?.subtitle ||
+      'Search · Learn · Speak with confidence';
+    ctx.font = `600 23px ${FONT_SANS}`;
+    const wrappedBody = wrapTextLines(ctx, bodyText, 750);
+    const displayLines = wrappedBody.slice(0, 5);
+    const extraH = Math.max(0, (displayLines.length - 2) * 32);
+    const cardTop = -128 - Math.round(extraH / 2);
+    const cardH = 256 + extraH;
+
+    fillCardWithShadow(ctx, -415, cardTop, 830, cardH, 24, '#FFFFFF', 0.11);
     ctx.strokeStyle = '#E2E8F0';
     ctx.lineWidth = 2;
-    drawRoundedRectPath(ctx, -415, -132, 830, 264, 24);
+    drawRoundedRectPath(ctx, -415, cardTop, 830, cardH, 24);
     ctx.stroke();
 
     // Top chrome bar
     ctx.fillStyle = '#F1F5F9';
-    drawRoundedRectPath(ctx, -415, -132, 830, 58, 22);
+    drawRoundedRectPath(ctx, -415, cardTop, 830, 56, 22);
     ctx.fill();
-    ctx.fillRect(-415, -96, 830, 22);
+    ctx.fillRect(-415, cardTop + 34, 830, 22);
 
     // Traffic lights
     const dots = ['#EF4444', '#F59E0B', '#10B981'];
     dots.forEach((col, i) => {
       ctx.fillStyle = col;
       ctx.beginPath();
-      ctx.arc(-374 + i * 26, -103, 8, 0, Math.PI * 2);
+      ctx.arc(-374 + i * 26, cardTop + 28, 8, 0, Math.PI * 2);
       ctx.fill();
     });
 
     // URL pill
     ctx.fillStyle = '#FFFFFF';
-    drawRoundedRectPath(ctx, -260, -120, 560, 34, 17);
+    drawRoundedRectPath(ctx, -260, cardTop + 11, 560, 34, 17);
     ctx.fill();
-    ctx.font = `600 18px ${FONT_SANS}`;
+    ctx.font = `600 17px ${FONT_SANS}`;
     ctx.fillStyle = '#64748B';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(props.data?.formula || 'https://english.practice/daily-tip', 20, -103, 520);
+    ctx.fillText(props.data?.formula || 'https://english.practice/reading-context', 20, cardTop + 28, 520);
 
     // Content area
-    ctx.font = `800 34px ${FONT_DISPLAY}`;
+    ctx.font = `800 29px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#0F172A';
-    ctx.fillText(props.data?.title || 'Real-World English Context', 0, -4, 740);
-    ctx.font = `600 24px ${FONT_SANS}`;
-    ctx.fillStyle = '#4F46E5';
-    ctx.fillText(
-      props.data?.subtitle || props.data?.speechText || 'Search · Learn · Speak with confidence',
-      0,
-      56,
-      740,
-    );
+    ctx.fillText(props.data?.title || 'Real-World English Context', 0, cardTop + 86, 750);
+
+    ctx.font = `600 23px ${FONT_SANS}`;
+    ctx.fillStyle = '#334155';
+    displayLines.forEach((ln, idx) => {
+      const lineTxt =
+        idx === displayLines.length - 1 && wrappedBody.length > displayLines.length
+          ? `${ln.slice(0, Math.max(8, ln.length - 3))}...`
+          : ln;
+      ctx.fillText(lineTxt, 0, cardTop + 128 + idx * 31, 750);
+    });
   } else if (props.variant === 'css-grammar-equation') {
     // Grammar Token Pill Equation: [Part A] + [Part B] = [Result]
     const parts = props.data?.labels?.slice(0, 3) ?? ['Could you', 'V-inf', 'Polite!'];
@@ -3003,11 +3025,20 @@ function drawSentenceCard(
   props: SentenceCardProps,
   width: number,
 ) {
-  ctx.font = `700 50px ${FONT_DISPLAY}`;
-  const innerMaxW = width - 110;
+  ctx.font = `700 46px ${FONT_DISPLAY}`;
+  const innerMaxW = width - 104;
   const lines = wrapTextLines(ctx, props.text, innerMaxW);
-  const lineH = 66;
-  const subH = props.subtext ? 46 : 0;
+  const lineH = 60;
+
+  ctx.font = `600 26px ${FONT_SANS}`;
+  const subLines = props.subtext
+    ? props.subtext
+        .split(/\r?\n/)
+        .flatMap((part) => wrapTextLines(ctx, part, innerMaxW))
+        .slice(0, 3)
+    : [];
+  const subLineH = 34;
+  const subH = subLines.length > 0 ? subLines.length * subLineH + 14 : 0;
   const cardH = Math.max(148, lines.length * lineH + subH + 74);
   const x = -width / 2;
   const y = -cardH / 2;
@@ -3025,6 +3056,7 @@ function drawSentenceCard(
   fillCardWithShadow(ctx, x, y, width, cardH, 38, cardBg, isDarkBg ? 0.3 : 0.1);
 
   // Render lines with optional emphasis word coloring
+  ctx.font = `700 46px ${FONT_DISPLAY}`;
   ctx.textBaseline = 'middle';
   const totalContentH = (lines.length - 1) * lineH + subH;
   const startTextY = y + cardH / 2 - totalContentH / 2;
@@ -3062,11 +3094,14 @@ function drawSentenceCard(
     }
   });
 
-  if (props.subtext) {
-    ctx.font = `600 28px ${FONT_SANS}`;
+  if (subLines.length > 0) {
+    ctx.font = `600 26px ${FONT_SANS}`;
     ctx.textAlign = 'center';
-    ctx.fillStyle = isDarkBg ? '#94A3B8' : '#64748B';
-    ctx.fillText(props.subtext, 0, startTextY + (lines.length - 1) * lineH + 50, innerMaxW);
+    ctx.fillStyle = isDarkBg ? '#94A3B8' : '#475569';
+    const subStartY = startTextY + (lines.length - 1) * lineH + 46;
+    subLines.forEach((sLn, sIdx) => {
+      ctx.fillText(sLn, 0, subStartY + sIdx * subLineH, innerMaxW);
+    });
   }
 
   // Top-right badge (check, cross, or question)

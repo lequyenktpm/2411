@@ -53,7 +53,67 @@ export function saveClientApiKeys(partial: Partial<ClientApiKeys>): ClientApiKey
       // Ignore storage quota errors
     }
   }
+
+  if (typeof fetch !== 'undefined') {
+    const body: Record<string, string> = {};
+    if (partial.elevenlabsApiKey !== undefined) body.elevenLabsApiKey = next.elevenlabsApiKey;
+    if (partial.geminiApiKey !== undefined) body.geminiApiKey = next.geminiApiKey;
+    if (Object.keys(body).length > 0) {
+      void fetch('/api/settings/api-keys', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }).catch(() => undefined);
+    }
+  }
+
   return next;
+}
+
+export async function hydrateClientApiKeysFromServer(): Promise<ClientApiKeys> {
+  const local = loadClientApiKeys();
+  if (typeof fetch === 'undefined') return local;
+  try {
+    const res = await fetch('/api/settings/api-keys');
+    if (!res.ok) return local;
+    const data = (await res.json()) as {
+      elevenLabsApiKey?: string;
+      geminiApiKey?: string;
+    };
+    const serverEleven = typeof data.elevenLabsApiKey === 'string' ? data.elevenLabsApiKey.trim() : '';
+    const serverGemini = typeof data.geminiApiKey === 'string' ? data.geminiApiKey.trim() : '';
+
+    // Push local-only keys to server file if server lacks them, or pull server keys into localStorage
+    const mergedEleven = local.elevenlabsApiKey || serverEleven;
+    const mergedGemini = local.geminiApiKey || serverGemini;
+
+    if (mergedEleven !== local.elevenlabsApiKey || mergedGemini !== local.geminiApiKey) {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        if (mergedEleven) window.localStorage.setItem(STORAGE_ELEVENLABS_KEY, mergedEleven);
+        if (mergedGemini) window.localStorage.setItem(STORAGE_GEMINI_KEY, mergedGemini);
+        window.dispatchEvent(
+          new CustomEvent(KEYS_EVENT, {
+            detail: { elevenlabsApiKey: mergedEleven, geminiApiKey: mergedGemini },
+          }),
+        );
+      }
+    }
+
+    if ((local.elevenlabsApiKey && !serverEleven) || (local.geminiApiKey && !serverGemini)) {
+      void fetch('/api/settings/api-keys', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          elevenLabsApiKey: mergedEleven,
+          geminiApiKey: mergedGemini,
+        }),
+      }).catch(() => undefined);
+    }
+
+    return { elevenlabsApiKey: mergedEleven, geminiApiKey: mergedGemini };
+  } catch {
+    return local;
+  }
 }
 
 export function buildApiKeyHeaders(extra?: Record<string, string>): Record<string, string> {

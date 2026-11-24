@@ -11,6 +11,7 @@ import { StagePreview } from './components/StagePreview';
 import { TimelineAndInspector } from './components/TimelineAndInspector';
 import { choreographFromTranscript } from './engine/autoChoreographer';
 import { syncCustomComponentsFromServer } from './engine/customComponentStore';
+import { hydrateClientApiKeysFromServer } from './utils/apiKeysStore';
 import {
   applyCustomComponentComposition,
   pickRandomComposition,
@@ -149,6 +150,7 @@ export default function App() {
 
   useEffect(() => {
     void syncCustomComponentsFromServer();
+    void hydrateClientApiKeysFromServer();
   }, []);
 
   useEffect(() => {
@@ -569,6 +571,9 @@ export default function App() {
       setExportError(null);
 
       try {
+        const baseSlug =
+          targetProject.id.replace(/[^a-zA-Z0-9-_]+/g, '_').slice(0, 32) || 'studio_video';
+        const uniqueFileBase = `${baseSlug}_${resolvedExport.height}p_${Date.now().toString(36).slice(-4)}`;
         const result = await exportProjectToVideo(
           targetProject,
           audioFile,
@@ -579,6 +584,7 @@ export default function App() {
           mp4Settings,
           {
             signal: controller.signal,
+            customFileBase: uniqueFileBase,
             alsoSaveToServerOutput: true,
             sourceTab: 'Studio 9:16',
           },
