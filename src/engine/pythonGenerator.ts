@@ -152,7 +152,7 @@ def load_scene_plan(scene_path: str, word_count: int) -> Dict[str, Any]:
                 at = int(item.get("at", 1))
                 if word_count > 0 and (at < 1 or at > word_count):
                     raise ValueError(
-                        f"Scene '{scene.get('id', '?')}' có giá trị at={at} nằm ngoài phạm vi [1, {word_count}]."
+                        f"Scene '{scene.get('id') or scene.get('scene_id', '?')}' có giá trị at={at} nằm ngoài phạm vi [1, {word_count}]."
                     )
     return plan
 
@@ -575,6 +575,12 @@ def resolve_timeline_items(
         w = words[min(len(words) - 1, max(0, min_at - 1))] if words else {"start": 0.0}
         scene_starts.append(float(w["start"]))
 
+    seg_map = {
+        str(s.get("segment_id")): s
+        for s in (scene_plan.get("source_segments") or [])
+        if isinstance(s, dict) and s.get("segment_id")
+    }
+
     resolved_scenes: List[Dict[str, Any]] = []
     for sc_idx, sc in enumerate(scenes):
         sc_start = scene_starts[sc_idx]
@@ -584,23 +590,42 @@ def resolve_timeline_items(
         shapes_out = []
         texts_out = []
 
-        # Hỗ trợ định dạng linh hoạt elements[] từ AI Prompt
+        # Hỗ trợ định dạng linh hoạt elements[] (v1.9 Storyboard + Legacy AI Prompt)
         for el in sc.get("elements", []):
-            st = _resolve_time_value(el.get("start"), sc_start)
-            en = max(st + 0.4, _resolve_time_value(el.get("end"), st + 3.5))
-            el_type = el.get("type", "")
-            cy = float(el.get("y", 960))
-            if cy <= 1.0:
-                cy *= 1920.0
-            y_norm = max(0.05, min(0.85, (cy / 1920.0) - 0.06))
+            anchor = el.get("sync_anchor") or {}
+            seg = seg_map.get(str(anchor.get("segment_id", "")))
+            default_st = float(seg.get("start", sc_start)) if seg else sc_start
+            default_en = float(seg.get("end", default_st + 3.5)) if seg else (default_st + 3.5)
+            st = _resolve_time_value(el.get("start_s", el.get("start")), default_st)
+            en = max(st + 0.4, _resolve_time_value(el.get("end_s", el.get("end")), default_en))
 
-            if el_type in ("sentence_card", "sentence-card"):
+            el_type = str(el.get("kind") or el.get("type") or "")
+            pos = el.get("position")
+            if isinstance(pos, dict) and "y" in pos:
+                x_norm = max(0.04, min(0.9, float(pos.get("x", 0.1))))
+                y_norm = max(0.04, min(0.85, float(pos.get("y", 0.4))))
+                w_norm = max(0.15, min(0.92, float(pos.get("width", 0.8))))
+                h_norm = max(0.05, min(0.45, float(pos.get("height", 0.12))))
+            else:
+                cy = float(el.get("y", 960))
+                if cy <= 1.0:
+                    cy *= 1920.0
+                x_norm = 0.1
+                y_norm = max(0.05, min(0.85, (cy / 1920.0) - 0.06))
+                w_norm = 0.8
+                h_norm = 0.11
+
+            style = el.get("style") or {}
+            text_val = el.get("content") if el.get("content") is not None else el.get("text", "")
+
+            if el_type in ("sentence_card", "sentence-card", "text", "card"):
                 sh_idx = len(shapes_out)
+                badge = style.get("badge") or el.get("badge")
                 shapes_out.append({
                     "_index": sh_idx,
                     "type": "card_3d",
-                    "position": {"x": 0.1, "y": y_norm, "w": 0.8, "h": 0.11},
-                    "fill": "#FEE2E2" if el.get("badge") == "cross" else "#FFFFFF",
+                    "position": {"x": x_norm, "y": y_norm, "w": w_norm, "h": h_norm},
+                    "fill": style.get("bgColor") or ("#FEE2E2" if badge == "cross" else "#FFFFFF"),
                     "shadow": True,
                     "highlight": True,
                     "depth": 8,
@@ -608,23 +633,23 @@ def resolve_timeline_items(
                     "end_time": en,
                 })
                 texts_out.append({
-                    "content": el.get("text", ""),
+                    "content": text_val,
                     "shape_index": sh_idx,
                     "style": {
                         "size": "headline",
-                        "color": "#991B1B" if el.get("badge") == "cross" else "#0F172A",
+                        "color": style.get("textColor") or ("#991B1B" if badge == "cross" else "#0F172A"),
                         "weight": "bold",
                     },
                     "start_time": st,
                     "end_time": en,
                 })
-            elif el_type in ("topic_pill", "topic-pill"):
+            elif el_type in ("topic_pill", "topic-pill", "pill"):
                 sh_idx = len(shapes_out)
                 shapes_out.append({
                     "_index": sh_idx,
                     "type": "pill_3d",
-                    "position": {"x": 0.25, "y": y_norm, "w": 0.5, "h": 0.055},
-                    "fill": el.get("bgColor", "#DDD6FE"),
+                    "position": {"x": x_norm if isinstance(pos, dict) else 0.25, "y": y_norm, "w": w_norm if isinstance(pos, dict) else 0.5, "h": h_norm if isinstance(pos, dict) else 0.055},
+                    "fill": style.get("bgColor") or el.get("bgColor", "#DDD6FE"),
                     "shadow": True,
                     "highlight": True,
                     "depth": 5,
@@ -632,9 +657,9 @@ def resolve_timeline_items(
                     "end_time": en,
                 })
                 texts_out.append({
-                    "content": el.get("text", ""),
+                    "content": text_val,
                     "shape_index": sh_idx,
-                    "style": {"size": "body", "color": el.get("textColor", "#4338CA"), "weight": "bold"},
+                    "style": {"size": "body", "color": style.get("textColor") or el.get("textColor", "#4338CA"), "weight": "bold"},
                     "start_time": st,
                     "end_time": en,
                 })

@@ -1414,16 +1414,25 @@ export function parseEnglishReelsAiJson(
     const cards: ReelCard[] = [];
     for (const sc of scenePlan.scenes) {
       for (const el of sc.elements || []) {
-        if (el.text && (el.type === 'sentence_card' || el.type === 'sentence-card' || el.type === 'topic_pill')) {
+        const elType = ('type' in el && el.type) || ('kind' in el && el.kind) || '';
+        const elText = el.text || ('content' in el && el.content) || '';
+        if (
+          elText &&
+          (elType === 'sentence_card' ||
+            elType === 'sentence-card' ||
+            elType === 'text' ||
+            elType === 'topic_pill' ||
+            elType === 'pill')
+        ) {
           cards.push({
             id: makeCardId(cards.length),
             type: cards.length === 0 ? 'intro' : 'vocab',
-            badge: String(el.type || 'CARD').toUpperCase(),
-            title: el.text,
-            content: el.text,
+            badge: String(elType || 'CARD').toUpperCase(),
+            title: elText,
+            content: elText,
             translation: el.subtext || undefined,
-            ttsText: el.text,
-            durationSec: estimateCardSpeechDuration(el.text),
+            ttsText: elText,
+            durationSec: estimateCardSpeechDuration(elText),
           });
         }
       }

@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertTriangle,
   ArrowRight,
   Check,
   CheckCircle2,
@@ -16,8 +17,10 @@ import {
   Square,
   Upload,
   Volume2,
+  XCircle,
 } from 'lucide-react';
 import { buildSceneGenerationPrompt } from '../engine/aiPromptBuilder';
+import { validateStoryboardDocument } from '../engine/storyboardValidator';
 import { cleanDownloadFileName } from '../engine/outputNaming';
 import {
   fetchTtsVoicesCatalog,
@@ -300,15 +303,22 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
               : 'word-reveal',
         theme: isDarkCanvasTheme(project.theme) ? project.theme : undefined,
         customConfig: compositionMode === 'custom' ? activeCustomConfig : undefined,
+        audioDurationSec,
       }),
-    [activeCues, customTitle, project.title, project.theme, effectiveCompositionId, promptStyle, dbVersion, compositionMode, activeCustomConfig],
+    [activeCues, customTitle, project.title, project.theme, effectiveCompositionId, promptStyle, dbVersion, compositionMode, activeCustomConfig, audioDurationSec],
   );
 
+  const parsedPreviewPlan = useMemo(() => parseScenePlanJson(rawSceneJson), [rawSceneJson]);
+
   const jsonPreviewSummary = useMemo(() => {
-    const parsed = parseScenePlanJson(rawSceneJson);
-    if (!parsed) return null;
-    return summarizeScenePlan(parsed, activeCues);
-  }, [rawSceneJson, activeCues]);
+    if (!parsedPreviewPlan) return null;
+    return summarizeScenePlan(parsedPreviewPlan, activeCues);
+  }, [parsedPreviewPlan, activeCues]);
+
+  const validationReport = useMemo(() => {
+    if (!parsedPreviewPlan) return null;
+    return validateStoryboardDocument(parsedPreviewPlan, activeCues, { audioDurationSec });
+  }, [parsedPreviewPlan, activeCues, audioDurationSec]);
 
   const encoding = useMemo(() => resolveMp4EncodingParams(mp4Settings), [mp4Settings]);
 
@@ -1137,11 +1147,21 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
             <>
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
-                  <h3 className="text-xs font-semibold text-slate-900">
-                    Prompt đã đóng gói sẵn {activeCues.length} câu thoại · {activeVectorCount} component minh họa trong Kho
-                  </h3>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="text-xs font-semibold text-slate-900">
+                      Prompt Storyboard v1.9 · {activeCues.length} segments · {activeVectorCount} component trong Kho
+                    </h3>
+                    <span className="px-1.5 py-0.5 text-[10px] font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200 rounded">
+                      Đa Scene + sync_anchor
+                    </span>
+                    {typeof audioDurationSec === 'number' && audioDurationSec > 0 && activeCues.length > 0 && (
+                      <span className="px-1.5 py-0.5 text-[10px] font-mono bg-slate-100 text-slate-700 border border-slate-200 rounded tabular-nums">
+                        Audio {audioDurationSec.toFixed(2)}s / Transcript {activeCues[activeCues.length - 1].end.toFixed(2)}s
+                      </span>
+                    )}
+                  </div>
                   <p className="text-[11px] text-slate-500 mt-0.5">
-                    @xun52000 Word Reveal và 3D Shapes đã gộp chung vào quy tắc dàn cảnh tự động — sao chép Prompt dán vào ChatGPT/Gemini → dán JSON sang Bước 3.
+                    Chuẩn 5 tầng: giữ nguyên văn source_segments, chia nhiều scene sư phạm, neo thời gian sync_anchor và chống chồng hình — sao chép dán vào ChatGPT/Gemini → dán JSON sang Bước 3.
                   </p>
                 </div>
 
@@ -1527,18 +1547,85 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
                 className="w-full p-3 text-[11px] font-mono bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 leading-relaxed"
               />
 
-              {jsonPreviewSummary && (
-                <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-emerald-50 border border-emerald-200 text-xs text-emerald-800">
-                  <span className="inline-flex items-center gap-1.5 font-medium">
-                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                    <span>
-                      JSON hợp lệ: {jsonPreviewSummary.elementCount} lớp chữ/ảnh tự động ·{' '}
-                      {jsonPreviewSummary.cueCount} câu karaoke
+              {jsonPreviewSummary && validationReport && (
+                <div className="space-y-2">
+                  <div
+                    className={`flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-lg border text-xs ${
+                      validationReport.errors.length > 0
+                        ? 'bg-red-50 border-red-200 text-red-800'
+                        : validationReport.warnings.length > 0
+                          ? 'bg-amber-50 border-amber-200 text-amber-900'
+                          : 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                    }`}
+                  >
+                    <span className="inline-flex items-center gap-1.5 font-medium flex-wrap">
+                      {validationReport.errors.length > 0 ? (
+                        <XCircle className="w-3.5 h-3.5 text-red-600 shrink-0" />
+                      ) : validationReport.warnings.length > 0 ? (
+                        <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                      ) : (
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                      )}
+                      <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-white/80 border border-current/20">
+                        {jsonPreviewSummary.schemaVersion === '1.9' ? 'Storyboard v1.9' : 'Legacy JSON'}
+                      </span>
+                      <span>
+                        {jsonPreviewSummary.sceneCount} scene ·{' '}
+                        {jsonPreviewSummary.schemaVersion === '1.9'
+                          ? `${jsonPreviewSummary.sourceSegmentCount} source_segments · `
+                          : ''}
+                        {jsonPreviewSummary.elementCount} elements · {jsonPreviewSummary.cueCount} câu karaoke
+                      </span>
                     </span>
-                  </span>
-                  <span className="text-[11px] text-emerald-700 truncate max-w-[220px]">
-                    {jsonPreviewSummary.types.slice(0, 4).join(', ')}
-                  </span>
+                    <span className="text-[11px] opacity-80 truncate max-w-[240px]">
+                      {validationReport.errors.length > 0
+                        ? `${validationReport.errors.length} lỗi ngữ nghĩa`
+                        : validationReport.warnings.length > 0
+                          ? `${validationReport.warnings.length} cảnh báo`
+                          : jsonPreviewSummary.types.slice(0, 4).join(', ')}
+                    </span>
+                  </div>
+
+                  {(validationReport.errors.length > 0 || validationReport.warnings.length > 0) && (
+                    <div
+                      data-testid="storyboard-validator-issues"
+                      className="p-2.5 rounded-lg bg-white border border-slate-200 space-y-1.5 text-[11px]"
+                    >
+                      <div className="flex items-center justify-between text-[10.5px] font-semibold text-slate-700">
+                        <span>Kiểm tra ngữ nghĩa (Stage 4 Validator)</span>
+                        <span>
+                          {validationReport.errors.length} lỗi · {validationReport.warnings.length} cảnh báo
+                        </span>
+                      </div>
+                      <ul className="space-y-1 max-h-36 overflow-y-auto pr-1">
+                        {[...validationReport.errors, ...validationReport.warnings]
+                          .slice(0, 6)
+                          .map((issue, idx) => (
+                            <li
+                              key={`${issue.code}-${issue.elementId || issue.segmentId || idx}`}
+                              className={`flex items-start gap-1.5 px-2 py-1 rounded ${
+                                issue.severity === 'error'
+                                  ? 'bg-red-50/80 text-red-800'
+                                  : 'bg-amber-50/80 text-amber-900'
+                              }`}
+                            >
+                              <span className="font-mono text-[10px] font-semibold shrink-0">
+                                [{issue.code}]
+                              </span>
+                              <span className="leading-snug">
+                                {issue.elementId ? `${issue.elementId}: ` : issue.segmentId ? `${issue.segmentId}: ` : ''}
+                                {issue.message}
+                              </span>
+                            </li>
+                          ))}
+                      </ul>
+                      {validationReport.errors.length + validationReport.warnings.length > 6 && (
+                        <p className="text-[10px] text-slate-500">
+                          ...còn {validationReport.errors.length + validationReport.warnings.length - 6} mục khác (hệ thống tự chuẩn hóa alias icon / neo thời gian khi dựng).
+                        </p>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
 

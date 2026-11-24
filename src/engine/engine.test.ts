@@ -115,6 +115,12 @@ import {
   encodeStereoFloatChannelsToWavArrayBuffer,
   shiftReadingWordsForIntro,
 } from './audioMixHelper';
+import {
+  buildSourceSegmentsFromCues,
+  normalizeSceneIconWithAlias,
+  resolveSyncAnchorTiming,
+} from './storyboardV19';
+import { validateStoryboardDocument } from './storyboardValidator';
 
 test('interpolateWordTimings distributes word timestamps across cue duration', () => {
   const words = interpolateWordTimings('Give me water please', 1.0, 3.0);
@@ -688,19 +694,28 @@ test('Look/See/Watch context picks phrase-icon-split and still applies after JSO
   const transcript = 'Look, see, and watch. I see TV every night is wrong. Watch the TV instead.';
   assert.equal(pickCompositionFromContext(transcript), 'phrase-icon-split');
   const recomposed = recomposeProjectWithStyle(PRESET_JP_EN_POLITE, 'phrase-icon-split');
+  const illVariants = recomposed.elements
+    .filter((e) => e.props.kind === 'illustration-prop')
+    .map((e) => (e.props.kind === 'illustration-prop' ? e.props.variant : ''));
+  assert.ok(illVariants.includes('phrase-icon-split'));
+  assert.ok(illVariants.includes('contrast-pair-cards'));
+  assert.ok(illVariants.includes('trio-icon-cards'));
   assert.ok(
-    recomposed.elements.some(
-      (e) => e.props.kind === 'illustration-prop' && e.props.variant === 'phrase-icon-split',
-    ),
+    recomposed.elements.filter((e) => e.type !== 'karaoke-card').length >= 18,
+    'phrase-icon-split must preserve full scene chrome and beats across the timeline',
   );
   const forced = applyCompositionToProject(PRESET_JP_EN_POLITE, 'phrase-icon-split');
   assert.equal(forced.compositionId, 'phrase-icon-split');
   assert.equal(findVisualOverlaps(recomposed.elements).length, 0);
 });
 
-test('vectorComponentDb resolves expanded @englishpracticing168 scenes, 42 icons, and dynamic-scene contrasts', () => {
-  assert.ok(ALL_SCENE_ICONS.length >= 40);
-  assert.ok(ALL_ILLUSTRATION_VARIANTS.length >= 30);
+test('vectorComponentDb resolves expanded @englishpracticing168 scenes, icons, and contrast/quiz cards', () => {
+  assert.ok(ALL_SCENE_ICONS.length >= 42);
+  assert.ok(ALL_SCENE_ICONS.includes('glasses'));
+  assert.ok(ALL_ILLUSTRATION_VARIANTS.length >= 33);
+  assert.ok(ALL_ILLUSTRATION_VARIANTS.includes('trio-icon-cards'));
+  assert.ok(ALL_ILLUSTRATION_VARIANTS.includes('contrast-pair-cards'));
+  assert.ok(ALL_ILLUSTRATION_VARIANTS.includes('quiz-fill-blank'));
 
   assert.equal(
     resolveContextualVisualForCue('Please show your boarding pass at airport gate B4').variant,
@@ -742,6 +757,19 @@ test('vectorComponentDb resolves expanded @englishpracticing168 scenes, 42 icons
     resolveContextualVisualForCue('Use rising intonation when asking yes/no questions').variant,
     'intonation-curve',
   );
+  assert.equal(
+    resolveContextualVisualForCue('Question: I cannot see without my glasses, fill in the blank')
+      .variant,
+    'quiz-fill-blank',
+  );
+  assert.equal(
+    resolveContextualVisualForCue("You can't swap them! Look and Watch are not the same").variant,
+    'contrast-pair-cards',
+  );
+  assert.equal(
+    resolveContextualVisualForCue('Look, see, or watch? Learn the difference!').variant,
+    'trio-icon-cards',
+  );
 
   // Stop saying X -> Say Y generates dynamic-scene split-compare
   const stopSaying = resolveContextualVisualForCue('Stop saying very busy. Say swamped instead.');
@@ -751,6 +779,7 @@ test('vectorComponentDb resolves expanded @englishpracticing168 scenes, 42 icons
   // Icon resolver
   assert.equal(pickContextualSceneIcon('Check in your luggage before the flight'), 'airplane');
   assert.equal(pickContextualSceneIcon('Bring an umbrella for heavy rain'), 'umbrella');
+  assert.equal(pickContextualSceneIcon('I cannot see without my reading glasses'), 'glasses');
 });
 
 test('context-locked randomization forbids irrelevant clock-spotlight, unifies word-reveal & 3d-shapes, and supports clean themes', () => {
@@ -1878,6 +1907,454 @@ test('computeStaggerItemState reveals staggered children smoothly without negati
   assert.equal(done.translateY, 0);
   assert.equal(done.scale, 1);
 });
+
+test('Storyboard v1.9 prompt preserves verbatim source_segments, audioDurationSec gap, and 5-stage schema rules', () => {
+  const cues = [
+    { id: 'c1', start: 0.0, end: 3.4, text: '"I\'m looking," he says,', words: [] },
+    { id: 'c2', start: 3.5, end: 7.2, text: 'because the bright light was glowing.', words: [] },
+    { id: 'c3', start: 134.0, end: 138.264, text: 'And that is why careful observation matters.', words: [] },
+  ];
+
+  const prompt = buildSceneGenerationPrompt(cues, {
+    title: 'Observation Story',
+    style: 'tiktok-cards',
+    compositionId: 'ai-decide',
+    audioDurationSec: 140.9,
+  });
+
+  assert.ok(prompt.includes('"schema_version": "1.9"'));
+  assert.ok(prompt.includes('"source_segments"'));
+  assert.ok(prompt.includes('\\"I\'m looking,\\" he says,'));
+  assert.ok(prompt.includes('140.90s'));
+  assert.ok(prompt.includes('138.26s'));
+  assert.ok(prompt.includes('sync_anchor'));
+  assert.ok(prompt.includes('tuyệt đối KHÔNG tự bịa tên'));
+
+  const segments = buildSourceSegmentsFromCues(cues);
+  assert.equal(segments.length, 3);
+  assert.equal(segments[0].segment_id, 'seg_001');
+  assert.equal(segments[0].text, '"I\'m looking," he says,');
+});
+
+test('validateStoryboardDocument catches semantic errors and approves clean multi-scene v1.9 JSON', () => {
+  const cues = [
+    { id: 'c1', start: 0.0, end: 4.0, text: '"I\'m looking," he says, under the bright lamp.', words: [] },
+    { id: 'c2', start: 4.2, end: 8.5, text: 'First compare option A with option B carefully.', words: [] },
+    { id: 'c3', start: 8.7, end: 12.8, text: 'Finally, confirm the step on the right.', words: [] },
+  ];
+
+  const validDoc = {
+    schema_version: '1.9',
+    title: 'Multi-Scene Lesson',
+    theme: 'studio-slate',
+    compositionId: 'story-scenes',
+    compositionReason: 'Narrative story with comparison',
+    style_profile: {
+      palette: 'studio-slate',
+      primaryAccent: '#4F46E5',
+    },
+    source_segments: buildSourceSegmentsFromCues(cues),
+    scenes: [
+      {
+        scene_id: 'sc_01',
+        title: 'Scene 1',
+        learning_objective: 'Introduce dialogue context',
+        elements: [
+          {
+            element_id: 'el_01',
+            kind: 'text',
+            role: 'quote_card',
+            content: '"I\'m looking," he says, under the bright lamp.',
+            sync_anchor: {
+              segment_id: 'seg_001',
+              anchor_type: 'full_segment',
+              quote: '"I\'m looking," he says,',
+            },
+            position: { x: 0.08, y: 0.14, width: 0.84, height: 0.14 },
+          },
+          {
+            element_id: 'el_02',
+            kind: 'illustration',
+            role: 'visual',
+            variant: 'css-sticky-note',
+            sceneIcon: 'lightning',
+            sync_anchor: {
+              segment_id: 'seg_001',
+              anchor_type: 'phrase',
+              quote: 'under the bright lamp',
+            },
+            position: { x: 0.12, y: 0.34, width: 0.76, height: 0.24 },
+          },
+        ],
+      },
+      {
+        scene_id: 'sc_02',
+        title: 'Scene 2',
+        learning_objective: 'Compare options visually',
+        elements: [
+          {
+            element_id: 'el_03',
+            kind: 'object',
+            role: 'subject',
+            object_spec: { label: 'Option A', icon: 'book' },
+            sync_anchor: {
+              segment_id: 'seg_002',
+              anchor_type: 'segment_start',
+              quote: 'First compare option A',
+            },
+            position: { x: 0.08, y: 0.22, width: 0.36, height: 0.22 },
+          },
+          {
+            element_id: 'el_04',
+            kind: 'connector',
+            role: 'relation',
+            connector_spec: { from: 'el_03', to: 'el_05', direction: 'right', label: 'vs', arrow: true },
+            sync_anchor: {
+              segment_id: 'seg_002',
+              anchor_type: 'phrase',
+              quote: 'with option B',
+            },
+            position: { x: 0.45, y: 0.28, width: 0.1, height: 0.1 },
+          },
+          {
+            element_id: 'el_05',
+            kind: 'object',
+            role: 'target',
+            object_spec: { label: 'Option B', icon: 'scale' },
+            sync_anchor: {
+              segment_id: 'seg_003',
+              anchor_type: 'full_segment',
+              quote: 'confirm the step',
+            },
+            position: { x: 0.56, y: 0.22, width: 0.36, height: 0.22 },
+          },
+        ],
+      },
+    ],
+  };
+
+  const cleanReport = validateStoryboardDocument(validDoc, cues, { audioDurationSec: 13.0 });
+  assert.deepEqual(cleanReport.errors, []);
+  assert.deepEqual(cleanReport.warnings, []);
+  assert.equal(cleanReport.valid, true);
+  assert.equal(cleanReport.schemaVersion, '1.9');
+
+  // Now construct a broken doc with every semantic bug
+  const brokenDoc = {
+    schema_version: '1.9',
+    source_segments: [
+      { segment_id: 'seg_001', start: 0, end: 4, text: 'I\'m looking he says' }, // drifted punctuation
+      { segment_id: 'seg_001', start: 4.2, end: 8.5, text: 'Duplicate segment ID' }, // duplicate ID
+    ],
+    scenes: [
+      {
+        scene_id: 'sc_01',
+        elements: [
+          {
+            element_id: 'el_dup',
+            kind: 'text',
+            content: 'Bad quote and karaoke zone breach',
+            sync_anchor: {
+              segment_id: 'seg_001',
+              anchor_type: 'phrase',
+              quote: 'completely fabricated quote',
+            },
+            position: { x: 0.08, y: 0.72, width: 0.84, height: 0.16 }, // 0.88 > 0.76 karaoke zone
+          },
+          {
+            element_id: 'el_dup', // duplicate element ID
+            kind: 'illustration',
+            sceneIcon: 'tree', // unsupported icon
+            sync_anchor: {
+              segment_id: 'seg_999', // missing segment
+              anchor_type: 'segment_start',
+            },
+            position: { x: 0.10, y: 0.72, width: 0.70, height: 0.14 }, // overlaps el_dup
+          },
+        ],
+      },
+    ],
+  };
+
+  const brokenReport = validateStoryboardDocument(brokenDoc, cues, { audioDurationSec: 15.0 });
+  assert.equal(brokenReport.valid, false);
+  const errorCodes = new Set(brokenReport.errors.map((e) => e.code));
+  const warningCodes = new Set(brokenReport.warnings.map((w) => w.code));
+  assert.ok(errorCodes.has('DUPLICATE_SEGMENT_ID'));
+  assert.ok(errorCodes.has('DUPLICATE_ELEMENT_ID'));
+  assert.ok(errorCodes.has('MISSING_SYNC_SEGMENT'));
+  assert.ok(errorCodes.has('SYNC_ANCHOR_QUOTE_MISMATCH'));
+  assert.ok(errorCodes.has('INVALID_SCENE_ICON'));
+  assert.ok(errorCodes.has('KARAOKE_ZONE_VIOLATION'));
+  assert.ok(errorCodes.has('ELEMENT_SPATIAL_OVERLAP'));
+  assert.ok(warningCodes.has('TRANSCRIPT_NOT_VERBATIM'));
+  assert.ok(warningCodes.has('AUDIO_TAIL_GAP'));
+});
+
+test('scenePlanToProject converts multi-scene v1.9 JSON with sync_anchor phrase timing, normalized top-left geometry, object/connector, and Python support', () => {
+  const cues = [
+    {
+      id: 'c1',
+      start: 0.0,
+      end: 4.0,
+      text: '"I\'m looking," he says, under the lamp.',
+      words: [
+        { word: '"I\'m', start: 0.0, end: 0.5 },
+        { word: 'looking,"', start: 0.55, end: 1.1 },
+        { word: 'he', start: 1.15, end: 1.4 },
+        { word: 'says,', start: 1.45, end: 1.9 },
+        { word: 'under', start: 2.0, end: 2.4 },
+        { word: 'the', start: 2.45, end: 2.7 },
+        { word: 'lamp.', start: 2.75, end: 3.9 },
+      ],
+    },
+    { id: 'c2', start: 4.2, end: 8.4, text: 'Compare option A with option B.', words: [] },
+  ];
+
+  // Test phrase-level word snapping
+  const phraseResolved = resolveSyncAnchorTiming(
+    { segment_id: 'seg_001', anchor_type: 'phrase', quote: 'under the lamp' },
+    { segment_id: 'seg_001', start: 0.0, end: 4.0, text: cues[0].text },
+    cues,
+    0.0,
+    4.0,
+    1.5,
+  );
+  assert.ok(Math.abs(phraseResolved.startTime - 2.0) < 0.05);
+  assert.ok(Math.abs(phraseResolved.endTime - 3.9) < 0.05);
+
+  // Test invalid icon alias fallback
+  const alias = normalizeSceneIconWithAlias('lightbulb');
+  assert.equal(alias.icon, 'lightning');
+
+  const v19Plan = {
+    schema_version: '1.9',
+    title: 'v1.9 Lesson',
+    theme: 'studio-slate',
+    compositionId: 'story-scenes',
+    source_segments: buildSourceSegmentsFromCues(cues),
+    scenes: [
+      {
+        scene_id: 'sc_01',
+        title: 'Intro',
+        elements: [
+          {
+            element_id: 'el_title',
+            kind: 'pill',
+            content: 'DIALOGUE',
+            sync_anchor: { segment_id: 'seg_001', anchor_type: 'segment_start', quote: '"I\'m looking,"' },
+            position: { x: 0.30, y: 0.06, width: 0.40, height: 0.05 },
+          },
+          {
+            element_id: 'el_lamp',
+            kind: 'illustration',
+            sceneIcon: 'lightbulb',
+            variant: 'css-sticky-note',
+            title: 'Under the lamp',
+            sync_anchor: { segment_id: 'seg_001', anchor_type: 'phrase', quote: 'under the lamp' },
+            position: { x: 0.10, y: 0.20, width: 0.80, height: 0.28 },
+          },
+        ],
+      },
+      {
+        scene_id: 'sc_02',
+        title: 'Compare',
+        elements: [
+          {
+            element_id: 'el_obj_a',
+            kind: 'object',
+            object_spec: { label: 'Option A', icon: 'book' },
+            sync_anchor: { segment_id: 'seg_002', anchor_type: 'segment_start', quote: 'Option A' },
+            position: { x: 0.08, y: 0.22, width: 0.36, height: 0.20 },
+          },
+          {
+            element_id: 'el_conn',
+            kind: 'connector',
+            connector_spec: { from: 'el_obj_a', to: 'el_obj_b', direction: 'right', label: 'vs', arrow: true },
+            sync_anchor: { segment_id: 'seg_002', anchor_type: 'full_segment' },
+            position: { x: 0.45, y: 0.27, width: 0.10, height: 0.10 },
+          },
+          {
+            element_id: 'el_obj_b',
+            kind: 'object',
+            object_spec: { label: 'Option B', icon: 'check' },
+            sync_anchor: { segment_id: 'seg_002', anchor_type: 'phrase', quote: 'option B' },
+            position: { x: 0.56, y: 0.22, width: 0.36, height: 0.20 },
+          },
+        ],
+      },
+    ],
+  };
+
+  const parsed = parseScenePlanJson(JSON.stringify(v19Plan));
+  assert.ok(parsed);
+  const summary = summarizeScenePlan(parsed!, cues);
+  assert.equal(summary.schemaVersion, '1.9');
+  assert.equal(summary.sceneCount, 2);
+  assert.equal(summary.sourceSegmentCount, 2);
+  assert.equal(summary.elementCount, 5);
+
+  const project = scenePlanToProject([], parsed!, { title: 'v1.9 Test', cuesOverride: cues });
+  assert.equal(findVisualOverlaps(project.elements).length, 0);
+
+  const lampEl = project.elements.find((e) => e.id.includes('el_lamp'));
+  assert.ok(lampEl && lampEl.props.kind === 'illustration-prop');
+  assert.ok(Math.abs(lampEl!.startTime - 2.0) < 0.05);
+  assert.equal(lampEl!.props.kind === 'illustration-prop' ? lampEl!.props.data?.sceneIcon : '', 'lightning');
+
+  const connEl = project.elements.find((e) => e.id.includes('el_conn'));
+  assert.ok(connEl && connEl.props.kind === 'illustration-prop');
+  assert.ok((connEl!.props.kind === 'illustration-prop' ? connEl!.props.data?.customPrimitives?.length ?? 0 : 0) >= 2);
+
+  // Center check for el_obj_a: x=0.08, width=0.36 => centerX = (0.08 + 0.18)*1080 = 280.8
+  const objA = project.elements.find((e) => e.id.includes('el_obj_a'));
+  assert.ok(objA && Math.abs(objA.layout.x - 280.8) < 40);
+
+  // Python generator supports v1.9 scene_id / source_segments / sync_anchor
+  const pyFiles = generatePythonProjectFiles(project);
+  const timelinePy = pyFiles['timeline.py'] || '';
+  const loaderPy = pyFiles['loader.py'] || '';
+  assert.ok(timelinePy.includes('source_segments'));
+  assert.ok(timelinePy.includes('sync_anchor'));
+  assert.ok(loaderPy.includes("scene.get('scene_id'"));
+});
+
+test('Storyboard v1.9 preserves animation.duration_s transition without truncating component visibility, enriches bare-text scenes, and clamps canvas bounds', () => {
+  const cues = [
+    { id: 'c1', start: 0.0, end: 4.5, text: 'First compare polite requests at the airport gate.', words: [] },
+    { id: 'c2', start: 4.7, end: 9.0, text: 'Always double check your boarding pass before boarding.', words: [] },
+  ];
+
+  // 1. animation.duration_s: 0.35 must NOT truncate pill/strip/illustration/object to 0.6s-1.2s
+  const docWithAnimDur = {
+    schema_version: '1.9',
+    title: 'Transition Duration Regression',
+    theme: 'pastel-sunrise',
+    compositionId: 'story-scenes',
+    source_segments: buildSourceSegmentsFromCues(cues),
+    scenes: [
+      {
+        scene_id: 'sc_01',
+        title: 'Scene 1',
+        elements: [
+          {
+            element_id: 'el_strip',
+            kind: 'strip',
+            role: 'comparison_header',
+            items: [{ label: 'Basic' }, { label: 'Natural' }],
+            sync_anchor: { segment_id: 'seg_001', anchor_type: 'segment_start', quote: 'First compare' },
+            position: { x: 0.08, y: 0.06, width: 0.84, height: 0.07 },
+            animation: { in: 'drop-in', out: 'fade-out', duration_s: 0.35 },
+          },
+          {
+            element_id: 'el_pill',
+            kind: 'pill',
+            role: 'scene_title',
+            content: 'AIRPORT POLITE REQUESTS',
+            sync_anchor: { segment_id: 'seg_001', anchor_type: 'segment_start', quote: 'First compare' },
+            position: { x: 0.20, y: 0.145, width: 0.60, height: 0.05 },
+            animation: { in: 'pop-up', out: 'fade-out', duration_s: 0.35 },
+          },
+          {
+            element_id: 'el_ill',
+            kind: 'illustration',
+            variant: 'bs-card-header',
+            title: 'Boarding Gate Check',
+            sync_anchor: { segment_id: 'seg_001', anchor_type: 'phrase', quote: 'airport gate' },
+            position: { x: 0.01, y: 0.22, width: 0.42, height: 0.20 },
+            animation: { in: 'fade-scale', out: 'fade-out', duration_s: 0.35 },
+          },
+        ],
+      },
+      {
+        // Text-only scene should be enriched with a contextual illustration-prop automatically
+        scene_id: 'sc_02',
+        title: 'Bare Text Scene',
+        elements: [
+          {
+            element_id: 'el_txt_only',
+            kind: 'text',
+            role: 'example_sentence',
+            content: 'Always double check your boarding pass before boarding.',
+            sync_anchor: { segment_id: 'seg_002', anchor_type: 'full_segment', quote: 'boarding pass' },
+            position: { x: 0.72, y: 0.48, width: 0.40, height: 0.16 },
+          },
+        ],
+      },
+    ],
+  };
+
+  const parsed = parseScenePlanJson(JSON.stringify(docWithAnimDur));
+  assert.ok(parsed);
+  const project = scenePlanToProject([], parsed!, { cuesOverride: cues });
+
+  const stripEl = project.elements.find((e) => e.id === 'el_strip');
+  const pillEl = project.elements.find((e) => e.id === 'el_pill');
+  const illEl = project.elements.find((e) => e.id === 'el_ill');
+  const txtEl = project.elements.find((e) => e.id === 'el_txt_only');
+  const enrichedEl = project.elements.find((e) => e.id.startsWith('auto-enrich-prop-'));
+
+  assert.ok(stripEl && stripEl.endTime - stripEl.startTime >= 4.0, 'strip should hold across scene');
+  assert.ok(pillEl && pillEl.endTime - pillEl.startTime >= 2.2, 'pill should not flash for 0.6s');
+  assert.ok(
+    illEl && illEl.endTime >= 4.45 && illEl.endTime - illEl.startTime >= 1.0,
+    'illustration should hold through end of segment without flashing',
+  );
+  assert.ok(enrichedEl && enrichedEl.props.kind === 'illustration-prop', 'bare-text cue should receive contextual illustration');
+
+  // Horizontal bounds clamping check for edge-placed narrow boxes
+  for (const el of [illEl!, txtEl!]) {
+    const b = estimateElementBounds(el);
+    assert.ok(b.left >= 20, `left bound ${b.left} should be >= 20`);
+    assert.ok(b.right <= 1060, `right bound ${b.right} should be <= 1060`);
+  }
+
+  // word-reveal must stay minimal without injecting auto-enrich-prop-
+  const wordRevealOnly = parseScenePlanJson(
+    JSON.stringify({
+      schema_version: '1.9',
+      compositionId: 'word-reveal',
+      source_segments: buildSourceSegmentsFromCues(cues.slice(0, 1)),
+      scenes: [docWithAnimDur.scenes[1]],
+    }),
+  );
+  const wordRevealProj = scenePlanToProject([], wordRevealOnly!, {
+    cuesOverride: cues.slice(0, 1),
+    compositionId: 'word-reveal',
+  });
+  assert.ok(!wordRevealProj.elements.some((e) => e.id.startsWith('auto-enrich-prop-')));
+
+  // Wide Step-1 cuesOverride (e.g., 0..9.2s) must NOT suppress enrichment for bare-text seg_002 (4.7..9.0s)
+  const wideCueProject = scenePlanToProject([], parsed!, {
+    cuesOverride: [
+      {
+        id: 'wide-c1',
+        start: 0.0,
+        end: 9.2,
+        text: 'First compare polite requests at the airport gate. Always double check your boarding pass before boarding.',
+        words: [],
+      },
+    ],
+  });
+  const wideEnriched = wideCueProject.elements.find(
+    (e) => e.id.startsWith('auto-enrich-prop-') && e.startTime <= 5.0 && e.endTime >= 8.5,
+  );
+  assert.ok(wideEnriched, 'wide Step-1 cuesOverride should not mask bare-text v1.9 segment 2');
+
+  // Rich v1.9 prompt sample includes multi-scene components and transition clarification
+  const richPrompt = buildSceneGenerationPrompt(cues, {
+    title: 'Airport Check',
+    compositionId: 'ai-decide',
+  });
+  assert.ok(richPrompt.includes('"kind": "strip"'));
+  assert.ok(richPrompt.includes('"kind": "illustration"'));
+  assert.ok(richPrompt.includes('"kind": "object"'));
+  assert.ok(richPrompt.includes('"kind": "connector"'));
+  assert.ok(richPrompt.includes('"kind": "meter"'));
+  assert.ok(richPrompt.includes('CHỈ là tốc độ hiệu ứng bay vào/ra'));
+});
+
+
 
 
 

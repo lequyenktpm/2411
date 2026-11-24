@@ -392,6 +392,65 @@ function buildBeatSegments(project: LessonProject): Array<{
         topicColor: pillProps?.textColor ?? '#4338CA',
       });
     });
+
+    // Preserve any cues not covered by existingCards so recomposing never drops spoken segments
+    const uncoveredGroups: TranscriptCue[][] = [];
+    let currentGroup: TranscriptCue[] = [];
+    for (const cue of cues) {
+      const cueMid = (cue.start + cue.end) / 2;
+      const isCovered = existingCards.some(
+        (c) => cueMid >= c.startTime - 0.15 && cueMid <= c.endTime + 0.15,
+      );
+      if (isCovered) {
+        if (currentGroup.length > 0) {
+          uncoveredGroups.push(currentGroup);
+          currentGroup = [];
+        }
+        continue;
+      }
+      const groupDuration = currentGroup.length > 0 ? cue.end - currentGroup[0].start : 0;
+      if (currentGroup.length >= 3 || (currentGroup.length > 0 && groupDuration > 8.0)) {
+        uncoveredGroups.push(currentGroup);
+        currentGroup = [cue];
+      } else {
+        currentGroup.push(cue);
+      }
+    }
+    if (currentGroup.length > 0) {
+      uncoveredGroups.push(currentGroup);
+    }
+
+    uncoveredGroups.forEach((slice) => {
+      const first = slice[0];
+      const last = slice[slice.length - 1];
+      const combined = slice.map((c) => c.text).join(' ');
+      const targetCue = slice.find((c) => extractTargetSentence(c)) ?? first;
+      const cardText = extractTargetSentence(targetCue) ?? cleanShortPhrase(first.text, 7);
+      const mid = (first.start + last.end) / 2;
+      const matchingPill = existingPills.find((p) => mid >= p.startTime && mid <= p.endTime);
+      const pillProps =
+        matchingPill?.props.kind === 'topic-pill' ? matchingPill.props : undefined;
+      const isNeg = /(rude|wrong|avoid|never|ぶっきらぼう|NG)/i.test(combined);
+      const isPos = /(polite|better|natural|could|may|丁寧|自然)/i.test(combined);
+
+      segments.push({
+        startTime: first.start,
+        endTime: last.end,
+        cueText: combined,
+        cardText,
+        badge: isNeg ? 'cross' : isPos ? 'check' : 'none',
+        stampText: isNeg ? 'AVOID' : undefined,
+        stampColor: isNeg ? '#DC2626' : undefined,
+        emphasisColor: isNeg ? '#DC2626' : '#2563EB',
+        topicLabel:
+          pillProps?.text ??
+          (isNeg ? 'Avoid this' : isPos ? 'Natural choice' : `Part ${segments.length + 1}`),
+        topicBg: pillProps?.bgColor ?? (isNeg ? '#FEE2E2' : isPos ? '#DCFCE7' : '#DDD6FE'),
+        topicColor: pillProps?.textColor ?? (isNeg ? '#B91C1C' : isPos ? '#15803D' : '#4338CA'),
+      });
+    });
+
+    segments.sort((a, b) => a.startTime - b.startTime);
     return segments;
   }
 
@@ -540,12 +599,17 @@ function buildIllustrationDataForComposition(
       }
 
       if (distinctUpgrades.length > 0) {
+        const usedPrompts = new Set<string>();
         distinctUpgrades.forEach((u, i) => {
           const prevText = i === 0 ? basePrompt : cleanShortPhrase(distinctUpgrades[i - 1].cardText, 4, 21);
-          const promptText =
+          let promptText =
             i > 0 && prevText === rows[i - 1]?.prompt
               ? `${distinctUpgrades[i - 1].topicLabel || `Step ${i}`}`
               : prevText;
+          if (usedPrompts.has(promptText)) {
+            promptText = `${promptText} (${i + 1})`;
+          }
+          usedPrompts.add(promptText);
           rows.push({
             prompt: promptText,
             upgrade: cleanShortPhrase(u.cardText, 4, 21),
@@ -630,20 +694,79 @@ function buildIllustrationDataForComposition(
 
     case 'phrase-icon-split': {
       const split = splitPhraseForIcon(seg.cardText);
-      const nodes: IllustrationFlowNode[] = stripItems.slice(0, 3).map((it, idx) => ({
-        label: it.label.toUpperCase(),
-        sublabel: it.sublabel,
-        color: it.accentColor || ['#94A3B8', '#64748B', '#6366F1'][idx],
-      }));
+      const fallbackColors = ['#64748B', '#2563EB', '#7C3AED'];
+      const fallbackIcons: IllustrationSceneIcon[] = ['chat', 'handshake', 'sparkles'];
+      const usedIcons = new Set<IllustrationSceneIcon>();
+      const nodes: IllustrationFlowNode[] = stripItems.slice(0, 3).map((it, idx) => {
+        const picked = pickContextualSceneIcon(
+          `${it.label} ${it.sublabel || ''}`,
+          fallbackIcons[idx % fallbackIcons.length],
+        );
+        const sceneIcon = usedIcons.has(picked)
+          ? fallbackIcons.find((ic) => !usedIcons.has(ic)) ?? picked
+          : picked;
+        usedIcons.add(sceneIcon);
+        return {
+          label: it.label.toUpperCase(),
+          sublabel: it.sublabel,
+          color: it.accentColor || fallbackColors[idx % fallbackColors.length],
+          sceneIcon,
+        };
+      });
+
+      if (segIdx === 0 || segIdx % 3 === 0) {
+        return {
+          variant: 'phrase-icon-split',
+          data: {
+            title: stripItems.map((s) => s.label).join(' / '),
+            nodes,
+            speechText: split.prefix,
+            highlightWord: split.highlight,
+            subtitle:
+              seg.subtext ||
+              (seg.badge === 'cross'
+                ? 'Avoid using this literally'
+                : 'Use the right word for context'),
+            sceneIcon: pickContextualSceneIcon(`${seg.cueText} ${seg.cardText}`, 'sparkles'),
+          },
+        };
+      }
+
+      if (segIdx % 3 === 1) {
+        const leftItem = stripItems[0];
+        const rightItem = stripItems[Math.min(2, stripItems.length - 1)] ?? stripItems[1];
+        return {
+          variant: 'contrast-pair-cards',
+          data: {
+            labels: [leftItem?.label || 'Basic', rightItem?.label || 'Natural'],
+            formula: seg.badge === 'cross' ? 'cross' : 'arrow',
+            nodes: [
+              {
+                label: leftItem?.label || 'Avoid',
+                sublabel: leftItem?.sublabel || seg.topicLabel,
+                color: leftItem?.accentColor || '#DC2626',
+              },
+              {
+                label: rightItem?.label || 'Natural',
+                sublabel: rightItem?.sublabel || 'better fit',
+                color: rightItem?.accentColor || '#16A34A',
+              },
+            ],
+          },
+        };
+      }
+
       return {
-        variant: 'phrase-icon-split',
+        variant: 'trio-icon-cards',
         data: {
-          title: stripItems.map((s) => s.label).join(' / '),
-          nodes,
-          speechText: split.prefix,
-          highlightWord: split.highlight,
-          subtitle: seg.badge === 'cross' ? `${seg.cardText} = wrong` : undefined,
-          sceneIcon: pickContextualSceneIcon(`${seg.cueText} ${seg.cardText}`, 'sparkles'),
+          nodes:
+            nodes.length >= 2
+              ? nodes
+              : [
+                  { label: 'Focus', sublabel: 'on purpose', sceneIcon: 'eye', color: '#2563EB' },
+                  { label: 'Notice', sublabel: 'automatic', sceneIcon: 'glasses', color: '#64748B' },
+                  { label: 'Follow', sublabel: 'in motion', sceneIcon: 'tv', color: '#D97706' },
+                ],
         },
       };
     }
@@ -922,10 +1045,12 @@ export function recomposeProjectWithStyle(
       },
       'phrase-icon-split': {
         showStrip: true,
-        stripY: 185,
-        pillY: 335,
-        illY: 780,
-        cardY: 985,
+        stripY: 168,
+        pillY: 295,
+        illY: 600,
+        cardY: 980,
+        pillBg: '#EEF2FF',
+        pillColor: '#4338CA',
         showToneMeter: false,
       },
     };
@@ -960,10 +1085,9 @@ export function recomposeProjectWithStyle(
       const nextSegStart =
         idx < segments.length - 1 ? Math.max(safeEnd, segments[idx + 1].startTime - 0.03) : project.duration;
 
-      const skipChrome = compositionId === 'phrase-icon-split';
       const pillStart = Math.max(safeStart, lastPillEnd + 0.03);
       const pillEnd = Math.max(safeEnd, nextSegStart);
-      if (!skipChrome && pillEnd - pillStart >= 0.35) {
+      if (pillEnd - pillStart >= 0.35) {
         newVisuals.push({
           id: `comp-pill-${idx + 1}`,
           type: 'topic-pill',
@@ -1020,7 +1144,7 @@ export function recomposeProjectWithStyle(
       }
 
       const cardStart = Math.max(safeStart, lastCardEnd + 0.03);
-      if (!skipChrome && safeEnd - cardStart >= 0.35) {
+      if (safeEnd - cardStart >= 0.35) {
         newVisuals.push({
           id: `comp-card-${idx + 1}`,
           type: 'sentence-card',

@@ -63,6 +63,7 @@ export const SCENE_ICON_KEYWORDS: Array<{
   { icon: 'handshake', label: 'Giao tiếp / Thỏa thuận', keywords: /\b(agree|deal|welcome|hello|meet|greeting|polite|respect|thank)\b/i },
   { icon: 'chat', label: 'Hội thoại / Trò chuyện', keywords: /\b(chat|talk|conversation|dialogue|ask|answer|reply)\b/i },
   { icon: 'tv', label: 'Màn hình / TV / Phim', keywords: /\b(tv|television|screen|movie|film|show|netflix|youtube)\b/i },
+  { icon: 'glasses', label: 'Kính mắt / Thị lực', keywords: /\b(glasses|eyeglasses|spectacles|vision)\b/i },
   { icon: 'watch', label: 'Quan sát / Xem', keywords: /\b(watch|watching|moving|action|match|game)\b/i },
   { icon: 'eye', label: 'Nhìn / Quan tâm', keywords: /\b(look|see|eye|eyes|notice|sight)\b/i },
   { icon: 'listen', label: 'Nghe / Lắng nghe', keywords: /\b(listen|hear|sound|ear|ears|audio)\b/i },
@@ -287,9 +288,33 @@ export const VECTOR_COMPONENT_CATALOG: VectorComponentMeta[] = [
     variant: 'phrase-icon-split',
     category: 'vocab',
     label: 'Câu tách icon (@168 Look/See/Watch)',
-    description: 'Quote lớn chèn icon ngữ cảnh ngay giữa câu và pill từ cuối',
+    description: 'Khung tổng hợp quy tắc trên cùng, quote lớn kèm thẻ icon vector và pill từ nhấn',
     keywords: /\b(look|see|watch|hear|listen|say|tell|talk|make|do|borrow|lend)\b/i,
     defaultIcon: 'eye',
+  },
+  {
+    variant: 'trio-icon-cards',
+    category: 'vocab',
+    label: 'Bộ 3 Thẻ Icon (@168 Trio Cards)',
+    description: '3 thẻ bo tròn nổi bật xếp ngang kèm icon + nhãn ngắn gọn (Look / See / Watch)',
+    keywords: /\b(look.*see.*watch|hear.*listen.*sound|three ways|three verbs|trio)\b/i,
+    defaultIcon: 'eye',
+  },
+  {
+    variant: 'contrast-pair-cards',
+    category: 'grammar',
+    label: 'Cặp Thẻ Đối Chiếu (@168 Swap / Vs)',
+    description: '2 thẻ viền màu lớn đối chiếu qua biểu tượng ⊗ hoặc → ở giữa (Look ⊗ Watch)',
+    keywords: /\b(can't swap|swap them|difference between|compare pair|not the same)\b/i,
+    defaultIcon: 'scale',
+  },
+  {
+    variant: 'quiz-fill-blank',
+    category: 'dialogue',
+    label: 'Thẻ Quiz Điền Từ (@168 Fill Blank)',
+    description: 'Pill Question + câu điền chỗ trống ______ + hình minh họa gợi ý ngay phía dưới',
+    keywords: /\b(question \d|fill in|blank|____+|without my glasses|your turn)\b/i,
+    defaultIcon: 'glasses',
   },
 
   // ── Pronunciation & Listening @englishpracticing168 ──────────────────────
@@ -598,6 +623,7 @@ export function pickContextualSceneIcon(
   // Preserve explicit priority for TV / Look / See / Watch / Walk / Phone when present
   const lower = t.toLowerCase();
   if (/(tv|television|screen|movie|film|video)/.test(lower)) return 'tv';
+  if (/\b(glasses|eyeglasses|spectacles)\b/.test(lower)) return 'glasses';
   if (/\bwatch\b/.test(lower) && /(moving|action|game|match)/.test(lower)) return 'watch';
   if (/\b(look|see|eye|watch)\b/.test(lower)) return 'eye';
   if (/(listen|hear|sound|ear)/.test(lower)) return 'listen';
@@ -1094,6 +1120,51 @@ export function resolveContextualVisualForCue(
         value: /yesterday|used to|ago/.test(t) ? 0.16 : /tomorrow|will|going to/.test(t) ? 0.84 : 0.5,
         formula: cleanSnippet(cardText || cueText, 24),
         sceneIcon: 'calendar',
+      },
+    };
+  }
+  if (/\b(question\s*\d+|fill in|____+|without my glasses)\b/i.test(t)) {
+    const qLabelMatch = combined.match(/\b(question\s*\d+)\b/i);
+    return {
+      variant: 'quiz-fill-blank',
+      sceneIcon: /\bglasses\b/i.test(t) ? 'glasses' : icon,
+      category: 'dialogue',
+      matchedRule: 'quiz-fill-blank',
+      data: {
+        title: qLabelMatch?.[1] || 'Question',
+        speechText: cleanSnippet(cardText || cueText, 44),
+        highlightWord: /\b(see|watch|look|could|may)\b/i.exec(t)?.[1] ?? undefined,
+        sceneIcon: /\bglasses\b/i.test(t) ? 'glasses' : icon,
+      },
+    };
+  }
+  if (/\b(can't swap|swap them|difference between|not the same|mix them up)\b/i.test(t)) {
+    return {
+      variant: 'contrast-pair-cards',
+      sceneIcon: 'scale',
+      category: 'grammar',
+      matchedRule: 'contrast-pair-cards',
+      data: {
+        title: "You can't swap them",
+        labels: /\b(look|watch)\b/i.test(t) ? ['Look', 'Watch'] : ['Literal', 'Natural'],
+        formula: 'cross',
+        sceneIcon: 'scale',
+      },
+    };
+  }
+  if (/(look.*see.*watch|hear.*listen.*sound|say.*tell.*talk|three ways)/i.test(t)) {
+    return {
+      variant: 'trio-icon-cards',
+      sceneIcon: 'eye',
+      category: 'vocab',
+      matchedRule: 'trio-icon-cards',
+      data: {
+        nodes: [
+          { label: 'Look', sublabel: 'on purpose', sceneIcon: 'eye', color: '#2563EB' },
+          { label: 'See', sublabel: 'automatic', sceneIcon: 'glasses', color: '#64748B' },
+          { label: 'Watch', sublabel: 'moving', sceneIcon: 'tv', color: '#D97706' },
+        ],
+        sceneIcon: 'eye',
       },
     };
   }

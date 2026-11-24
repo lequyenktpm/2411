@@ -93,6 +93,7 @@ export interface TopicPillProps {
 export type IllustrationSceneIcon =
   | 'tv'
   | 'eye'
+  | 'glasses'
   | 'watch'
   | 'listen'
   | 'walk'
@@ -153,6 +154,9 @@ export type BuiltinIllustrationVariant =
   | 'spatial-boxes'
   | 'avatar-speech'
   | 'phrase-icon-split'
+  | 'trio-icon-cards'
+  | 'contrast-pair-cards'
+  | 'quiz-fill-blank'
   | 'airport-travel'
   | 'restaurant-order'
   | 'shopping-price'
@@ -197,6 +201,7 @@ export interface IllustrationFlowNode {
   label: string;
   sublabel?: string;
   icon?: 'clock' | 'history' | 'rocket' | 'chat' | 'star' | 'check' | 'water' | 'office';
+  sceneIcon?: IllustrationSceneIcon;
   color?: string;
 }
 

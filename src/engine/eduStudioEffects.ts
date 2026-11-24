@@ -902,14 +902,15 @@ export function renderReadingAlongFrame(
   const pillH = Math.max(24, refH * 0.03);
 
   if (opts.topicBadge) {
+    const badgeW = Math.min(contentW * 0.72, Math.max(200, width * 0.42));
     ctx.save();
     ctx.fillStyle = isChalkboard ? 'rgba(255,255,255,0.12)' : palette.headerBg;
-    roundRectPath(ctx, padX, pillY, Math.min(contentW * 0.72, Math.max(200, width * 0.42)), pillH, pillH / 2);
+    roundRectPath(ctx, padX, pillY, badgeW, pillH, pillH / 2);
     ctx.fill();
     ctx.fillStyle = isChalkboard ? '#FDE68A' : palette.headerText;
     ctx.font = `700 ${Math.round(refH * 0.0155)}px "Plus Jakarta Sans", sans-serif`;
     ctx.textBaseline = 'middle';
-    ctx.fillText(opts.topicBadge, padX + 14, pillY + pillH / 2);
+    ctx.fillText(opts.topicBadge, padX + 14, pillY + pillH / 2, Math.max(80, badgeW - 28));
     ctx.restore();
   }
 

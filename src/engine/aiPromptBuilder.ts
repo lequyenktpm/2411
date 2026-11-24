@@ -1,5 +1,6 @@
 import { TYPOGRAPHY_MOBILE_READABILITY_PROMPT_BLOCK } from './englishReelsEngine';
 import { LAYOUT_COMPOSITIONS } from './illustrationLayouts';
+import { buildSourceSegmentsFromCues } from './storyboardV19';
 import { formatTimeToken } from './transcriptParser';
 import {
   CanvasThemeId,
@@ -19,6 +20,7 @@ export function buildSceneGenerationPrompt(
     compositionId?: LayoutCompositionId | 'ai-decide';
     theme?: CanvasThemeId;
     customConfig?: CustomComponentPresetConfig;
+    audioDurationSec?: number | null;
   },
 ): string {
   const style = options?.style ?? 'tiktok-cards';
@@ -27,8 +29,14 @@ export function buildSceneGenerationPrompt(
   const aiDecideComposition = options?.compositionId === 'ai-decide';
 
   const totalStart = cues.length > 0 ? formatTimeToken(cues[0].start) : '00:00:00.000';
-  const totalEnd =
-    cues.length > 0 ? formatTimeToken(cues[cues.length - 1].end + 0.4) : '00:00:30.000';
+  const cuesLastEnd = cues.length > 0 ? cues[cues.length - 1].end : 30.0;
+  const totalEnd = formatTimeToken(cuesLastEnd + 0.4);
+  const audioDur =
+    typeof options?.audioDurationSec === 'number' && options.audioDurationSec > 0
+      ? options.audioDurationSec
+      : null;
+  const tailGap =
+    audioDur !== null && cues.length > 0 ? Number((audioDur - cuesLastEnd).toFixed(2)) : null;
 
   const compMeta =
     !aiDecideComposition && options?.compositionId
@@ -36,6 +44,8 @@ export function buildSceneGenerationPrompt(
       : undefined;
 
   const { variantsListText, sceneIconsListText } = getCatalogSummaryForPrompt();
+  const sourceSegments = buildSourceSegmentsFromCues(cues);
+  const sourceSegmentsJson = JSON.stringify(sourceSegments, null, 2);
 
   // ── Style guide block ──────────────────────────────────────────────────────
   let styleGuide: string;
@@ -52,32 +62,34 @@ export function buildSceneGenerationPrompt(
     if (cc?.accentColor?.trim()) hintParts.push(`màu nhấn (\`accentColor\`): "${cc.accentColor.trim()}"`);
 
     styleGuide = `CHẾ ĐỘ TỰ SÁNG TẠO COMPONENT TỪ KHO (AI LÀ NGƯỜI SÁNG TẠO CHÍNH — STRICT CONTEXT MATCH):
-- **NGUYÊN TẮC CỐT LÕI**: AI tự do sáng tạo, phối hợp đa dạng toàn bộ Kho Component (54+ mẫu \`bs-*\`, \`css-*\`, life scenes, \`dynamic_scene\`) VÀ \`customPrimitives[]\` cho từng câu thoại — KHÔNG rập khuôn 1 mẫu duy nhất cho cả bài.
-- **BẮT BUỘC SÁT NGỮ CẢNH (STRICT CONTEXT)**: Mỗi \`variant\`, \`sceneIcon\`, \`title\`, \`labels\` (tự nghĩ 2–3 nhãn súc tích theo đúng câu nói) hoặc \`customPrimitives\` phải phản ánh CHÍNH XÁC ý nghĩa từ vựng / tình huống của cue tại mốc thời gian đó. Tuyệt đối KHÔNG dùng nhãn chung chung vô nghĩa (như "Step 1", "Step 2") hay icon lạc đề.${
+- **NGUYÊN TẮC CỐT LÕI**: AI tự do sáng tạo, phối hợp đa dạng toàn bộ Kho Component (54+ mẫu \`bs-*\`, \`css-*\`, life scenes, \`dynamic_scene\`), \`object\`, \`connector\` VÀ \`customPrimitives[]\` cho từng scene — KHÔNG rập khuôn 1 mẫu duy nhất cho cả bài.
+- **BẮT BUỘC SÁT NGỮ CẢNH (STRICT CONTEXT)**: Mỗi \`variant\`, \`sceneIcon\`, \`title\`, \`labels\` (tự nghĩ 2–3 nhãn súc tích theo đúng segment) hoặc \`customPrimitives\` phải phản ánh CHÍNH XÁC ý nghĩa từ vựng / tình huống của \`sync_anchor\` tại mốc đó. Tuyệt đối KHÔNG dùng nhãn chung chung vô nghĩa hay icon lạc đề.${
       hintParts.length > 0
-        ? `\n- **Gợi ý tùy chọn từ người dùng** (chỉ áp dụng ở các cue liên quan, không nhồi vào mọi cue nếu lệch ngữ cảnh): ${hintParts.join(', ')}.`
+        ? `\n- **Gợi ý tùy chọn từ người dùng** (chỉ áp dụng ở scene liên quan, không nhồi vào mọi scene nếu lệch ngữ cảnh): ${hintParts.join(', ')}.`
         : ''
     }`;
   } else if (isWordReveal || options?.compositionId === 'word-reveal') {
     styleGuide = `PHONG CÁCH WORD-REVEAL (@xun52000 — Kinetic Typography tập trung chữ lớn):
 - Đặt "theme": "${options?.theme ?? 'studio-slate'}" (hoặc "pastel-sunrise" / "soft-lavender" / "mint-breeze" / "warm-paper").
-- Mỗi câu thoại → 1 "sentence_card" to, căn giữa (y ≈ 780), làm nổi từ khóa bằng "emphasisWord" + "emphasisColor": "#FACC15" (nền tối) hoặc "#4F46E5" (nền sáng).
-- "subtext": nghĩa / phonetic nhỏ hơn phía dưới. Dùng enterAnimation "fade-scale" hoặc "pop-up" ngắn ≤ 0.3s.
-- Có thể thêm "word_stack" (y ≈ 650) cho các bài đối chiếu nhiều dạng hoặc "staircase_3d" (y ≈ 780, fill="#FACC15") khi liệt kê 3 cấp độ.
-- Vùng karaoke (y ≥ 1450) vẫn để app tự render — KHÔNG đặt phần tử tại đây.`;
+- Mỗi ý chính → 1 element \`kind: "text"\` / \`sentence_card\` to rõ (vùng giữa \`y: 0.30..0.52, height: 0.16\`), làm nổi từ khóa bằng \`style.emphasisWord\` + \`style.emphasisColor: "#FACC15"\` (nền tối) hoặc \`"#4F46E5"\` (nền sáng).
+- "subtext": nghĩa / phonetic nhỏ hơn phía dưới. Dùng \`animation: { "in": "fade-scale", "out": "fade-out", "duration_s": 0.3 }\`.
+- Có thể thêm \`word_stack\` hoặc \`shape_3d\` (\`shape_type: "staircase_3d"\`, \`fill: "#FACC15"\`) khi liệt kê 3 cấp độ.
+- Vùng karaoke (\`y: 0.76..1.00\`) để app tự render — KHÔNG đặt phần tử tại đây.`;
   } else if (is3D || options?.compositionId === '3d-shapes') {
     styleGuide = `PHONG CÁCH 3D NỔI + KARAOKE ĐẬM:
 - Đặt "theme": "${options?.theme ?? 'studio-slate'}" (hoặc các nền sáng/tối tùy chọn, chữ karaoke vàng #FACC15 khi nền tối).
-- Ưu tiên dùng "card_3d", "pill_3d", "cube_3d", "staircase_3d" làm điểm nhấn chính ở Vùng C & Vùng D.`;
+- Ưu tiên dùng \`kind: "shape_3d"\` với \`shape_type: "card_3d" | "pill_3d" | "cube_3d" | "staircase_3d"\` làm điểm nhấn chính ở \`y: 0.24..0.68\`.`;
   } else if (aiDecideComposition) {
-    // AI tự quyết định phong cách phối tối ưu dựa trên nội dung
-    const compositionList = LAYOUT_COMPOSITIONS.filter((c) => c.id !== 'custom').map(
-      (c) => `  - "${c.id}" → ${c.name}: ${c.description} (theme: ${c.recommendedTheme}, signature: ${c.signatureVariant})`,
-    ).join('\n');
+    const compositionList = LAYOUT_COMPOSITIONS.filter((c) => c.id !== 'custom')
+      .map(
+        (c) =>
+          `  - "${c.id}" → ${c.name}: ${c.description} (theme: ${c.recommendedTheme}, signature: ${c.signatureVariant})`,
+      )
+      .join('\n');
 
     styleGuide = `PHONG CÁCH TIKTOK GIẢNG DẠY (@englishpracticing168) — CHẾ ĐỘ AI TỰ CHỌN PHỐI TỐI ƯU (KHÔNG RANDOM):
 
-**NHIỆM VỤ BỔ SUNG**: Đọc toàn bộ transcript, nhận diện mô típ bài (đối chiếu 2–3 từ gần nghĩa, nâng cấp câu, đồng hồ/giờ, hội thoại đời sống, checklist đúng/sai, word-reveal chữ lớn, khối 3D nổi, sân bay, nhà hàng, mua sắm, phát âm...), rồi chọn ĐÚNG 1 id dưới đây:
+**NHIỆM VỤ BỔ SUNG**: Đọc toàn bộ \`source_segments\`, nhận diện mô típ bài, rồi chọn ĐÚNG 1 id làm \`compositionId\` chủ đạo (mỗi scene vẫn có thể ghi \`composition\` phù hợp ngữ cảnh):
 ${compositionList}
 
 Quy tắc chọn (ưu tiên từ trên xuống):
@@ -91,22 +103,15 @@ Quy tắc chọn (ưu tiên từ trên xuống):
 - 3 khái niệm / giới từ / trọng âm → "spatial-contrast"
 - Từ khóa/câu ngắn mạnh phong cách @xun52000 → "word-reveal"
 - Bài giảng 3 cấp độ dùng khối nổi 3D → "3d-shapes"
-- Cảnh đời sống (quán, công sở, bạn bè, sân bay, nhà hàng, mua sắm, bác sĩ, thời tiết...) → "story-scenes"
+- Cảnh đời sống / hội thoại / câu chuyện (quán, công sở, bạn bè, sân bay, nhà hàng, mua sắm, bác sĩ, thời tiết...) → "story-scenes"
 
-Cách "tạo phong cách mới" AN TOÀN (không được linh tinh):
-- KHÔNG invent type, variant, hay toạ độ ngoài 5 vùng.
-- Được phép ghép linh hoạt kho 50+ vector & Bootstrap 5 / Modern CSS variants, 42 \`sceneIcon\`, schema \`"dynamic_scene"\`, hoặc tự vẽ component mới qua \`"customPrimitives"\` để minh họa khớp từng câu nói.
-- 1 bài = 1 signature illustration chủ đạo hoặc mỗi câu 1 cảnh đúng ngữ cảnh. Không chồng 2 sơ đồ khác nhau trong cùng 1 mốc giờ.
-
-Sau khi chọn:
-1. \`"compositionId": "<id đã chọn>"\`
-2. \`"compositionReason": "<1 câu, nêu đúng mô típ transcript>"\`
-3. Theme = theme khuyến nghị của kiểu phối.
-4. Điền data sát chữ trong bài (dùng \`sceneIcon\` phù hợp trong kho 42 icon).`;
+Quy tắc an toàn (KHÔNG invent type hay icon ngoài danh mục):
+- KHÔNG invent type/kind, variant, hay \`sceneIcon\` ngoài danh sách cho phép (tuyệt đối KHÔNG bịa icon như "tree" hay "lightbulb").
+- Được phép kết hợp linh hoạt 50+ vector & Bootstrap 5 / Modern CSS variants, 42 \`sceneIcon\`, \`dynamic-scene\`, \`object\`, \`connector\`, và \`customPrimitives\` để minh họa đúng từng cảnh sư phạm.`;
   } else {
     styleGuide = `PHONG CÁCH TIKTOK GIẢNG DẠY (@englishpracticing168)${compMeta ? ` — KIỂU PHỐI: ${compMeta.name}` : ''}:
-- Đặt "theme": "${options?.theme ?? compMeta?.recommendedTheme ?? 'pastel-sunrise'}" (hoặc "soft-lavender" / "mint-breeze" / "warm-paper").
-- Kết hợp thanh đối chiếu trên cùng ("comparison_strip"), nhãn ngữ cảnh ("topic_pill"), hình minh họa/sơ đồ sát ngữ cảnh (${compMeta ? `ưu tiên "${compMeta.signatureVariant}"` : 'đa dạng từ kho 50+ vector & Bootstrap 5 / Modern CSS hoặc dynamic_scene'}), thẻ câu nổi bật ("sentence_card"), bậc thang 3D ("staircase_3d"), và thanh sắc thái ("tone_meter").`;
+- Đặt "theme": "${options?.theme ?? compMeta?.recommendedTheme ?? 'pastel-sunrise'}" (hoặc "soft-lavender" / "mint-breeze" / "warm-paper" / "studio-slate").
+- Kết hợp thanh đối chiếu (\`kind: "strip"\` / \`comparison_strip\`), nhãn mục tiêu (\`kind: "pill"\`), minh họa ngữ nghĩa (\`kind: "illustration"\` — ${compMeta ? `ưu tiên "${compMeta.signatureVariant}"` : 'đa dạng kho 50+ Bootstrap/CSS & vector'} hoặc \`kind: "object"\` + \`"connector"\`), thẻ câu ví dụ (\`kind: "text"\` / \`sentence_card\`), \`staircase_3d\`, và \`tone_meter\`.`;
   }
 
   const transcriptLines = cues
@@ -116,115 +121,213 @@ Sau khi chọn:
     )
     .join('\n');
 
-  const extraOutputFields = aiDecideComposition
-    ? `  "compositionId": "story-scenes",\n  "compositionReason": "...",\n  `
-    : '  ';
-
   const resolvedTemplateTheme =
     options?.theme ??
     (isWordReveal || is3D ? 'studio-slate' : compMeta?.recommendedTheme ?? 'pastel-sunrise');
 
-  return `# VAI TRÒ
-Bạn là Đạo diễn Motion Graphics tự động cho video dọc 9:16 (1080×1920).
-Người dùng **KHÔNG tự thiết kế**. JSON do bạn sinh ra là **xương sống điều khiển toàn bộ chữ, hình minh họa, khối 3D và hiệu ứng ẩn/hiện** đồng bộ 100% với Audio + Transcript dưới đây.
+  const audioDiagLine =
+    audioDur !== null
+      ? `- Tổng thời lượng Audio đo được: **${audioDur.toFixed(2)}s** · Segment cuối kết thúc lúc: **${cuesLastEnd.toFixed(2)}s**${
+          tailGap !== null && tailGap > 0.8
+            ? ` (dư khoảng lặng/outro **+${tailGap.toFixed(2)}s** ở cuối — giữ nguyên timestamp thật của segment, KHÔNG kéo dài sai hoặc trộn bộ timestamp khác)`
+            : ''
+        }.`
+      : `- Tổng phạm vi Transcript: \`${totalStart}\` → \`${totalEnd}\` (${cues.length} segments).`;
 
-# NHIỆM VỤ
-Phân tích toàn bộ ${cues.length} câu thoại từ \`${totalStart}\` đến \`${totalEnd}\` và trả về **DUY NHẤT 1 KHỐI JSON HỢP LỆ** (không giải thích ngoài JSON) để app tự động dựng thành video hoàn chỉnh.
+  const exampleSegId = sourceSegments[0]?.segment_id ?? 'seg_001';
+  const exampleQuote = (sourceSegments[0]?.text ?? 'Lesson intro').slice(0, 60);
 
-# ${styleGuide}
+  return `# KIẾN TRÚC PIPELINE 5 GIAI ĐOẠN — STORYBOARD SCHEMA v1.9
+Bạn đóng vai **Instructional Designer + Motion Graphics Director** cho video dọc 9:16 (1080×1920).
+Trả về **DUY NHẤT 1 KHỐI JSON HỢP LỆ** chuẩn \`schema_version: "1.9"\` (không giải thích ngoài JSON).
+
+## STAGE 1 — AUDIO + TRANSCRIPT (BẢO TOÀN NGUYÊN VĂN 100%)
+${audioDiagLine}
+- **LUẬT BẢO TOÀN TRANSCRIPT**: Sao chép CHÍNH XÁC từng ký tự trong \`source_segments[]\` bên dưới (giữ nguyên dấu phẩy, dấu ngoặc kép \`"..."\`, chấm hỏi, xuống dòng, \`segment_id\`, \`start\`, \`end\`). Tuyệt đối KHÔNG sửa chính tả, không bỏ dấu ngoặc kép (VD: \`"I'm looking," he says,\` phải giữ nguyên từng dấu câu). Không bao giờ trộn hai bộ timestamp khác nhau.
+
+## STAGE 2 — INSTRUCTIONAL DESIGNER (CHIA ĐA SCENE SƯ PHẠM)
+- **CẤM DỒN 1 SCENE**: Tuyệt đối KHÔNG nhét toàn bộ bài vào 1 scene \`sc1\` duy nhất! Hãy chia bài học thành **nhiều \`scenes[]\` liên tiếp** (\`sc_01\`, \`sc_02\`, \`sc_03\`... mỗi scene 1–4 câu hoặc 1 ý sư phạm rõ ràng: Intro Hook → Tình huống/Quy tắc 1 → Đối chiếu/Ví dụ 2 → Takeaway/Practice).
+- Mỗi scene phải có \`scene_id\`, \`title\`, \`learning_objective\`, \`composition\`, \`transition\`, và dạy được ý nghĩa bài học **ngay cả khi tắt tiếng** nhờ sơ đồ/vật thể/chú thích trực quan.
+
+## STAGE 3 — MOTION GRAPHICS DIRECTOR (TỌA ĐỘ 0..1 & ĐỒNG BỘ \`sync_anchor\`)
+### ${styleGuide}
 Tiêu đề bài học: "${options?.title || 'Language Lesson'}"
 
-# HỆ THỐNG 5 VÙNG BỐ CỤC CHỐNG CHỒNG ĐÈ (BẮT BUỘC)
-Khung hình rộng 1080 × cao 1920. Mọi phần tử chỉ được đặt đúng vùng Y tương ứng:
-- **Vùng A (y = 185)** — \`comparison_strip\`: Thanh 2–4 mục chính xuyên suốt bài (tự sáng viền theo \`activateAt\`).
-- **Vùng B (y = 335)** — \`topic_pill\`: Nhãn tiêu đề phần hiện tại (VD: \`"Picture this"\`, \`"1. Casual"\`, \`"Pro Tip"\`, \`"Quiz"\`).
-- **Vùng C (y = 620)** — \`illustration\` / \`dynamic_scene\` / \`staircase_3d\` / \`word_stack\` / \`cube_3d\`: Hình minh họa hoặc sơ đồ trung tâm.
-- **Vùng D (y = 970)** — \`sentence_card\` / \`card_3d\`: Câu ví dụ hoặc từ khóa cần nhấn mạnh (tách câu mục tiêu ra thẻ to rõ).
-- **Vùng E (y = 1215)** — \`tone_meter\`: Thanh trượt sắc thái/mức độ (khi có sự so sánh trái-phải).
-- **VÙNG CẤM (y = 1450..1850)**: Chừa trống hoàn toàn — app tự render phụ đề karaoke highlight từng từ tại đây.
+### Hệ tọa độ chuẩn hóa 0..1 (Top-Left Origin, CHỐNG CHỒNG HÌNH)
+Mỗi element dùng \`position: { "x": 0..1, "y": 0..1, "width": 0..1, "height": 0..1 }\` tính từ góc **trên-trái**:
+- \`y: 0.06 .. 0.14\` — Thanh đối chiếu (\`kind: "strip"\` / \`comparison_strip\`) hoặc Header bài.
+- \`y: 0.15 .. 0.22\` — Nhãn mục tiêu / ngữ cảnh (\`kind: "pill"\`).
+- \`y: 0.23 .. 0.48\` — Minh họa chính / Sơ đồ / Vật thể ngữ nghĩa (\`kind: "illustration"\`, \`"object"\`, \`"connector"\`, \`"shape_3d"\`, \`"word_stack"\`).
+- \`y: 0.50 .. 0.65\` — Thẻ câu trọng tâm / giải thích (\`kind: "text"\` / \`sentence_card\`).
+- \`y: 0.66 .. 0.74\` — Thanh sắc thái (\`kind: "meter"\`) nếu có.
+- **VÙNG CẤM KARAOKE (\`y >= 0.76\`..1.00)**: Chừa trống hoàn toàn để app tự render phụ đề Karaoke highlight từng từ. Mọi element PHẢI thỏa \`position.y + position.height <= 0.75\` và \`position.x + position.width <= 0.98\`.
+- **Chống chồng hình trong cùng Scene**: Hai element hiển thị trùng thời điểm trong cùng scene KHÔNG được có bounding-box \`position\` giao nhau (trừ \`connector\` nối giữa 2 khối).
 
-# TỪ ĐIỂN ELEMENT ĐƯỢC HỖ TRỢ TRONG \`elements[]\`
-1. \`comparison_strip\`:
-   \`{ "type": "comparison_strip", "start": "HH:MM:SS.mmm", "end": "HH:MM:SS.mmm", "y": 185, "items": [{ "label": "...", "sublabel": "...", "activateAt": "HH:MM:SS.mmm", "accentColor": "#2563EB" }] }\`
-2. \`topic_pill\`:
-   \`{ "type": "topic_pill", "start": "...", "end": "...", "y": 335, "text": "...", "bgColor": "#DDD6FE", "textColor": "#4338CA" }\`
-3. \`illustration\` (CHỌN \`variant\` SÁT NGHĨA VỚI CÂU THOẠI TẠI MỐC ĐÓ, không chọn bừa):
-   Kho 50+ vector, Bootstrap 5 & Modern CSS chuẩn @englishpracticing168:
+### Hệ thống đồng bộ \`sync_anchor\` (BẮT BUỘC trên mọi element)
+Thay vì tự đoán giây rời rạc, mọi element gắn với đoạn nói bằng:
+\`"sync_anchor": { "segment_id": "seg_001", "anchor_type": "segment_start" | "phrase" | "segment_end" | "full_segment", "quote": "<trích nguyên văn 100% chuỗi con nằm trong segment.text>" }\`
+- \`"phrase"\`: element xuất hiện đúng khoảnh khắc cụm từ \`quote\` được đọc trong segment đó!
+- \`"quote"\` PHẢI là chuỗi con xuất hiện nguyên văn trong \`source_segments[segment_id].text\` (không được tự viết lại khác dấu câu).
+
+### Các \`kind\` & Component được hỗ trợ trong \`elements[]\`
+1. \`"kind": "strip"\` (\`comparison_strip\`): \`items: [{ label, sublabel?, accentColor?, sync_anchor? }]\`
+2. \`"kind": "pill"\` (role \`"label"\` / \`"scene_title"\`): \`content\`, \`style: { bgColor, textColor }\`
+3. \`"kind": "text"\` (\`sentence_card\`): \`role\`: \`"headline" | "example_sentence" | "definition" | "note"\`, \`content\`, \`subtext\`, \`style: { badge: "check"|"cross"|"question"|"none", emphasisWord, emphasisColor, stampText, bgColor, textColor }\`
+4. \`"kind": "illustration"\`:
+   - \`variant\` CHỈ được chọn từ Kho 54+ Bootstrap 5 / Modern CSS / Vector bên dưới (hoặc \`"dynamic-scene"\` hoặc \`"custom-ui"\` kèm \`customPrimitives\`):
 ${variantsListText}
-   + \`"dynamic-scene"\`: Bố cục tự ghép bất kỳ chủ đề nào từ 42 icon + bảng so sánh / công thức / thẻ 3 cột.
-   Kho 42 \`sceneIcon\` cho \`phrase-icon-split\` và \`dynamic-scene\`:
-   ${sceneIconsListText}
-   Ví dụ: \`{ "type": "illustration", "variant": "css-sticky-note", "start": "...", "end": "...", "y": 635, "title": "QUICK RULE", "subtitle": "Could I + V?", "labels": ["Polite", "Natural"] }\`
-   Hoặc \`dynamic_scene\` tự ghép cho chủ đề mới:
-   \`{ "type": "dynamic_scene", "start": "...", "end": "...", "y": 635, "dynamicScene": { "layout": "split-compare"|"hero-icon-formula"|"triple-card-grid", "badgeText": "UPGRADE", "connector": "arrow"|"vs", "headline": "...", "motifs": [{ "icon": "airplane", "label": "Boarding pass", "sublabel": "Gate B4", "accent": "#2563EB", "status": "check" }] } }\`
-4. \`sentence_card\`:
-   \`{ "type": "sentence_card", "start": "...", "end": "...", "y": 985, "text": "Could I have some water, please?", "subtext": "Ghi chú ngắn hoặc nghĩa (tùy chọn)", "badge": "check", "emphasisWord": "Could I", "emphasisColor": "#16A34A", "stampText": "" }\`
-   (\`badge\`: \`"check"\` | \`"cross"\` | \`"question"\` | \`"none"\`; \`stampText\` dùng cho thẻ sai/cần tránh như \`"RUDE"\`)
-5. \`word_stack\`: Xếp chồng 2–4 dòng đối chiếu:
-   \`{ "type": "word_stack", "start": "...", "end": "...", "y": 680, "rows": [{ "prefix": "Can ", "suffix": "I...", "suffixColor": "#2563EB", "appearAt": "00:00:11.960", "phonetic": "Casual" }] }\`
-6. \`staircase_3d\`: Bậc thang 3 cấp 3D:
-   \`{ "type": "staircase_3d", "start": "...", "end": "...", "y": 780, "fill": "#F59E0B", "step_labels": ["Can", "Could", "May"] }\`
-7. \`tone_meter\`: Thanh trượt sắc thái:
-   \`{ "type": "tone_meter", "start": "...", "end": "...", "y": 1245, "title": "TONE", "leftLabel": "rude", "rightLabel": "polite", "valueStart": 0.5, "valueEnd": 0.14 }\`
-8. \`card_3d\` / \`pill_3d\` / \`cube_3d\`: Khối 3D nổi có chữ (\`text\`, \`fill\`, \`textColor\`, \`depth\`).
-
-# CÁCH TỰ TÙY BIẾN & THIẾT KẾ COMPONENT MỚI (BOOTSTRAP 5 / MODERN CSS + \`customPrimitives\`)
-Bạn có **2 cách tùy biến component** thay vì xuất thẻ lặp lại nhàm chán:
-1. **Tùy biến tham số trực tiếp trên mọi \`illustration\` (\`bs-*\`, \`css-*\`, vector)**:
-   Truyền \`title\`, \`subtitle\`, \`labels\` (mảng 2–4 nhãn), \`formula\`, \`value\` (0..1), \`highlightWord\`, \`sceneIcon\` (từ kho 42 icon) ngay trên element \`illustration\` để đổi nội dung bên trong Bootstrap card / Sticky Note / Magnifying Glass / Badge Cluster / Modal Quiz.
-2. **Tự thiết kế component UI mới hoàn toàn qua \`customPrimitives[]\`**:
-   Đặt trên element: \`{ "type": "illustration", "variant": "custom-ui", "start": "...", "end": "...", "y": 635, "customPrimitives": [...] }\`.
-   - Hệ tọa độ tương đối quanh tâm \`(0, 0)\`, vùng an toàn: \`x: -380..380\`, \`y: -145..145\`.
-   - 9 hình cơ bản được engine vẽ sắc nét lên Canvas:
-     + \`{ "shape": "rect", "x": -340, "y": -130, "w": 680, "h": 260, "radius": 24, "fill": "#FFFFFF", "stroke": "#E2E8F0", "lineWidth": 2, "shadow": true }\`
-     + \`{ "shape": "pill", "x": -120, "y": -108, "w": 240, "h": 42, "fill": "#EFF6FF", "stroke": "#93C5FD" }\`
-     + \`{ "shape": "circle", "x": -220, "y": 15, "r": 46, "fill": "#FEF3C7", "stroke": "#F59E0B" }\`
-     + \`{ "shape": "ellipse", "x": 0, "y": 95, "rx": 160, "ry": 20, "fill": "rgba(15,23,42,0.08)", "opacity": 0.8 }\`
-     + \`{ "shape": "line", "x": -300, "y": -42, "x2": 300, "y2": -42, "stroke": "#E2E8F0", "lineWidth": 2 }\`
-     + \`{ "shape": "arrow", "x": -60, "y": 25, "x2": 60, "y2": 25, "stroke": "#2563EB", "lineWidth": 5 }\`
-     + \`{ "shape": "polygon", "points": [{"x":0,"y":-40},{"x":40,"y":20},{"x":-40,"y":20}], "fill": "#4F46E5" }\`
-     + \`{ "shape": "icon", "icon": "sparkles", "x": -220, "y": 15 }\` (chọn \`icon\` trong kho 42 \`sceneIcon\`)
-     + \`{ "shape": "text", "x": 40, "y": -4, "text": "PRO TIP", "fill": "#0F172A", "fontSize": 36, "fontWeight": 800, "align": "center" }\`
+   - **CHỈ DÙNG 42 \`sceneIcon\` HỢP LỆ SAU** (tuyệt đối KHÔNG tự bịa tên như \`"tree"\`, \`"lightbulb"\`, \`"arrow"\`...):
+     ${sceneIconsListText}
+   - Có thể tùy biến tham số (\`title\`, \`subtitle\`, \`labels\`, \`formula\`, \`value\`, \`highlightWord\`, \`sceneIcon\`), dùng \`dynamicScene\`, hoặc tự vẽ qua \`customPrimitives[]\` (tọa độ tương đối tâm \`(0,0)\`: \`rect\`, \`pill\`, \`circle\`, \`ellipse\`, \`line\`, \`arrow\`, \`polygon\`, \`icon\`, \`text\`).
+5. \`"kind": "object"\`: Vật thể ngữ nghĩa tự dựng (\`object_spec: { label, sublabel, icon, primitives? }\` hoặc \`customPrimitives[]\`).
+6. \`"kind": "connector"\`: Mũi tên / đường nối quan hệ nhân-quả hoặc chuyển đổi (\`connector_spec: { from, to, direction: "right"|"left"|"down"|"up", label, arrow: true }\`).
+7. \`"kind": "word_stack"\`: \`rows: [{ prefix, suffix, suffixColor, phonetic, sync_anchor }]\`
+8. \`"kind": "shape_3d"\`: \`shape_type: "staircase_3d" | "card_3d" | "pill_3d" | "cube_3d"\`, \`step_labels\`, \`content\`, \`style: { fill, textColor, depth }\`
+9. \`"kind": "meter"\`: \`title\`, \`leftLabel\`, \`rightLabel\`, \`valueStart\`, \`valueEnd\`
 
 ${TYPOGRAPHY_MOBILE_READABILITY_PROMPT_BLOCK}
-   - **Mẫu công thức Bootstrap 5 & Modern CSS chuẩn đẹp (tham khảo phối màu \`#2563EB\`, \`#4F46E5\`, \`#16A34A\`, \`#D97706\`, \`#E11D48\`)**:
-     + *Left-Border Callout Card*: card trắng \`shadow: true\` + thanh nhấn dọc \`w: 12\` bên trái \`x: -334\` + badge \`pill\` + \`text\` tiêu đề đậm.
-     + *Bootstrap Colored Header + Divider*: \`rect\` nền trắng + \`rect\` header màu phía trên + \`line\` ngăn cách + 2–3 \`pill\` bên dưới.
-     + *Modern CSS Sticky Note*: nền vàng pastel \`#FEF3C7\` viền \`#F59E0B\` + đinh ghim \`circle\` đỏ \`#EF4444\` phía trên + chữ viết tay nổi bật.
-     + *Glassmorphism / Bento 2x2*: các ô \`rect\` dùng \`fill: "rgba(255,255,255,0.86)"\` xếp lưới cân đối + \`icon\` mỗi ô.
-     + *macOS Browser / Badge Cluster*: 3 chấm \`circle\` đỏ-vàng-xanh ở góc trên trái + cụm \`pill\` phân loại màu khác nhau.
 
-# LUẬT CHỐNG ĐỤNG HÀNG (CHỌN COMPONENT ĐA DẠNG MỖI VIDEO)
-1. **KHÔNG lặp nguyên mẫu**: Tuyệt đối KHÔNG dùng trùng một \`variant\` hoặc cùng \`dynamicScene.layout\` cho 2 cue liên tiếp nhau.
-2. **Phối hợp ít nhất 3–4 họ thị giác trong cùng 1 video**:
-   - Họ cảnh đời sống (\`cafe-water\`, \`hotel-desk\`, \`airport-travel\`, \`shopping-price\`, \`restaurant-order\`, \`doctor-health\`...)
-   - Họ UI Bootstrap 5 & Modern CSS (\`css-sticky-note\`, \`bs-badge-cluster\`, \`css-magnifying-word\`, \`bs-modal-quiz\`, \`bs-card-header\`, \`bs-pricing-tier\`, \`css-bento-stats\`, \`css-toggle-switch\`, \`css-chat-thread\`...)
-   - Họ sơ đồ / 3D / \`dynamic_scene\` (\`staircase_3d\`, \`word_stack\`, \`phrase-icon-split\`, \`split-compare\`, \`triple-card-grid\`)
-   - Họ tự thiết kế \`customPrimitives\` (nên tạo ít nhất 1–2 element dùng \`customPrimitives\` may đo riêng cho từ khóa/ngữ cảnh bài học để video không giống khuôn đúc sẵn).
+# LUẬT CHỐNG ĐỤNG HÀNG & ĐA DẠNG THỊ GIÁC
+1. **KHÔNG lặp nguyên mẫu**: Không dùng trùng \`variant\` hoặc \`dynamicScene.layout\` ở 2 scene/nhịp liên tiếp.
+2. **Phối hợp ít nhất 3–4 họ thị giác trong 1 video**: Họ đời sống (\`cafe-water\`, \`airport-travel\`...), Họ **BOOTSTRAP 5 / MODERN CSS** (\`css-sticky-note\`, \`bs-badge-cluster\`, \`css-magnifying-word\`, \`bs-modal-quiz\`, \`bs-card-header\`, \`css-bento-stats\`...), Họ sơ đồ/3D (\`staircase_3d\`, \`object\` + \`connector\`), và \`customPrimitives\`.
+3. **Nhất quán nghệ thuật (\`style_profile\`)**: Khai báo \`style_profile\` cố định bảng màu chủ đạo xuyên suốt các scene.
 
-# QUY TẮC DÀN CẢNH TỰ ĐỘNG & CHUYỂN CẢNH MƯỢT BẮT BUỘC
-1. **Phủ kín 100% thời lượng (Mượt, không giật cục)**: Từ \`${totalStart}\` đến \`${totalEnd}\`, luôn có ít nhất 1–2 thành phần thị giác đang hiển thị phù hợp với nội dung đang nói. Hạn chế cắt nhảy đột ngột < 1.2s trừ câu rất ngắn; mỗi phần tử nên kéo dài tối thiểu **1.8s–4.5s** để hiệu ứng trượt/nảy & stagger bên trong Bootstrap/CSS card kịp bung mượt trước khi chuyển sang cảnh mới.
-2. **Đa tầng đồng bộ (Flex Layering)**: Trong cùng 1 cue, đặt \`comparison_strip\` ở Vùng A giữ nhịp tổng thể (có \`activateAt\` khớp từng cue) + \`illustration\` (\`bs-*\` / \`css-*\` / life scene) ở Vùng C + \`sentence_card\` câu ví dụ ở Vùng D. Khi sang cue mới có thể giữ lại Vùng A/B và chỉ chuyển mượt Vùng C/D thay vì thay toàn bộ màn hình cùng 1 tích tắc!
-3. **Không bao giờ chồng đè**: Trong cùng 1 vùng (B, C, D, hoặc E), phần tử cũ phải có \`end <= start\` của phần tử tiếp theo trong cùng vùng đó.
-4. **Bắt đúng ngữ cảnh & câu ví dụ**: Chọn \`variant\` & \`sceneIcon\` khớp **trực tiếp nghĩa từ vựng / ngữ cảnh đời sống** trong câu nói (VD: giá tiền/quần áo → \`shopping-price\`; hỏi lịch sự/nâng cấp câu → \`dialogue-upgrade\` / \`bs-pricing-tier\` / \`css-toggle-switch\`; quy tắc ngữ pháp → \`css-grammar-equation\` / \`css-sticky-note\`; mẹo nhớ nhanh → \`bs-alert-tip\` / \`bs-toast-notify\`). Bất kỳ câu mẫu/cụm từ trọng tâm nào trong transcript phải xuất hiện trên \`sentence_card\` đúng lúc Audio đọc đến cue đó.
-5. **Định dạng đầu ra**: Chỉ trả về 1 object JSON theo mẫu sau:
+## STAGE 4 — TỰ KIỂM TRA SEMANTIC VALIDATOR TRƯỚC KHI XUẤT JSON
+Đảm bảo 100% các điều kiện sau trước khi trả JSON:
+- \`source_segments\` khớp nguyên văn transcript, không sót hay sửa dấu câu.
+- Có **nhiều scene** (\`scenes.length >= 2\` nếu transcript có ≥ 5 câu).
+- **Mỗi scene BẮT BUỘC có ít nhất 1 thành phần thị giác sinh động** (\`illustration\`, \`object\` + \`connector\`, \`shape_3d\`, hoặc \`word_stack\`) đi kèm \`pill\`/\`strip\`/\`text\` — **KHÔNG BAO GIỜ chỉ xuất mỗi \`text\` hay \`pill\` đơn điệu**.
+- Lưu ý: \`"animation": { "duration_s": 0.35 }\` CHỈ là tốc độ hiệu ứng bay vào/ra (transition), **KHÔNG phải thời lượng hiển thị** của component — app tự giữ component hiển thị trọn vẹn theo \`sync_anchor\` (\`full_segment\` / đến hết segment hoặc scene).
+- Mọi \`sync_anchor.segment_id\` đều tồn tại trong \`source_segments\` và \`sync_anchor.quote\` có thật trong \`segment.text\`.
+- Mọi \`sceneIcon\` đều nằm trong danh sách 42 icon chuẩn; mọi \`variant\` có trong Kho hoặc dùng \`customPrimitives\`.
+- Mọi \`position\` thỏa \`x >= 0\`, \`y >= 0\`, \`x + width <= 1\`, \`y + height <= 0.75\`, và không chồng nhau trong cùng scene.
 
+# MẪU JSON OUTPUT CHUẨN v1.9
 \`\`\`json
 {
+  "schema_version": "1.9",
   "title": "${options?.title || 'Language Lesson'}",
   "theme": "${resolvedTemplateTheme}",
-  ${extraOutputFields}"scenes": [
+  "compositionId": "${aiDecideComposition ? 'story-scenes' : compMeta?.id || 'story-scenes'}",
+  "compositionReason": "<1 câu ngắn nêu đúng mô típ bài học>",
+  "style_profile": {
+    "palette": "${resolvedTemplateTheme}",
+    "primaryAccent": "#2563EB",
+    "secondaryAccent": "#16A34A",
+    "cardStyle": "elevated-rounded",
+    "typography": "Outfit + Plus Jakarta Sans"
+  },
+  "source_segments": ${sourceSegmentsJson},
+  "scenes": [
     {
-      "id": "sc1",
+      "scene_id": "sc_01",
+      "title": "Hook & Core Contrast",
+      "learning_objective": "Introduce the core distinction visually",
+      "composition": "story-scenes",
+      "transition": "fade",
       "elements": [
-        { "type": "comparison_strip", "start": "${totalStart}", "end": "${totalEnd}", "y": 185, "items": [] }
+        {
+          "element_id": "el_01",
+          "kind": "strip",
+          "role": "comparison_header",
+          "items": [
+            { "label": "Literal", "sublabel": "Word for word", "accentColor": "#64748B" },
+            { "label": "Natural", "sublabel": "Native flow", "accentColor": "#2563EB" }
+          ],
+          "sync_anchor": { "segment_id": "${exampleSegId}", "anchor_type": "segment_start", "quote": ${JSON.stringify(exampleQuote)} },
+          "position": { "x": 0.08, "y": 0.06, "width": 0.84, "height": 0.07 },
+          "animation": { "in": "drop-in", "out": "fade-out", "duration_s": 0.35 }
+        },
+        {
+          "element_id": "el_02",
+          "kind": "pill",
+          "role": "scene_title",
+          "content": "CORE CONCEPT",
+          "sync_anchor": { "segment_id": "${exampleSegId}", "anchor_type": "segment_start", "quote": ${JSON.stringify(exampleQuote)} },
+          "position": { "x": 0.22, "y": 0.145, "width": 0.56, "height": 0.05 },
+          "style": { "bgColor": "#EEF2FF", "textColor": "#3730A3" },
+          "animation": { "in": "pop-up", "out": "fade-out", "duration_s": 0.35 }
+        },
+        {
+          "element_id": "el_03",
+          "kind": "illustration",
+          "role": "visual",
+          "variant": "bs-card-header",
+          "sceneIcon": "sparkles",
+          "formula": "LESSON FOCUS",
+          "title": "Key Contrast",
+          "subtitle": "Visualize the real-life situation clearly",
+          "highlightWord": "Native Tip",
+          "sync_anchor": { "segment_id": "${exampleSegId}", "anchor_type": "full_segment", "quote": ${JSON.stringify(exampleQuote)} },
+          "position": { "x": 0.08, "y": 0.22, "width": 0.84, "height": 0.22 },
+          "animation": { "in": "fade-scale", "out": "fade-out", "duration_s": 0.35 }
+        },
+        {
+          "element_id": "el_04",
+          "kind": "text",
+          "role": "example_sentence",
+          "content": ${JSON.stringify(exampleQuote)},
+          "subtext": "Natural native phrasing",
+          "sync_anchor": { "segment_id": "${exampleSegId}", "anchor_type": "full_segment", "quote": ${JSON.stringify(exampleQuote)} },
+          "position": { "x": 0.08, "y": 0.47, "width": 0.84, "height": 0.15 },
+          "style": { "badge": "check", "emphasisColor": "#2563EB" },
+          "animation": { "in": "slide-up", "out": "shrink", "duration_s": 0.35 }
+        }
+      ]
+    },
+    {
+      "scene_id": "sc_02",
+      "title": "Compare & Practice",
+      "learning_objective": "Contrast patterns using semantic objects & connectors",
+      "composition": "story-scenes",
+      "transition": "fade",
+      "elements": [
+        {
+          "element_id": "el_05",
+          "kind": "object",
+          "role": "subject",
+          "object_spec": { "label": "Pattern A", "sublabel": "Basic", "icon": "book" },
+          "sync_anchor": { "segment_id": "${exampleSegId}", "anchor_type": "segment_start", "quote": ${JSON.stringify(exampleQuote)} },
+          "position": { "x": 0.06, "y": 0.23, "width": 0.36, "height": 0.18 },
+          "animation": { "in": "pop-up", "out": "fade-out", "duration_s": 0.35 }
+        },
+        {
+          "element_id": "el_06",
+          "kind": "connector",
+          "role": "relation",
+          "connector_spec": { "from": "el_05", "to": "el_07", "direction": "right", "label": "Upgrade", "arrow": true },
+          "sync_anchor": { "segment_id": "${exampleSegId}", "anchor_type": "full_segment", "quote": ${JSON.stringify(exampleQuote)} },
+          "position": { "x": 0.43, "y": 0.27, "width": 0.14, "height": 0.10 },
+          "animation": { "in": "fade-scale", "out": "fade-out", "duration_s": 0.35 }
+        },
+        {
+          "element_id": "el_07",
+          "kind": "object",
+          "role": "target",
+          "object_spec": { "label": "Pattern B", "sublabel": "Natural", "icon": "check" },
+          "sync_anchor": { "segment_id": "${exampleSegId}", "anchor_type": "full_segment", "quote": ${JSON.stringify(exampleQuote)} },
+          "position": { "x": 0.58, "y": 0.23, "width": 0.36, "height": 0.18 },
+          "animation": { "in": "pop-up", "out": "fade-out", "duration_s": 0.35 }
+        },
+        {
+          "element_id": "el_08",
+          "kind": "meter",
+          "role": "tone_gauge",
+          "title": "NATURALNESS",
+          "leftLabel": "Textbook",
+          "rightLabel": "Native!",
+          "valueStart": 0.25,
+          "valueEnd": 0.88,
+          "sync_anchor": { "segment_id": "${exampleSegId}", "anchor_type": "full_segment", "quote": ${JSON.stringify(exampleQuote)} },
+          "position": { "x": 0.10, "y": 0.64, "width": 0.80, "height": 0.09 },
+          "animation": { "in": "slide-up", "out": "fade-out", "duration_s": 0.35 }
+        }
       ]
     }
   ]
 }
 \`\`\`
 
-# TRANSCRIPT CẦN CHUYỂN THÀNH VIDEO JSON
+# TRANSCRIPT THAM CHIẾU (${cues.length} CUES)
 ${transcriptLines}`;
 }
-

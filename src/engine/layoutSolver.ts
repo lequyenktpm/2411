@@ -67,7 +67,8 @@ export function estimateElementHalfExtents(el: SceneElement): {
   halfH: number;
 } {
   const scale = el.layout.scale > 0 ? el.layout.scale : 1;
-  const baseHalfW = (el.layout.width || 600) / 2;
+  const clampedWidth = Math.min(1040, Math.max(120, el.layout.width || 600));
+  const baseHalfW = clampedWidth / 2;
   let baseHalfH = 90;
 
   switch (el.props.kind) {
@@ -77,7 +78,7 @@ export function estimateElementHalfExtents(el: SceneElement): {
       if (isLongStack && items.length > 0) {
         const totalH = items.reduce((acc, item, idx) => {
           const fSize = item.label.length > 78 ? 25 : 28;
-          const lines = Math.min(3, estimateWrappedLineCount(item.label, 630, fSize));
+          const lines = Math.min(3, estimateWrappedLineCount(item.label, Math.max(200, clampedWidth - 190), fSize));
           const rowH = Math.max(76, lines * Math.round(fSize * 1.26) + 28);
           return acc + rowH + (idx > 0 ? 12 : 0);
         }, 0);
@@ -88,7 +89,8 @@ export function estimateElementHalfExtents(el: SceneElement): {
       break;
     }
     case 'topic-pill': {
-      const lines = Math.min(3, estimateWrappedLineCount(el.props.text || '', 796, 30));
+      const pillInnerW = Math.max(160, Math.min(796, clampedWidth - 64));
+      const lines = Math.min(3, estimateWrappedLineCount(el.props.text || '', pillInnerW, 30));
       const pillH = lines <= 1 ? 74 : lines * 38 + 32;
       baseHalfH = Math.ceil(pillH / 2) + 6;
       break;
@@ -96,6 +98,12 @@ export function estimateElementHalfExtents(el: SceneElement): {
     case 'illustration-prop': {
       const variant = el.props.variant;
       const data = el.props.data;
+      const isCustom =
+        variant === 'custom-ui' ||
+        variant === 'custom-object' ||
+        variant === 'custom-connector' ||
+        variant === 'custom-vector' ||
+        Boolean(data?.customPrimitives?.length);
       const hasNativeLabels =
         variant === 'flow-diagram' ||
         variant === 'timeline-track' ||
@@ -103,6 +111,10 @@ export function estimateElementHalfExtents(el: SceneElement): {
         variant === 'degree-scale' ||
         variant === 'phrasal-split' ||
         variant === 'syllable-stress' ||
+        variant === 'phrase-icon-split' ||
+        variant === 'trio-icon-cards' ||
+        variant === 'contrast-pair-cards' ||
+        variant === 'quiz-fill-blank' ||
         variant === 'bs-list-group' ||
         variant === 'bs-pricing-tier' ||
         variant === 'bs-breadcrumb-path' ||
@@ -134,7 +146,13 @@ export function estimateElementHalfExtents(el: SceneElement): {
       } else if (variant === 'avatar-speech') {
         baseHalfH = 116;
       } else if (variant === 'phrase-icon-split') {
-        baseHalfH = 250;
+        baseHalfH = 222;
+      } else if (
+        variant === 'trio-icon-cards' ||
+        variant === 'contrast-pair-cards' ||
+        variant === 'quiz-fill-blank'
+      ) {
+        baseHalfH = 148;
       } else if (variant === 'cafe-water' || variant === 'friends-chat' || variant === 'dynamic-scene') {
         baseHalfH = 146;
       } else if (
@@ -160,6 +178,8 @@ export function estimateElementHalfExtents(el: SceneElement): {
         baseHalfH = 116;
       } else if (variant === 'bs-alert-tip' || variant === 'bs-card-header') {
         baseHalfH = 152;
+      } else if (isCustom && el.layout.height && el.layout.height > 20) {
+        baseHalfH = Math.ceil(el.layout.height / 2) + 4;
       } else {
         baseHalfH = 132;
       }
@@ -174,26 +194,40 @@ export function estimateElementHalfExtents(el: SceneElement): {
           baseHalfH += Math.ceil((stripH + 16) / 2);
         }
       }
+
+      if (!isCustom && (clampedWidth < 840 || (el.layout.height && el.layout.height < 280))) {
+        const fitScale = Math.max(
+          0.45,
+          Math.min(1, clampedWidth / 860, el.layout.height ? el.layout.height / 280 : 1),
+        );
+        baseHalfH = Math.ceil(baseHalfH * fitScale);
+      }
       break;
     }
     case 'sentence-card': {
-      const innerW = Math.max(240, (el.layout.width || 820) - 96);
+      const innerW = Math.max(180, clampedWidth - 88);
       const textLen = (el.props.text || '').trim().length;
-      const headFontSize = textLen > 95 ? 36 : textLen > 52 ? 40 : 46;
+      const widthScale = Math.min(1, clampedWidth / 760);
+      const baseFont = textLen > 95 ? 36 : textLen > 52 ? 40 : 46;
+      const headFontSize = Math.max(22, Math.round(baseFont * widthScale));
       const lineH = Math.round(headFontSize * 1.28);
-      const lines = estimateWrappedLineCount(el.props.text, innerW, headFontSize);
+      const lines = (el.props.text || '')
+        .split(/\r?\n/)
+        .reduce((acc, part) => acc + estimateWrappedLineCount(part, innerW, headFontSize), 0);
+      const subFont = Math.max(19, Math.round(30 * widthScale));
+      const subLineH = Math.round(subFont * 1.26);
       const subLines = el.props.subtext
         ? Math.min(
             5,
             el.props.subtext
               .split(/\r?\n/)
-              .reduce((acc, part) => acc + estimateWrappedLineCount(part, innerW, 30), 0),
+              .reduce((acc, part) => acc + estimateWrappedLineCount(part, innerW, subFont), 0),
           )
         : 0;
-      const subH = subLines > 0 ? subLines * 38 + 18 : 0;
+      const subH = subLines > 0 ? subLines * subLineH + 18 : 0;
       const cardH = Math.max(156, lines * lineH + subH + 74);
       const badgeExtra = el.props.badge && el.props.badge !== 'none' ? 16 : 0;
-      const stampExtra = el.props.stampText ? 20 : 0;
+      const stampExtra = el.props.stampText ? 28 : 0;
       baseHalfH = Math.ceil((cardH + badgeExtra + stampExtra) / 2);
       break;
     }
@@ -274,18 +308,28 @@ export function resolveProjectOverlaps(elements: SceneElement[]): SceneElement[]
 
   for (const el of elements) {
     if (el.type === 'karaoke-card') {
+      const safeW = Math.min(1040, Math.max(320, el.layout.width || 920));
       const cloned: SceneElement = {
         ...el,
         layout: {
           ...el.layout,
+          x: 540,
+          width: safeW,
           y: Math.max(KARAOKE_SAFE_Y - 75, Math.min(1680, el.layout.y || KARAOKE_SAFE_Y)),
         },
       };
       karaokeEls.push(cloned);
     } else {
+      const safeScale = el.layout.scale > 0 ? el.layout.scale : 1;
+      const safeWidth = Math.min(1040, Math.max(120, el.layout.width || 600));
+      const halfW = (safeWidth * safeScale) / 2;
+      const safeX =
+        halfW * 2 >= 1040
+          ? 540
+          : Math.round(Math.max(20 + halfW, Math.min(1060 - halfW, el.layout.x)));
       visualEls.push({
         ...el,
-        layout: { ...el.layout, scale: el.layout.scale > 0 ? el.layout.scale : 1 },
+        layout: { ...el.layout, x: safeX, width: safeWidth, scale: safeScale },
       });
     }
   }

@@ -2,7 +2,18 @@ import { normalizeCustomComponent } from './customComponentStore';
 import type { VectorPrimitive } from './customComponentTypes';
 import { matchIllustrationForCue } from './illustrationLayouts';
 import { resolveProjectOverlaps } from './layoutSolver';
-import { parseTimeToken } from './transcriptParser';
+import {
+  isStoryboardV19Document,
+  mapV19EnterAnimation,
+  mapV19ExitAnimation,
+  normalizeSceneIconWithAlias,
+  parseV19TimeFallback,
+  resolveSyncAnchorTiming,
+  StoryboardSourceSegment,
+  StoryboardV19Document,
+  StoryboardV19Element,
+} from './storyboardV19';
+import { interpolateWordTimings, parseTimeToken } from './transcriptParser';
 import {
   CanvasThemeId,
   ComparisonItem,
@@ -23,6 +34,7 @@ import {
 import {
   isKnownIllustrationVariant,
   pickContextualSceneIcon,
+  resolveContextualVisualForCue,
 } from './vectorComponentDb';
 
 const STAGE_W = 1080;
@@ -149,13 +161,21 @@ export interface FlexibleAiElement {
 }
 
 export interface FlexibleSceneDocument extends ScenePlanDocument {
+  schema_version?: string;
   title?: string;
   theme?: CanvasThemeId;
   compositionId?: LayoutCompositionId;
   compositionReason?: string;
+  source_segments?: StoryboardSourceSegment[];
+  style_profile?: StoryboardV19Document['style_profile'];
   elements?: FlexibleAiElement[];
   scenes: (ScenePlanDocument['scenes'][number] & {
-    elements?: FlexibleAiElement[];
+    scene_id?: string;
+    title?: string;
+    learning_objective?: string;
+    composition?: LayoutCompositionId;
+    transition?: string;
+    elements?: (FlexibleAiElement | StoryboardV19Element)[];
   })[];
 }
 
@@ -185,10 +205,12 @@ export function parseScenePlanJson(input: string): FlexibleSceneDocument | null 
     // Also support top-level elements array without scenes wrapper
     if (Array.isArray(parsed.elements)) {
       return {
+        schema_version: parsed.schema_version,
         title: parsed.title,
         theme: parsed.theme,
         compositionId: parsed.compositionId,
         compositionReason: parsed.compositionReason,
+        source_segments: Array.isArray(parsed.source_segments) ? parsed.source_segments : undefined,
         scenes: [{ id: 'sc1', elements: parsed.elements }],
       };
     }
@@ -201,13 +223,23 @@ export function parseScenePlanJson(input: string): FlexibleSceneDocument | null 
 export function summarizeScenePlan(
   plan: FlexibleSceneDocument,
   cues: TranscriptCue[],
-): { elementCount: number; cueCount: number; types: string[] } {
+): {
+  elementCount: number;
+  cueCount: number;
+  sceneCount: number;
+  sourceSegmentCount: number;
+  schemaVersion: '1.9' | 'legacy';
+  types: string[];
+} {
   let elementCount = 0;
   const typeSet = new Set<string>();
+  const isV19 = isStoryboardV19Document(plan);
   for (const sc of plan.scenes) {
-    for (const el of sc.elements ?? []) {
+    for (const rawEl of sc.elements ?? []) {
+      const el = rawEl as unknown as { type?: string; kind?: string };
       elementCount += 1;
-      if (el.type) typeSet.add(el.type);
+      const tName = el.kind || el.type;
+      if (tName) typeSet.add(tName);
     }
     for (const sh of sc.shapes ?? []) {
       elementCount += 1;
@@ -222,7 +254,10 @@ export function summarizeScenePlan(
   }
   return {
     elementCount,
-    cueCount: cues.length,
+    cueCount: cues.length || plan.source_segments?.length || 0,
+    sceneCount: plan.scenes.length,
+    sourceSegmentCount: plan.source_segments?.length ?? 0,
+    schemaVersion: isV19 ? '1.9' : 'legacy',
     types: Array.from(typeSet),
   };
 }
@@ -568,6 +603,662 @@ function convertFlexibleElements(
   return result;
 }
 
+function sanitizeDynamicSceneIcons(
+  spec: DynamicSceneSpec | undefined,
+  contextText: string,
+): DynamicSceneSpec | undefined {
+  if (!spec) return undefined;
+  return {
+    ...spec,
+    motifs: (spec.motifs ?? []).map((m) => ({
+      ...m,
+      icon: normalizeSceneIconWithAlias(m.icon, `${contextText} ${m.label ?? ''}`).icon,
+    })),
+  };
+}
+
+function sanitizeCustomPrimitiveIcons(
+  primitives: VectorPrimitive[] | undefined,
+  contextText: string,
+): VectorPrimitive[] | undefined {
+  if (!Array.isArray(primitives) || primitives.length === 0) return undefined;
+  return primitives.map((p) =>
+    p.shape === 'icon'
+      ? {
+          ...p,
+          icon: normalizeSceneIconWithAlias(p.icon, contextText).icon,
+        }
+      : p,
+  );
+}
+
+function synthesizeConnectorPrimitives(
+  el: StoryboardV19Element,
+  wPx: number,
+  hPx: number,
+): VectorPrimitive[] {
+  const spec = el.connector_spec ?? {};
+  const dir = spec.direction ?? (wPx >= hPx ? 'right' : 'down');
+  const stroke = el.style?.strokeColor || el.style?.accentColor || '#2563EB';
+  const lw = Math.max(4, Math.min(10, el.style?.lineWidth ?? 6));
+  const halfSpanX = Math.max(36, Math.round(wPx * 0.42));
+  const halfSpanY = Math.max(28, Math.round(hPx * 0.4));
+
+  let x1 = -halfSpanX;
+  let y1 = 0;
+  let x2 = halfSpanX;
+  let y2 = 0;
+  if (dir === 'left') {
+    x1 = halfSpanX;
+    x2 = -halfSpanX;
+  } else if (dir === 'down') {
+    x1 = 0;
+    y1 = -halfSpanY;
+    x2 = 0;
+    y2 = halfSpanY;
+  } else if (dir === 'up') {
+    x1 = 0;
+    y1 = halfSpanY;
+    x2 = 0;
+    y2 = -halfSpanY;
+  }
+
+  const prims: VectorPrimitive[] = [
+    {
+      shape: spec.arrow === false ? 'line' : 'arrow',
+      x: x1,
+      y: y1,
+      x2,
+      y2,
+      stroke,
+      lineWidth: lw,
+    },
+  ];
+
+  const label = (spec.label || el.content || el.text || '').trim();
+  if (label) {
+    const pillW = Math.min(Math.max(88, label.length * 13 + 26), Math.max(108, wPx + 8));
+    const compactText = pillW < 120;
+    prims.push(
+      {
+        shape: 'pill',
+        x: -pillW / 2,
+        y: dir === 'right' || dir === 'left' ? -52 : -18,
+        w: pillW,
+        h: 34,
+        fill: el.style?.bgColor || '#EFF6FF',
+        stroke,
+        lineWidth: 2,
+      },
+      {
+        shape: 'text',
+        x: 0,
+        y: dir === 'right' || dir === 'left' ? -35 : 0,
+        w: pillW - 14,
+        text: label,
+        fill: el.style?.textColor || stroke,
+        fontSize: compactText ? 18 : 21,
+        fontWeight: 800,
+      },
+    );
+  }
+  return prims;
+}
+
+function synthesizeObjectPrimitives(
+  el: StoryboardV19Element,
+  wPx: number,
+  hPx: number,
+): VectorPrimitive[] {
+  const label = (el.object_spec?.label || el.content || el.text || el.title || 'Concept').trim();
+  const sublabel = (el.object_spec?.sublabel || el.subtext || el.subtitle || '').trim();
+  const iconRes = normalizeSceneIconWithAlias(
+    el.object_spec?.icon || (el.sceneIcon as string | undefined),
+    `${label} ${sublabel}`,
+  );
+  const bg = el.style?.bgColor || el.style?.fill || '#FFFFFF';
+  const stroke = el.style?.borderColor || el.style?.accentColor || '#CBD5E1';
+  const accent = el.style?.accentColor || '#2563EB';
+  const cardW = Math.max(220, Math.min(880, wPx));
+  const cardH = Math.max(140, Math.min(480, hPx));
+  const isCompactCard = cardW < 520;
+
+  const prims: VectorPrimitive[] = [
+    {
+      shape: 'rect',
+      x: -cardW / 2,
+      y: -cardH / 2,
+      w: cardW,
+      h: cardH,
+      radius: 26,
+      fill: bg,
+      stroke,
+      lineWidth: 3,
+      shadow: true,
+    },
+    {
+      shape: 'rect',
+      x: -cardW / 2,
+      y: -cardH / 2,
+      w: isCompactCard ? cardW : 14,
+      h: isCompactCard ? 12 : cardH,
+      radius: 8,
+      fill: accent,
+    },
+    {
+      shape: 'icon',
+      icon: iconRes.icon,
+      x: isCompactCard ? 0 : -cardW / 2 + 86,
+      y: isCompactCard ? -Math.round(cardH * 0.2) : 0,
+    },
+    {
+      shape: 'text',
+      x: isCompactCard ? 0 : 44,
+      y: isCompactCard
+        ? sublabel
+          ? Math.round(cardH * 0.1)
+          : Math.round(cardH * 0.18)
+        : sublabel
+          ? -20
+          : 0,
+      w: isCompactCard ? cardW - 44 : cardW - 180,
+      text: label,
+      fill: el.style?.textColor || '#0F172A',
+      fontSize: isCompactCard
+        ? Math.max(24, Math.min(31, el.style?.fontSize ?? 28))
+        : Math.max(26, Math.min(38, el.style?.fontSize ?? 34)),
+      fontWeight: 800,
+      align: 'center',
+    },
+  ];
+  if (sublabel) {
+    prims.push({
+      shape: 'text',
+      x: isCompactCard ? 0 : 44,
+      y: isCompactCard ? Math.round(cardH * 0.31) : 28,
+      w: isCompactCard ? cardW - 44 : cardW - 180,
+      text: sublabel,
+      fill: '#475569',
+      fontSize: isCompactCard ? 22 : 25,
+      fontWeight: 600,
+      align: 'center',
+    });
+  }
+  return prims;
+}
+
+function convertStoryboardV19Elements(
+  scenes: FlexibleSceneDocument['scenes'],
+  sourceSegments: StoryboardSourceSegment[],
+  words: WordTiming[],
+  cues: TranscriptCue[],
+  totalDuration: number,
+): SceneElement[] {
+  const result: SceneElement[] = [];
+  const segMap = new Map<string, StoryboardSourceSegment>();
+  sourceSegments.forEach((seg) => {
+    if (seg.segment_id) segMap.set(seg.segment_id, seg);
+  });
+
+  // Compute each scene's start/end span from its referenced source_segments
+  const sceneSpans = scenes.map((sc, scIdx) => {
+    const referencedSegs = (sc.elements ?? [])
+      .map((raw) => {
+        const el = raw as StoryboardV19Element;
+        return el.sync_anchor?.segment_id ? segMap.get(el.sync_anchor.segment_id) : undefined;
+      })
+      .filter((s): s is StoryboardSourceSegment => Boolean(s));
+
+    if (referencedSegs.length > 0) {
+      const minS = Math.min(...referencedSegs.map((s) => s.start));
+      const maxE = Math.max(...referencedSegs.map((s) => s.end));
+      return { start: minS, end: Math.max(minS + 0.6, maxE) };
+    }
+    const segApprox = sourceSegments[scIdx];
+    return {
+      start: segApprox?.start ?? scIdx * 4,
+      end: segApprox?.end ?? Math.min(totalDuration, (scIdx + 1) * 4),
+    };
+  });
+
+  scenes.forEach((sc, scIdx) => {
+    const span = sceneSpans[scIdx] ?? { start: 0, end: totalDuration };
+    const rawList = sc.elements ?? [];
+
+    rawList.forEach((rawItem, elIdx) => {
+      const el = rawItem as StoryboardV19Element & FlexibleAiElement;
+      const seg = el.sync_anchor?.segment_id ? segMap.get(el.sync_anchor.segment_id) : undefined;
+      const isPersistentHeader =
+        el.kind === 'strip' ||
+        el.kind === 'comparison_strip' ||
+        el.role === 'scene_title' ||
+        el.role === 'section_header' ||
+        el.role === 'comparison_header' ||
+        el.role === 'header' ||
+        el.role === 'persistent_strip';
+
+      const explicitDisplayDur =
+        typeof (el as any).display_duration_s === 'number' && (el as any).display_duration_s > 0
+          ? Number((el as any).display_duration_s)
+          : typeof (el as any).duration_s === 'number' && (el as any).duration_s > 0
+            ? Number((el as any).duration_s)
+            : undefined;
+
+      let { startTime, endTime } = resolveSyncAnchorTiming(
+        el.sync_anchor,
+        seg,
+        cues,
+        span.start,
+        span.end,
+        explicitDisplayDur,
+      );
+
+      // Explicit start_s/end_s or start/end overrides if provided
+      if (el.start_s !== undefined || el.start !== undefined) {
+        startTime = parseV19TimeFallback(el.start_s ?? el.start, startTime);
+      }
+      if (el.end_s !== undefined || el.end !== undefined) {
+        endTime = parseV19TimeFallback(el.end_s ?? el.end, endTime);
+      } else if (isPersistentHeader) {
+        endTime = span.end;
+      } else {
+        const anchorType = el.sync_anchor?.anchor_type;
+        const rawKind = String(el.kind || el.type || 'text').toLowerCase();
+        const isVisualProp =
+          rawKind === 'illustration' ||
+          rawKind === 'asset' ||
+          rawKind === 'illustration-prop' ||
+          rawKind === 'object' ||
+          rawKind === 'connector' ||
+          rawKind === 'shape_3d' ||
+          rawKind === 'shape-3d' ||
+          rawKind === 'word_stack' ||
+          rawKind === 'word-stack' ||
+          rawKind === 'meter' ||
+          rawKind === 'tone_meter' ||
+          rawKind === 'tone-meter' ||
+          rawKind === 'pill' ||
+          rawKind === 'topic_pill' ||
+          rawKind === 'topic-pill';
+        if (isVisualProp && (anchorType === 'segment_start' || anchorType === 'phrase' || !anchorType)) {
+          const naturalHoldEnd = seg ? Math.max(seg.end, startTime + 2.2) : span.end;
+          endTime = Math.max(endTime, Math.min(span.end, naturalHoldEnd));
+        }
+      }
+
+      const safeEnd = Math.max(startTime + 0.65, endTime);
+
+      // Position resolution: v1.9 normalized top-left { x, y, width, height } vs legacy center { x, y }
+      const pos = el.position;
+      const hasNormBox =
+        pos &&
+        typeof pos === 'object' &&
+        typeof pos.x === 'number' &&
+        typeof pos.y === 'number' &&
+        typeof pos.width === 'number';
+      const cx = hasNormBox
+        ? Math.round((pos.x + pos.width / 2) * STAGE_W)
+        : el.x !== undefined
+          ? Math.round(el.x <= 1 ? el.x * STAGE_W : el.x)
+          : 540;
+      const cy = hasNormBox
+        ? Math.round((pos.y + (pos.height ?? 0.1) / 2) * STAGE_H)
+        : el.y !== undefined
+          ? Math.round(el.y <= 1 ? el.y * STAGE_H : el.y)
+          : 720;
+      const wPx = hasNormBox
+        ? Math.max(120, Math.round(pos.width * STAGE_W))
+        : el.width !== undefined
+          ? Math.round(el.width <= 1 ? el.width * STAGE_W : el.width)
+          : 820;
+      const hPx = hasNormBox
+        ? Math.max(48, Math.round((pos.height ?? 0.12) * STAGE_H))
+        : el.height !== undefined
+          ? Math.round(el.height <= 1 ? el.height * STAGE_H : el.height)
+          : 220;
+
+      const id = el.element_id?.trim() || `${sc.scene_id || sc.id || `sc${scIdx + 1}`}-el-${elIdx + 1}`;
+      const enterAnimation = mapV19EnterAnimation(el.animation?.in, 'pop-up');
+      const exitAnimation = mapV19ExitAnimation(el.animation?.out, 'fade-out');
+      const kind = String(el.kind || el.type || 'text').toLowerCase();
+      const textVal = (el.content ?? el.text ?? '').trim();
+
+      if (kind === 'strip' || kind === 'comparison_strip' || kind === 'comparison-strip') {
+        result.push({
+          id,
+          type: 'comparison-strip',
+          label: `Thanh đối chiếu (${sc.title || sc.scene_id || 'Scene'})`,
+          startTime,
+          endTime: safeEnd,
+          enterAnimation: mapV19EnterAnimation(el.animation?.in, 'drop-in'),
+          exitAnimation,
+          layout: { x: cx, y: hasNormBox || el.y !== undefined ? cy : 185, width: Math.max(640, wPx), scale: 1, zIndex: 10 },
+          props: {
+            kind: 'comparison-strip',
+            items: (el.items ?? []).map((it) => {
+              let actAt =
+                it.activateAt !== undefined
+                  ? parseV19TimeFallback(it.activateAt, startTime)
+                  : undefined;
+              if (actAt === undefined && it.sync_anchor?.segment_id) {
+                const itSeg = segMap.get(it.sync_anchor.segment_id);
+                actAt = resolveSyncAnchorTiming(it.sync_anchor, itSeg, cues, startTime, safeEnd).startTime;
+              }
+              return {
+                label: it.label,
+                sublabel: it.sublabel,
+                accentColor: it.accentColor,
+                activateAt: actAt,
+              };
+            }),
+          },
+        });
+        return;
+      }
+
+      if (
+        kind === 'pill' ||
+        kind === 'topic_pill' ||
+        kind === 'topic-pill' ||
+        (kind === 'text' &&
+          ['badge', 'label', 'pill', 'topic_pill', 'section_tag', 'scene_title'].includes(
+            (el.role || '').toLowerCase(),
+          ) &&
+          textVal.length > 0 &&
+          textVal.length <= 54 &&
+          (!hasNormBox || (pos?.height ?? 0.06) <= 0.085))
+      ) {
+        result.push({
+          id,
+          type: 'topic-pill',
+          label: `Nhãn: ${textVal || 'Topic'}`,
+          startTime,
+          endTime: safeEnd,
+          enterAnimation,
+          exitAnimation: mapV19ExitAnimation(el.animation?.out, 'shrink'),
+          layout: { x: cx, y: hasNormBox || el.y !== undefined ? cy : 335, width: Math.min(880, Math.max(280, wPx)), scale: 1, zIndex: 12 },
+          props: {
+            kind: 'topic-pill',
+            text: textVal || 'Lesson Tip',
+            bgColor: el.style?.bgColor || el.bgColor || '#DDD6FE',
+            textColor: el.style?.textColor || el.textColor || '#4338CA',
+          },
+        });
+        return;
+      }
+
+      if (kind === 'meter' || kind === 'tone_meter' || kind === 'tone-meter') {
+        result.push({
+          id,
+          type: 'tone-meter',
+          label: `Thanh sắc thái: ${el.leftLabel || 'low'} ↔ ${el.rightLabel || 'high'}`,
+          startTime,
+          endTime: safeEnd,
+          enterAnimation: mapV19EnterAnimation(el.animation?.in, 'slide-up'),
+          exitAnimation,
+          layout: { x: cx, y: hasNormBox || el.y !== undefined ? cy : 1215, width: Math.max(540, wPx), scale: 1, zIndex: 18 },
+          props: {
+            kind: 'tone-meter',
+            title: el.title || 'TONE',
+            leftLabel: el.leftLabel || 'casual',
+            rightLabel: el.rightLabel || 'polite',
+            valueStart: el.valueStart ?? 0.25,
+            valueEnd: el.valueEnd ?? 0.85,
+            animateStart: startTime + 0.25,
+            animateEnd: Math.max(startTime + 0.75, safeEnd - 0.25),
+          },
+        });
+        return;
+      }
+
+      if (kind === 'word_stack' || kind === 'word-stack') {
+        result.push({
+          id,
+          type: 'word-stack',
+          label: `Xếp chồng ${(el.rows ?? []).length} mục`,
+          startTime,
+          endTime: safeEnd,
+          enterAnimation,
+          exitAnimation,
+          layout: { x: cx, y: hasNormBox || el.y !== undefined ? cy : 700, width: Math.max(580, wPx), scale: 1, zIndex: 20 },
+          props: {
+            kind: 'word-stack',
+            rows: (el.rows ?? []).map((r, rIdx) => {
+              let appAt =
+                r.appearAt !== undefined
+                  ? parseV19TimeFallback(r.appearAt, startTime + rIdx * 0.5)
+                  : startTime + rIdx * 0.5;
+              if (r.appearAt === undefined && r.sync_anchor?.segment_id) {
+                const rSeg = segMap.get(r.sync_anchor.segment_id);
+                appAt = resolveSyncAnchorTiming(r.sync_anchor, rSeg, cues, startTime, safeEnd).startTime;
+              }
+              return {
+                prefix: r.prefix || '',
+                suffix: r.suffix || '',
+                suffixColor: r.suffixColor || '#2563EB',
+                appearAt: appAt,
+                phonetic: r.phonetic,
+              };
+            }),
+          },
+        });
+        return;
+      }
+
+      if (
+        kind === 'shape_3d' ||
+        kind === 'shape-3d' ||
+        kind === 'staircase_3d' ||
+        kind === 'card_3d' ||
+        kind === 'pill_3d' ||
+        kind === 'cube_3d' ||
+        kind === 'rect_3d'
+      ) {
+        const sType = el.shape_type || (kind === 'shape_3d' || kind === 'shape-3d' ? 'card_3d' : (kind as any));
+        result.push({
+          id,
+          type: 'shape-3d',
+          label: `${sType}: ${textVal || el.step_labels?.join(' / ') || '3D'}`,
+          startTime,
+          endTime: safeEnd,
+          enterAnimation,
+          exitAnimation,
+          layout: {
+            x: cx,
+            y: hasNormBox || el.y !== undefined ? cy : 780,
+            width: wPx,
+            height: sType === 'staircase_3d' ? Math.max(320, hPx) : hPx,
+            scale: 1,
+            zIndex: 16,
+          },
+          props: {
+            kind: 'shape-3d',
+            shapeType: sType,
+            fill: el.style?.fill || el.style?.bgColor || el.fill || '#14B8A6',
+            shadow: true,
+            highlight: true,
+            depth: el.style?.depth ?? el.depth ?? 12,
+            cornerRadius: 28,
+            textContent: textVal || undefined,
+            textColor: el.style?.textColor || el.textColor || '#FFFFFF',
+            textSize: 'headline',
+            textWeight: 'bold',
+            stepLabels: el.step_labels ?? el.stepLabels,
+          },
+        });
+        return;
+      }
+
+      if (kind === 'connector') {
+        const connectorPrims = sanitizeCustomPrimitiveIcons(
+          el.customPrimitives ?? synthesizeConnectorPrimitives(el, wPx, hPx),
+          `${el.connector_spec?.label ?? ''} ${textVal}`,
+        );
+        result.push({
+          id,
+          type: 'illustration-prop',
+          label: `Kết nối: ${el.connector_spec?.label || el.role || 'Arrow'}`,
+          startTime,
+          endTime: safeEnd,
+          enterAnimation: mapV19EnterAnimation(el.animation?.in, 'fade-scale'),
+          exitAnimation,
+          layout: { x: cx, y: cy, width: wPx, height: hPx, scale: 1, zIndex: 14 },
+          props: {
+            kind: 'illustration-prop',
+            variant: 'custom-connector',
+            data: {
+              customPrimitives: connectorPrims,
+            },
+          },
+        });
+        return;
+      }
+
+      if (kind === 'object') {
+        const rawPrims = el.customPrimitives ?? el.data?.customPrimitives ?? el.object_spec?.primitives;
+        const objPrims = sanitizeCustomPrimitiveIcons(
+          rawPrims && rawPrims.length > 0 ? rawPrims : synthesizeObjectPrimitives(el, wPx, hPx),
+          `${textVal} ${el.object_spec?.label ?? ''}`,
+        );
+        let normalizedPrimitives: VectorPrimitive[] | undefined = objPrims;
+        if (objPrims && objPrims.length > 0) {
+          const norm = normalizeCustomComponent({
+            variant: 'custom-object',
+            label: el.object_spec?.label || textVal || 'Object',
+            primitives: objPrims,
+          });
+          if (norm && norm.primitives.length > 0) normalizedPrimitives = norm.primitives;
+        }
+        result.push({
+          id,
+          type: 'illustration-prop',
+          label: `Vật thể: ${el.object_spec?.label || textVal || 'Object'}`,
+          startTime,
+          endTime: safeEnd,
+          enterAnimation: mapV19EnterAnimation(el.animation?.in, 'fade-scale'),
+          exitAnimation,
+          layout: { x: cx, y: cy, width: wPx, height: hPx, scale: 1, zIndex: 10 },
+          props: {
+            kind: 'illustration-prop',
+            variant: 'custom-object',
+            data: {
+              title: el.object_spec?.label || el.title || textVal,
+              subtitle: el.object_spec?.sublabel || el.subtext,
+              customPrimitives: normalizedPrimitives,
+            },
+          },
+        });
+        return;
+      }
+
+      if (kind === 'illustration' || kind === 'asset' || kind === 'illustration-prop') {
+        const candidate = (el.variant ?? el.asset_id ?? '').replace(/_/g, '-') as IllustrationVariant;
+        const rawPrimitives = el.data?.customPrimitives ?? el.customPrimitives;
+        const hasPrims = Array.isArray(rawPrimitives) && rawPrimitives.length > 0;
+        const mappedVariant: IllustrationVariant = hasPrims
+          ? (candidate || 'custom-ui')
+          : isKnownIllustrationVariant(candidate)
+            ? candidate
+            : matchIllustrationForCue(`${seg?.text ?? ''} ${textVal} ${el.title ?? ''}`, 'dynamic-scene');
+
+        const contextForIcon = `${seg?.text ?? ''} ${textVal} ${el.title ?? ''}`;
+        const rawIcon = (el.data?.sceneIcon ?? el.sceneIcon) as string | undefined;
+        const iconRes = normalizeSceneIconWithAlias(rawIcon, contextForIcon);
+        const resolvedDynamic = sanitizeDynamicSceneIcons(
+          el.data?.dynamicScene ?? el.dynamicScene ?? el.dynamic_scene,
+          contextForIcon,
+        );
+        const sanitizedPrims = sanitizeCustomPrimitiveIcons(rawPrimitives, contextForIcon);
+        let normalizedPrimitives: VectorPrimitive[] | undefined;
+        if (sanitizedPrims && sanitizedPrims.length > 0) {
+          const norm = normalizeCustomComponent({
+            variant: mappedVariant || 'custom-inline',
+            label: el.title || textVal || 'Custom',
+            primitives: sanitizedPrims,
+          });
+          if (norm && norm.primitives.length > 0) normalizedPrimitives = norm.primitives;
+        }
+
+        result.push({
+          id,
+          type: 'illustration-prop',
+          label: `Minh họa: ${mappedVariant}`,
+          startTime,
+          endTime: safeEnd,
+          enterAnimation: mapV19EnterAnimation(el.animation?.in, 'fade-scale'),
+          exitAnimation,
+          layout: {
+            x: cx,
+            y: hasNormBox || el.y !== undefined ? cy : 620,
+            width: Math.max(360, wPx),
+            height: hasNormBox ? hPx : undefined,
+            scale: 1,
+            zIndex: 8,
+          },
+          props: {
+            kind: 'illustration-prop',
+            variant: mappedVariant,
+            data: {
+              ...(el.data ?? {}),
+              title: el.data?.title ?? el.title,
+              subtitle: el.data?.subtitle ?? el.subtitle,
+              nodes: el.data?.nodes ?? el.nodes,
+              labels: el.data?.labels ?? el.labels,
+              value: el.data?.value ?? el.value,
+              timeHour: el.data?.timeHour ?? el.timeHour,
+              timeMinute: el.data?.timeMinute ?? el.timeMinute,
+              formula: el.data?.formula ?? el.formula,
+              checklist: el.data?.checklist ?? el.checklist,
+              upgrades: el.data?.upgrades ?? el.upgrades,
+              boxes: el.data?.boxes ?? el.boxes,
+              speechText: el.data?.speechText ?? el.speechText ?? (textVal || undefined),
+              reactionText: el.data?.reactionText ?? el.reactionText,
+              sceneIcon: iconRes.icon,
+              highlightWord: el.data?.highlightWord ?? el.highlightWord,
+              dynamicScene: resolvedDynamic,
+              customPrimitives: normalizedPrimitives,
+            },
+          },
+        });
+        return;
+      }
+
+      // Default: 'text' | 'card' | 'sentence_card' | 'sentence-card'
+      result.push({
+        id,
+        type: 'sentence-card',
+        label: `Thẻ chữ: ${(textVal || el.role || 'Text').slice(0, 26)}`,
+        startTime,
+        endTime: safeEnd,
+        enterAnimation,
+        exitAnimation: mapV19ExitAnimation(el.animation?.out, 'shrink'),
+        layout: {
+          x: cx,
+          y: hasNormBox || el.y !== undefined ? cy : 970,
+          width: Math.max(380, wPx),
+          scale: 1,
+          zIndex: 22,
+        },
+        props: {
+          kind: 'sentence-card',
+          text: textVal || seg?.text || '',
+          subtext: el.subtext ?? el.subtitle,
+          badge: el.style?.badge ?? el.badge ?? 'none',
+          stampText: el.style?.stampText ?? el.stampText,
+          stampColor: el.style?.stampColor ?? el.stampColor,
+          emphasisWord: el.style?.emphasisWord ?? el.emphasisWord ?? el.highlightWord,
+          emphasisColor: el.style?.emphasisColor ?? el.emphasisColor ?? el.style?.accentColor,
+          bgColor: el.style?.bgColor ?? el.bgColor,
+          textColor: el.style?.textColor ?? el.textColor,
+        },
+      });
+    });
+  });
+
+  void words;
+  return result;
+}
+
 export function scenePlanToProject(
   words: WordTiming[],
   plan: FlexibleSceneDocument,
@@ -580,16 +1271,39 @@ export function scenePlanToProject(
     cuesOverride?: TranscriptCue[];
   },
 ): LessonProject {
-  const cues = options?.cuesOverride ?? groupWordsIntoCues(words);
+  const isV19 = isStoryboardV19Document(plan);
+  const v19Segments = Array.isArray(plan.source_segments) ? plan.source_segments : [];
+
+  const cues: TranscriptCue[] =
+    options?.cuesOverride && options.cuesOverride.length > 0
+      ? options.cuesOverride
+      : isV19 && v19Segments.length > 0
+        ? v19Segments.map((seg, idx) => ({
+            id: seg.segment_id || `cue-${idx + 1}`,
+            start: Number(seg.start),
+            end: Number(seg.end),
+            text: seg.text,
+            words: interpolateWordTimings(seg.text, Number(seg.start), Number(seg.end)),
+          }))
+        : groupWordsIntoCues(words);
+
+  const segLastEnd =
+    v19Segments.length > 0 ? Math.max(...v19Segments.map((s) => Number(s.end) || 0)) : 0;
   const lastEnd =
     cues.length > 0
-      ? Math.max(...cues.map((c) => c.end))
+      ? Math.max(segLastEnd, ...cues.map((c) => c.end))
       : words.length > 0
         ? words[words.length - 1].end
-        : 6.0;
+        : Math.max(6.0, segLastEnd);
   const totalDuration = Number((lastEnd + 0.5).toFixed(2));
 
   const elements: SceneElement[] = [];
+
+  if (isV19) {
+    elements.push(
+      ...convertStoryboardV19Elements(plan.scenes, v19Segments, words, cues, totalDuration),
+    );
+  }
 
   const sceneStarts = plan.scenes.map((sc) => {
     const allAts = [
@@ -602,10 +1316,10 @@ export function scenePlanToProject(
   });
 
   plan.scenes.forEach((sc, scIdx) => {
-    // Path 1: Flexible AI elements[] schema (from Prompt builder)
-    if (Array.isArray(sc.elements) && sc.elements.length > 0) {
+    // Path 1: Legacy Flexible AI elements[] schema (skip if already handled by v1.9 converter)
+    if (!isV19 && Array.isArray(sc.elements) && sc.elements.length > 0) {
       elements.push(
-        ...convertFlexibleElements(sc.elements, words, cues, totalDuration),
+        ...convertFlexibleElements(sc.elements as FlexibleAiElement[], words, cues, totalDuration),
       );
     }
 
@@ -702,9 +1416,106 @@ export function scenePlanToProject(
       });
   });
 
-  const has3dOnly = elements.every((e) => e.type === 'shape-3d');
+  const resolvedCompId = options?.compositionId ?? plan.compositionId;
+  const has3dOnly = elements.length > 0 && elements.every((e) => e.type === 'shape-3d');
   const resolvedTheme = options?.theme ?? plan.theme ?? (has3dOnly ? 'studio-slate' : 'pastel-sunrise');
   const isDarkTheme = isDarkCanvasTheme(resolvedTheme);
+
+  // Fallback visual richness guard: if imported JSON/scenes leave any segment/cue with only bare text
+  // (no illustration, 3D shape, word-stack, or tone-meter visible during that window), inject a
+  // contextual Bootstrap/vector visual component (skipping word-reveal which is intentionally minimal).
+  const enrichWindows: Array<{ start: number; end: number; text: string }> = [];
+  if (isV19 && v19Segments.length > 0) {
+    v19Segments.forEach((seg) => {
+      const s = Number(seg.start);
+      const e = Number(seg.end);
+      if (Number.isFinite(s) && Number.isFinite(e) && e - s >= 0.25) {
+        enrichWindows.push({ start: s, end: e, text: String(seg.text ?? '') });
+      }
+    });
+    cues.forEach((cue) => {
+      const coveredBySeg = enrichWindows.some(
+        (w) => Math.min(w.end, cue.end) - Math.max(w.start, cue.start) > 0.25,
+      );
+      if (!coveredBySeg && cue.end - cue.start >= 0.25) {
+        enrichWindows.push({ start: cue.start, end: cue.end, text: cue.text });
+      }
+    });
+    enrichWindows.sort((a, b) => a.start - b.start);
+  } else {
+    cues.forEach((cue) => {
+      enrichWindows.push({ start: cue.start, end: cue.end, text: cue.text });
+    });
+  }
+
+  if (resolvedCompId !== 'word-reveal' && !has3dOnly && enrichWindows.length > 0) {
+    const ROTATION_VARIANTS: IllustrationVariant[] = [
+      'bs-card-header',
+      'css-sticky-note',
+      'bs-alert-tip',
+      'css-magnifying-word',
+      'bs-badge-cluster',
+      'css-bento-stats',
+    ];
+    let lastInjectedVariant: string | null = null;
+    let lastVisualEnd = -1;
+
+    enrichWindows.forEach((win, idx) => {
+      const winMidStart = win.start + 0.12;
+      const winMidEnd = Math.max(winMidStart + 0.08, win.end - 0.12);
+      const hasVisual = elements.some(
+        (el) =>
+          (el.type === 'illustration-prop' ||
+            el.type === 'shape-3d' ||
+            el.type === 'word-stack' ||
+            el.type === 'tone-meter') &&
+          Math.min(el.endTime, winMidEnd) - Math.max(el.startTime, winMidStart) > 0.1,
+      );
+      if (hasVisual) return;
+
+      const startT = Math.max(win.start, lastVisualEnd + 0.02);
+      const nextWinStart =
+        idx < enrichWindows.length - 1
+          ? Math.max(win.end, enrichWindows[idx + 1].start - 0.02)
+          : totalDuration;
+      const endT =
+        idx === enrichWindows.length - 1
+          ? Math.min(totalDuration, win.end + 0.5)
+          : Math.min(nextWinStart, win.end + 0.5);
+      if (endT - startT < 0.4) return;
+
+      const resolved = resolveContextualVisualForCue(win.text, undefined, 'bs-card-header');
+      let chosenVariant = resolved.variant;
+      let chosenData = resolved.data;
+      if (chosenVariant === lastInjectedVariant) {
+        const nextVar = ROTATION_VARIANTS[(idx + 1) % ROTATION_VARIANTS.length];
+        chosenVariant = nextVar;
+        chosenData = {
+          ...(chosenData ?? {}),
+          title: chosenData?.title || win.text.slice(0, 44),
+          speechText: chosenData?.speechText || win.text,
+        };
+      }
+
+      elements.push({
+        id: `auto-enrich-prop-${idx + 1}`,
+        type: 'illustration-prop',
+        label: `Minh họa: ${chosenVariant}`,
+        startTime: Number(startT.toFixed(2)),
+        endTime: Number(endT.toFixed(2)),
+        enterAnimation: 'fade-scale',
+        exitAnimation: 'fade-out',
+        layout: { x: 540, y: 520, width: 860, scale: 1, zIndex: 8 },
+        props: {
+          kind: 'illustration-prop',
+          variant: chosenVariant,
+          data: chosenData,
+        },
+      });
+      lastInjectedVariant = chosenVariant;
+      lastVisualEnd = endT;
+    });
+  }
 
   // Add bottom karaoke cues
   cues.forEach((cue, idx) => {

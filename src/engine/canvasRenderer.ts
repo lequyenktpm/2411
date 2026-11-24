@@ -75,6 +75,176 @@ function fillCardWithShadow(
   ctx.restore();
 }
 
+function hexToRgba(hex: string, alpha: number): string {
+  const clean = hex.trim();
+  if (clean.startsWith('rgb') || clean.startsWith('hsl')) return clean;
+  const raw = clean.replace('#', '');
+  const full = raw.length === 3 ? raw.split('').map((c) => c + c).join('') : raw;
+  if (full.length !== 6) return `rgba(37, 99, 235, ${alpha})`;
+  const r = parseInt(full.slice(0, 2), 16);
+  const g = parseInt(full.slice(2, 4), 16);
+  const b = parseInt(full.slice(4, 6), 16);
+  if (Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b)) {
+    return `rgba(37, 99, 235, ${alpha})`;
+  }
+  return `rgba(${r}, ${g}, ${b}, ${clamp01(alpha)})`;
+}
+
+function drawCharacterAvatar(
+  ctx: CanvasRenderingContext2D,
+  opts: {
+    x: number;
+    y: number;
+    shirtColor: string;
+    hairColor: string;
+    skinColor?: string;
+    hairStyle?: 'short' | 'bob' | 'side';
+    expression?: 'smile' | 'happy' | 'curious';
+    nameTag?: string;
+    tagColor?: string;
+    scale?: number;
+  },
+) {
+  const {
+    x,
+    y,
+    shirtColor,
+    hairColor,
+    skinColor = '#FDE2C8',
+    hairStyle = 'short',
+    expression = 'smile',
+    nameTag,
+    tagColor = shirtColor,
+    scale = 1,
+  } = opts;
+
+  ctx.save();
+  ctx.translate(x, y);
+  if (scale !== 1) ctx.scale(scale, scale);
+
+  // Back hair for bob/long styles
+  if (hairStyle === 'bob') {
+    ctx.fillStyle = hairColor;
+    drawRoundedRectPath(ctx, -46, -42, 92, 86, 36);
+    ctx.fill();
+  }
+
+  // Shoulders & shirt
+  ctx.fillStyle = shirtColor;
+  drawRoundedRectPath(ctx, -48, 34, 96, 62, 30);
+  ctx.fill();
+
+  // Shirt collar
+  ctx.fillStyle = '#FFFFFF';
+  ctx.beginPath();
+  ctx.moveTo(-18, 34);
+  ctx.lineTo(0, 50);
+  ctx.lineTo(18, 34);
+  ctx.closePath();
+  ctx.fill();
+
+  // Neck + subtle chin shadow
+  ctx.fillStyle = skinColor;
+  drawRoundedRectPath(ctx, -13, 18, 26, 24, 10);
+  ctx.fill();
+  ctx.fillStyle = 'rgba(180, 83, 9, 0.14)';
+  ctx.beginPath();
+  ctx.ellipse(0, 26, 13, 6, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Head
+  ctx.fillStyle = skinColor;
+  ctx.beginPath();
+  ctx.arc(0, -14, 41, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Soft cheek blush
+  ctx.fillStyle = 'rgba(244, 114, 182, 0.25)';
+  ctx.beginPath();
+  ctx.ellipse(-22, -4, 8, 5, 0, 0, Math.PI * 2);
+  ctx.ellipse(22, -4, 8, 5, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Top hair & fringe
+  ctx.fillStyle = hairColor;
+  ctx.beginPath();
+  ctx.arc(0, -24, 42, Math.PI * 0.96, Math.PI * 2.04);
+  ctx.fill();
+  if (hairStyle === 'side') {
+    ctx.beginPath();
+    ctx.moveTo(-40, -28);
+    ctx.quadraticCurveTo(-8, -12, 34, -36);
+    ctx.quadraticCurveTo(10, -56, -40, -28);
+    ctx.fill();
+  } else if (hairStyle === 'bob') {
+    ctx.beginPath();
+    ctx.ellipse(-18, -36, 22, 13, -0.3, 0, Math.PI * 2);
+    ctx.ellipse(18, -36, 22, 13, 0.3, 0, Math.PI * 2);
+    ctx.fill();
+  } else {
+    ctx.beginPath();
+    ctx.ellipse(0, -44, 34, 15, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Eyebrows
+  ctx.strokeStyle = hairColor;
+  ctx.lineWidth = 3.2;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(-21, -24);
+  ctx.quadraticCurveTo(-14, -27, -7, -24);
+  ctx.moveTo(7, -24);
+  ctx.quadraticCurveTo(14, -27, 21, -24);
+  ctx.stroke();
+
+  // Eyes + white specular glints
+  ctx.fillStyle = '#0F172A';
+  ctx.beginPath();
+  ctx.arc(-14, -12, 4.8, 0, Math.PI * 2);
+  ctx.arc(14, -12, 4.8, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#FFFFFF';
+  ctx.beginPath();
+  ctx.arc(-15.5, -13.5, 1.7, 0, Math.PI * 2);
+  ctx.arc(12.5, -13.5, 1.7, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Mouth expression
+  if (expression === 'happy') {
+    ctx.fillStyle = '#E11D48';
+    ctx.beginPath();
+    ctx.arc(0, -1, 13, 0.08 * Math.PI, 0.92 * Math.PI);
+    ctx.closePath();
+    ctx.fill();
+  } else if (expression === 'curious') {
+    ctx.fillStyle = '#9F1239';
+    ctx.beginPath();
+    ctx.ellipse(0, 4, 5.5, 6.5, 0, 0, Math.PI * 2);
+    ctx.fill();
+  } else {
+    ctx.strokeStyle = '#1E293B';
+    ctx.lineWidth = 3.8;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.arc(0, -3, 12, 0.16 * Math.PI, 0.84 * Math.PI);
+    ctx.stroke();
+  }
+
+  // Optional crisp name badge pill below shoulders
+  if (nameTag) {
+    ctx.font = `700 20px ${FONT_SANS}`;
+    const pillW = Math.min(156, Math.max(82, ctx.measureText(nameTag).width + 28));
+    fillCardWithShadow(ctx, -pillW / 2, 76, pillW, 34, 17, tagColor, 0.12);
+    ctx.fillStyle = '#FFFFFF';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(nameTag, 0, 93, pillW - 16);
+  }
+
+  ctx.restore();
+}
+
 const bgImageCache = new Map<string, HTMLImageElement>();
 const bgImageLoading = new Map<string, Promise<HTMLImageElement | null>>();
 
@@ -181,6 +351,13 @@ function drawVectorPrimitives(
   time: number,
   extraCustomDraw?: (icon: IllustrationSceneIcon) => void,
 ) {
+  let inferredCardWidth = 0;
+  for (const p of primitives) {
+    if ((p.shape === 'rect' || p.shape === 'pill') && typeof p.w === 'number' && p.w > inferredCardWidth) {
+      inferredCardWidth = p.w;
+    }
+  }
+
   for (const prim of primitives) {
     ctx.save();
     if (typeof prim.opacity === 'number') {
@@ -280,18 +457,26 @@ function drawVectorPrimitives(
         ctx.fill();
       }
     } else if (prim.shape === 'text') {
-      const size = Math.max(24, prim.fontSize ?? 32);
+      const maxSize = Math.max(16, prim.fontSize ?? 32);
       const weight = prim.fontWeight ?? 700;
-      ctx.font = `${weight} ${size}px ${FONT_DISPLAY}`;
+      const fallbackW = inferredCardWidth > 0 ? Math.max(80, inferredCardWidth - 40) : 380;
+      const maxW = Math.max(48, prim.w ?? fallbackW);
+      const maxH = prim.h ? Math.max(28, prim.h) : 220;
+      const fitted = fitWrappedTextBlock(ctx, prim.text || '', maxW, maxH, {
+        fontWeight: weight,
+        fontFamily: FONT_DISPLAY,
+        maxFontSize: maxSize,
+        minFontSize: 15,
+        lineHeightRatio: 1.22,
+        maxLines: 3,
+      });
+      ctx.font = `${weight} ${fitted.fontSize}px ${FONT_DISPLAY}`;
       ctx.fillStyle = prim.fill || '#0F172A';
       ctx.textAlign = prim.align ?? 'center';
       ctx.textBaseline = 'middle';
-      const maxW = prim.w ? Math.max(140, prim.w) : 740;
-      const lines = wrapTextLines(ctx, prim.text || '', maxW).slice(0, 3);
-      const lh = Math.round(size * 1.24);
-      const startY = py - ((lines.length - 1) * lh) / 2;
-      lines.forEach((ln, li) => {
-        ctx.fillText(ln, px, startY + li * lh);
+      const startY = py - ((fitted.lines.length - 1) * fitted.lineHeight) / 2;
+      fitted.lines.forEach((ln, li) => {
+        ctx.fillText(ln, px, startY + li * fitted.lineHeight, maxW);
       });
     } else if (prim.shape === 'icon' && extraCustomDraw) {
       const bounce = Math.sin(time * 2.5) * 3;
@@ -307,9 +492,20 @@ function drawVectorPrimitives(
 function drawSceneIcon(ctx: CanvasRenderingContext2D, kind: IllustrationSceneIcon) {
   ctx.save();
   if (kind === 'tv') {
-    fillCardWithShadow(ctx, -92, -62, 184, 124, 28, '#1E293B', 0.12);
-    ctx.fillStyle = '#93C5FD';
-    drawRoundedRectPath(ctx, -72, -44, 144, 78, 16);
+    fillCardWithShadow(ctx, -92, -62, 184, 124, 28, '#0F172A', 0.14);
+    const screenGrad = ctx.createLinearGradient(-72, -44, 72, 34);
+    screenGrad.addColorStop(0, '#60A5FA');
+    screenGrad.addColorStop(1, '#38BDF8');
+    ctx.fillStyle = screenGrad;
+    drawRoundedRectPath(ctx, -74, -44, 148, 80, 16);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.18)';
+    ctx.beginPath();
+    ctx.moveTo(-74, -44);
+    ctx.lineTo(18, -44);
+    ctx.lineTo(-32, 36);
+    ctx.lineTo(-74, 36);
+    ctx.closePath();
     ctx.fill();
     ctx.fillStyle = '#FFFFFF';
     ctx.beginPath();
@@ -318,35 +514,87 @@ function drawSceneIcon(ctx: CanvasRenderingContext2D, kind: IllustrationSceneIco
     ctx.lineTo(-12, 18);
     ctx.closePath();
     ctx.fill();
-    ctx.strokeStyle = '#CBD5E1';
-    ctx.lineWidth = 10;
+    ctx.strokeStyle = '#94A3B8';
+    ctx.lineWidth = 9;
     ctx.lineCap = 'round';
     ctx.beginPath();
-    ctx.moveTo(-28, 72);
-    ctx.lineTo(28, 72);
+    ctx.moveTo(-30, 72);
+    ctx.lineTo(30, 72);
+    ctx.stroke();
+  } else if (kind === 'glasses') {
+    ctx.strokeStyle = '#1E293B';
+    ctx.lineWidth = 8;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    // Left lens
+    ctx.fillStyle = '#E0F2FE';
+    drawRoundedRectPath(ctx, -68, -22, 54, 42, 16);
+    ctx.fill();
+    ctx.stroke();
+    // Right lens
+    drawRoundedRectPath(ctx, 14, -22, 54, 42, 16);
+    ctx.fill();
+    ctx.stroke();
+    // Nose bridge & temple arms
+    ctx.beginPath();
+    ctx.arc(0, -4, 15, Math.PI * 1.1, Math.PI * 1.9);
+    ctx.moveTo(-68, -6);
+    ctx.lineTo(-78, -14);
+    ctx.moveTo(68, -6);
+    ctx.lineTo(78, -14);
+    ctx.stroke();
+    // Specular sheen
+    ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(-54, -12);
+    ctx.lineTo(-42, 6);
+    ctx.moveTo(28, -12);
+    ctx.lineTo(40, 6);
     ctx.stroke();
   } else if (kind === 'eye') {
-    ctx.fillStyle = '#DBEAFE';
+    ctx.fillStyle = '#EFF6FF';
+    ctx.strokeStyle = '#2563EB';
+    ctx.lineWidth = 6;
     ctx.beginPath();
-    ctx.ellipse(0, 0, 78, 48, 0, 0, Math.PI * 2);
+    ctx.moveTo(-74, 0);
+    ctx.quadraticCurveTo(0, -54, 74, 0);
+    ctx.quadraticCurveTo(0, 54, -74, 0);
+    ctx.closePath();
     ctx.fill();
+    ctx.stroke();
     ctx.fillStyle = '#2563EB';
     ctx.beginPath();
-    ctx.arc(0, 0, 22, 0, Math.PI * 2);
+    ctx.arc(0, 0, 24, 0, Math.PI * 2);
     ctx.fill();
     ctx.fillStyle = '#0F172A';
     ctx.beginPath();
-    ctx.arc(0, 0, 10, 0, Math.PI * 2);
+    ctx.arc(0, 0, 11, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#FFFFFF';
+    ctx.beginPath();
+    ctx.arc(-6, -6, 4.5, 0, Math.PI * 2);
     ctx.fill();
   } else if (kind === 'watch') {
-    ctx.fillStyle = '#1D4ED8';
-    ctx.beginPath();
-    ctx.arc(0, 0, 52, 0, Math.PI * 2);
+    ctx.fillStyle = '#334155';
+    drawRoundedRectPath(ctx, -20, -64, 40, 128, 12);
     ctx.fill();
-    ctx.fillStyle = '#BFDBFE';
+    ctx.fillStyle = '#FFFFFF';
+    ctx.strokeStyle = '#2563EB';
+    ctx.lineWidth = 7;
     ctx.beginPath();
-    ctx.arc(0, 0, 22, 0, Math.PI * 2);
+    ctx.arc(0, 0, 40, 0, Math.PI * 2);
     ctx.fill();
+    ctx.stroke();
+    ctx.strokeStyle = '#0F172A';
+    ctx.lineWidth = 5;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(0, -20);
+    ctx.moveTo(0, 0);
+    ctx.lineTo(16, 8);
+    ctx.stroke();
   } else if (kind === 'listen') {
     ctx.fillStyle = '#FDE68A';
     ctx.beginPath();
@@ -430,14 +678,30 @@ function drawSceneIcon(ctx: CanvasRenderingContext2D, kind: IllustrationSceneIco
     drawRoundedRectPath(ctx, -32, 26, 56, 10, 5);
     ctx.fill();
   } else if (kind === 'cup') {
-    fillCardWithShadow(ctx, -46, -24, 92, 72, 20, '#FFFFFF', 0.1);
+    ctx.strokeStyle = '#CBD5E1';
+    ctx.lineWidth = 4;
+    ctx.lineCap = 'round';
+    [-12, 8].forEach((sx) => {
+      ctx.beginPath();
+      ctx.moveTo(sx, -34);
+      ctx.quadraticCurveTo(sx - 6, -46, sx + 2, -56);
+      ctx.stroke();
+    });
+    fillCardWithShadow(ctx, -46, -24, 92, 74, 22, '#FFFFFF', 0.12);
+    ctx.strokeStyle = '#CBD5E1';
+    ctx.lineWidth = 3;
+    drawRoundedRectPath(ctx, -46, -24, 92, 74, 22);
+    ctx.stroke();
     ctx.fillStyle = '#38BDF8';
-    drawRoundedRectPath(ctx, -36, -12, 72, 50, 14);
+    drawRoundedRectPath(ctx, -36, -12, 72, 52, 15);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    drawRoundedRectPath(ctx, -28, -4, 14, 34, 7);
     ctx.fill();
     ctx.strokeStyle = '#94A3B8';
     ctx.lineWidth = 7;
     ctx.beginPath();
-    ctx.arc(48, 12, 16, -Math.PI / 2, Math.PI / 2);
+    ctx.arc(46, 12, 16, -Math.PI / 2, Math.PI / 2);
     ctx.stroke();
   } else if (kind === 'shopping-bag') {
     ctx.strokeStyle = '#BE185D';
@@ -789,19 +1053,19 @@ function wrapTextLines(
   text: string,
   maxWidth: number,
 ): string[] {
-  const words = text.split(/\s+/).filter(Boolean);
-  if (words.length === 0) return [];
+  const safeMaxW = Math.max(24, maxWidth);
+  const paragraphs = text.split(/\r?\n/);
   const lines: string[] = [];
 
   const pushWrappedWord = (word: string) => {
-    if (ctx.measureText(word).width <= maxWidth) {
+    if (ctx.measureText(word).width <= safeMaxW) {
       lines.push(word);
       return;
     }
     let chunk = '';
     for (const ch of word) {
       const next = chunk + ch;
-      if (ctx.measureText(next).width <= maxWidth || chunk.length === 0) {
+      if (ctx.measureText(next).width <= safeMaxW || chunk.length === 0) {
         chunk = next;
       } else {
         lines.push(chunk);
@@ -811,32 +1075,81 @@ function wrapTextLines(
     if (chunk) lines.push(chunk);
   };
 
-  let current = '';
-  for (const word of words) {
-    if (!current) {
-      if (ctx.measureText(word).width <= maxWidth) {
-        current = word;
-      } else {
-        pushWrappedWord(word);
-        current = lines.pop() ?? '';
+  for (const para of paragraphs) {
+    const words = para.trim().split(/\s+/).filter(Boolean);
+    if (words.length === 0) continue;
+    let current = '';
+    for (const word of words) {
+      if (!current) {
+        if (ctx.measureText(word).width <= safeMaxW) {
+          current = word;
+        } else {
+          pushWrappedWord(word);
+          current = lines.pop() ?? '';
+        }
+        continue;
       }
-      continue;
-    }
-    const candidate = `${current} ${word}`;
-    if (ctx.measureText(candidate).width <= maxWidth) {
-      current = candidate;
-    } else {
-      lines.push(current);
-      if (ctx.measureText(word).width <= maxWidth) {
-        current = word;
+      const candidate = `${current} ${word}`;
+      if (ctx.measureText(candidate).width <= safeMaxW) {
+        current = candidate;
       } else {
-        pushWrappedWord(word);
-        current = lines.pop() ?? '';
+        lines.push(current);
+        if (ctx.measureText(word).width <= safeMaxW) {
+          current = word;
+        } else {
+          pushWrappedWord(word);
+          current = lines.pop() ?? '';
+        }
       }
     }
+    if (current) lines.push(current);
   }
-  if (current) lines.push(current);
   return lines;
+}
+
+function fitWrappedTextBlock(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  maxWidth: number,
+  maxHeight: number,
+  options: {
+    fontWeight?: number | string;
+    fontFamily?: string;
+    maxFontSize: number;
+    minFontSize?: number;
+    lineHeightRatio?: number;
+    maxLines?: number;
+  },
+): { fontSize: number; lineHeight: number; lines: string[] } {
+  const weight = options.fontWeight ?? 700;
+  const family = options.fontFamily ?? FONT_DISPLAY;
+  const minFont = Math.max(12, options.minFontSize ?? 16);
+  const lhRatio = options.lineHeightRatio ?? 1.24;
+  const maxLines = options.maxLines ?? 8;
+  const safeW = Math.max(24, maxWidth);
+  const safeH = Math.max(24, maxHeight);
+
+  let fontSize = Math.max(minFont, options.maxFontSize);
+  let bestLines: string[] = [];
+  let bestLh = Math.round(fontSize * lhRatio);
+
+  while (fontSize >= minFont) {
+    ctx.font = `${weight} ${fontSize}px ${family}`;
+    const wrapped = wrapTextLines(ctx, text, safeW);
+    const lh = Math.round(fontSize * lhRatio);
+    bestLines = wrapped;
+    bestLh = lh;
+    if (wrapped.length <= maxLines && wrapped.length * lh <= safeH) {
+      return { fontSize, lineHeight: lh, lines: wrapped };
+    }
+    fontSize -= 2;
+  }
+
+  return {
+    fontSize: minFont,
+    lineHeight: Math.round(minFont * lhRatio),
+    lines: bestLines.slice(0, maxLines),
+  };
 }
 
 function drawComparisonStrip(
@@ -847,6 +1160,7 @@ function drawComparisonStrip(
   elStartTime = 0,
 ) {
   const count = Math.max(1, props.items.length);
+  const safeStripW = Math.min(STAGE_WIDTH - 48, Math.max(360, width));
   const elElapsed = Math.max(0, time - elStartTime);
 
   // Determine active index: latest item whose activateAt <= time
@@ -860,7 +1174,7 @@ function drawComparisonStrip(
   const isLongStack = props.items.some((item) => item.label.trim().length > 16) || count > 4;
 
   if (isLongStack) {
-    const rowW = Math.min(860, Math.max(640, width));
+    const rowW = Math.min(860, safeStripW);
     const rowGap = 12;
     const layouts = props.items.map((item, idx) => {
       const isActive = idx === activeIdx;
@@ -875,17 +1189,24 @@ function drawComparisonStrip(
       );
       const fSize = item.label.length > 78 ? 25 : 28;
       ctx.font = `700 ${fSize}px ${FONT_DISPLAY}`;
-      const textMaxW = rowW - (showSub ? 230 : 68);
-      const lines = wrapTextLines(ctx, item.label, textMaxW).slice(0, 3);
-      const rowH = Math.max(76, lines.length * Math.round(fSize * 1.26) + 28);
-      return { item, idx, isActive, showSub, fSize, lines, rowH };
+      const textMaxW = Math.max(120, rowW - (showSub ? 230 : 68));
+      const fitted = fitWrappedTextBlock(ctx, item.label, textMaxW, 130, {
+        fontWeight: 700,
+        fontFamily: FONT_DISPLAY,
+        maxFontSize: fSize,
+        minFontSize: 18,
+        lineHeightRatio: 1.24,
+        maxLines: 3,
+      });
+      const rowH = Math.max(76, fitted.lines.length * fitted.lineHeight + 28);
+      return { item, idx, isActive, showSub, fSize: fitted.fontSize, lh: fitted.lineHeight, lines: fitted.lines, rowH, textMaxW };
     });
 
     const totalH =
       layouts.reduce((acc, l) => acc + l.rowH, 0) + rowGap * Math.max(0, layouts.length - 1);
     let cursorY = -totalH / 2;
 
-    layouts.forEach(({ item, idx, isActive, showSub, fSize, lines, rowH }) => {
+    layouts.forEach(({ item, idx, isActive, showSub, fSize, lh, lines, rowH, textMaxW }) => {
       const stag = computeStaggerItemState(elElapsed, idx, 0.075, 0.34);
       if (!stag.visible) {
         cursorY += rowH + rowGap;
@@ -920,14 +1241,13 @@ function drawComparisonStrip(
         ctx.restore();
       }
 
-      const lh = Math.round(fSize * 1.26);
       const textStartY = -((lines.length - 1) * lh) / 2;
       ctx.font = `700 ${fSize}px ${FONT_DISPLAY}`;
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = isActive ? '#0F172A' : '#334155';
       lines.forEach((ln, li) => {
-        ctx.fillText(ln, -rowW / 2 + 32, textStartY + li * lh);
+        ctx.fillText(ln, -rowW / 2 + 32, textStartY + li * lh, textMaxW);
       });
 
       if (showSub && item.sublabel) {
@@ -938,7 +1258,7 @@ function drawComparisonStrip(
         ctx.fill();
         ctx.fillStyle = isActive ? '#FFFFFF' : '#475569';
         ctx.textAlign = 'center';
-        ctx.fillText(item.sublabel, rowW / 2 - pillW / 2 - 18, 1);
+        ctx.fillText(item.sublabel, rowW / 2 - pillW / 2 - 18, 1, pillW - 18);
       }
 
       ctx.restore();
@@ -947,10 +1267,31 @@ function drawComparisonStrip(
     return;
   }
 
-  const gap = 20;
-  const itemW = (width - gap * (count - 1)) / count;
-  const itemH = 112;
-  const startX = -width / 2;
+  // Unified @englishpracticing168 frosted capsule housing all tabs inside one cohesive header bar
+  const outerPadX = 14;
+  const outerW = safeStripW + outerPadX * 2;
+  const outerH = 120;
+  fillCardWithShadow(
+    ctx,
+    -outerW / 2,
+    -outerH / 2,
+    outerW,
+    outerH,
+    40,
+    'rgba(255, 255, 255, 0.92)',
+    0.08,
+  );
+  ctx.save();
+  ctx.strokeStyle = '#E2E8F0';
+  ctx.lineWidth = 2;
+  drawRoundedRectPath(ctx, -outerW / 2, -outerH / 2, outerW, outerH, 40);
+  ctx.stroke();
+  ctx.restore();
+
+  const gap = 12;
+  const itemW = (safeStripW - gap * (count - 1)) / count;
+  const itemH = 96;
+  const startX = -safeStripW / 2;
   const startY = -itemH / 2;
 
   props.items.forEach((item, idx) => {
@@ -959,31 +1300,34 @@ function drawComparisonStrip(
     const x = startX + idx * (itemW + gap);
     const isActive = idx === activeIdx;
     const accent = item.accentColor || '#2563EB';
-    const activeScale = isActive ? 1.03 : 1;
+    const activeScale = isActive ? 1.02 : 1;
 
     ctx.save();
     ctx.globalAlpha *= stag.opacity;
     ctx.translate(x + itemW / 2, stag.translateY);
     ctx.scale(stag.scale * activeScale, stag.scale * activeScale);
 
-    fillCardWithShadow(
-      ctx,
-      -itemW / 2,
-      startY,
-      itemW,
-      itemH,
-      30,
-      isActive ? '#FFFFFF' : 'rgba(255,255,255,0.88)',
-      isActive ? 0.14 : 0.05,
-    );
-
     if (isActive) {
-      ctx.save();
+      fillCardWithShadow(
+        ctx,
+        -itemW / 2,
+        startY,
+        itemW,
+        itemH,
+        28,
+        '#FFFFFF',
+        0.1,
+      );
+      ctx.fillStyle = hexToRgba(accent, 0.1);
+      drawRoundedRectPath(ctx, -itemW / 2, startY, itemW, itemH, 28);
+      ctx.fill();
       ctx.strokeStyle = accent;
-      ctx.lineWidth = 5;
-      drawRoundedRectPath(ctx, -itemW / 2, startY, itemW, itemH, 30);
+      ctx.lineWidth = 3.5;
       ctx.stroke();
-      ctx.restore();
+    } else {
+      ctx.fillStyle = 'rgba(241, 245, 249, 0.72)';
+      drawRoundedRectPath(ctx, -itemW / 2, startY, itemW, itemH, 28);
+      ctx.fill();
     }
 
     const showSublabel = Boolean(
@@ -996,53 +1340,56 @@ function drawComparisonStrip(
         ),
     );
 
-    const maxLabelW = itemW - 24;
-    let fontSize = 32;
-    let lines: string[] = [];
-    while (fontSize >= 24) {
-      ctx.font = `700 ${fontSize}px ${FONT_DISPLAY}`;
-      lines = wrapTextLines(ctx, item.label, maxLabelW);
-      if (lines.length <= 2) break;
-      fontSize -= 2;
-    }
-    const displayLines = lines.slice(0, 2);
-    const lh = Math.round(fontSize * 1.2);
+    const maxLabelW = Math.max(48, itemW - 24);
+    const fitted = fitWrappedTextBlock(ctx, item.label, maxLabelW, showSublabel ? 54 : 80, {
+      fontWeight: 700,
+      fontFamily: FONT_DISPLAY,
+      maxFontSize: 31,
+      minFontSize: 18,
+      lineHeightRatio: 1.18,
+      maxLines: 2,
+    });
 
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillStyle = isActive ? accent : '#334155';
-    ctx.font = `700 ${fontSize}px ${FONT_DISPLAY}`;
+    ctx.fillStyle = isActive ? accent : '#64748B';
+    ctx.font = `700 ${fitted.fontSize}px ${FONT_DISPLAY}`;
 
-    const labelCenterY = showSublabel ? startY + 42 : startY + itemH / 2;
-    const firstY = labelCenterY - ((displayLines.length - 1) * lh) / 2;
-    displayLines.forEach((ln, li) => {
-      ctx.fillText(ln, 0, firstY + li * lh);
+    const labelCenterY = showSublabel ? startY + 32 : startY + itemH / 2;
+    const firstY = labelCenterY - ((fitted.lines.length - 1) * fitted.lineHeight) / 2;
+    fitted.lines.forEach((ln, li) => {
+      ctx.fillText(ln, 0, firstY + li * fitted.lineHeight, maxLabelW);
     });
 
     if (showSublabel && item.sublabel) {
-      ctx.font = `600 22px ${FONT_SANS}`;
-      ctx.fillStyle = isActive ? '#334155' : '#64748B';
-      ctx.fillText(item.sublabel, 0, startY + 88);
+      ctx.font = `600 20px ${FONT_SANS}`;
+      ctx.fillStyle = isActive ? '#334155' : '#94A3B8';
+      ctx.fillText(item.sublabel, 0, startY + 69, maxLabelW);
     }
     ctx.restore();
   });
 }
 
-function drawTopicPill(ctx: CanvasRenderingContext2D, props: TopicPillProps) {
-  const maxTextW = 796;
-  let fontSize = 34;
-  let lines: string[] = [];
-  while (fontSize >= 28) {
-    ctx.font = `700 ${fontSize}px ${FONT_SANS}`;
-    lines = wrapTextLines(ctx, props.text, maxTextW);
-    if (lines.length <= 2) break;
-    fontSize -= 2;
-  }
-  const displayLines = lines.slice(0, 3);
-  const maxLineW = Math.max(180, ...displayLines.map((ln) => ctx.measureText(ln).width));
-  const pillW = Math.min(880, Math.max(260, maxLineW + 76));
-  const lh = Math.round(fontSize * 1.24);
-  const pillH = displayLines.length === 1 ? 74 : displayLines.length * lh + 32;
+function drawTopicPill(
+  ctx: CanvasRenderingContext2D,
+  props: TopicPillProps,
+  maxBoxWidth = 880,
+) {
+  const safeBoxW = Math.min(STAGE_WIDTH - 48, Math.max(220, maxBoxWidth));
+  const maxTextW = Math.max(150, safeBoxW - 64);
+  const fitted = fitWrappedTextBlock(ctx, props.text, maxTextW, 130, {
+    fontWeight: 700,
+    fontFamily: FONT_SANS,
+    maxFontSize: 34,
+    minFontSize: 20,
+    lineHeightRatio: 1.24,
+    maxLines: 3,
+  });
+  ctx.font = `700 ${fitted.fontSize}px ${FONT_SANS}`;
+  const maxLineW = Math.max(120, ...fitted.lines.map((ln) => Math.min(maxTextW, ctx.measureText(ln).width)));
+  const pillW = Math.min(safeBoxW, Math.max(220, maxLineW + 64));
+  const lh = fitted.lineHeight;
+  const pillH = fitted.lines.length === 1 ? 74 : fitted.lines.length * lh + 32;
 
   fillCardWithShadow(
     ctx,
@@ -1057,10 +1404,10 @@ function drawTopicPill(ctx: CanvasRenderingContext2D, props: TopicPillProps) {
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = props.textColor;
-  ctx.font = `700 ${fontSize}px ${FONT_SANS}`;
-  const startY = -((displayLines.length - 1) * lh) / 2 + 1;
-  displayLines.forEach((ln, li) => {
-    ctx.fillText(ln, 0, startY + li * lh);
+  ctx.font = `700 ${fitted.fontSize}px ${FONT_SANS}`;
+  const startY = -((fitted.lines.length - 1) * lh) / 2 + 1;
+  fitted.lines.forEach((ln, li) => {
+    ctx.fillText(ln, 0, startY + li * lh, pillW - 44);
   });
 }
 
@@ -1071,6 +1418,9 @@ const VARIANTS_WITH_NATIVE_LABELS = new Set<string>([
   'degree-scale',
   'phrasal-split',
   'syllable-stress',
+  'trio-icon-cards',
+  'contrast-pair-cards',
+  'quiz-fill-blank',
   'bs-list-group',
   'bs-pricing-tier',
   'bs-breadcrumb-path',
@@ -1092,6 +1442,7 @@ function drawProminentLabelsStrip(
 ): number {
   const clean = labels.map((l) => l.trim()).filter(Boolean).slice(0, 3);
   if (clean.length === 0) return 0;
+  const safeStripW = Math.min(840, Math.max(240, stripW));
 
   const palette = [
     { bg: '#EEF2FF', border: '#C7D2FE', fg: '#312E81', badge: '#4F46E5' },
@@ -1103,9 +1454,9 @@ function drawProminentLabelsStrip(
   const allShort = clean.every((l) => l.length <= 13);
   if (allShort && clean.length >= 2) {
     const gap = 16;
-    const colW = (stripW - gap * (clean.length - 1)) / clean.length;
+    const colW = (safeStripW - gap * (clean.length - 1)) / clean.length;
     const colH = 74;
-    const startX = -stripW / 2;
+    const startX = -safeStripW / 2;
     clean.forEach((lbl, i) => {
       const col = palette[i % palette.length];
       const cx = startX + i * (colW + gap);
@@ -1115,14 +1466,19 @@ function drawProminentLabelsStrip(
       drawRoundedRectPath(ctx, cx, topY, colW, colH, 20);
       ctx.stroke();
 
-      ctx.font = `800 30px ${FONT_DISPLAY}`;
+      const fitted = fitWrappedTextBlock(ctx, lbl, colW - 24, colH - 12, {
+        fontWeight: 800,
+        maxFontSize: 30,
+        minFontSize: 18,
+        maxLines: 2,
+        lineHeightRatio: 1.15,
+      });
+      ctx.font = `800 ${fitted.fontSize}px ${FONT_DISPLAY}`;
       ctx.fillStyle = col.fg;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      const lines = wrapTextLines(ctx, lbl, colW - 24).slice(0, 2);
-      const lh = 34;
-      const ly = topY + colH / 2 - ((lines.length - 1) * lh) / 2;
-      lines.forEach((ln, li) => ctx.fillText(ln, cx + colW / 2, ly + li * lh));
+      const ly = topY + colH / 2 - ((fitted.lines.length - 1) * fitted.lineHeight) / 2;
+      fitted.lines.forEach((ln, li) => ctx.fillText(ln, cx + colW / 2, ly + li * fitted.lineHeight, colW - 20));
     });
     return colH;
   }
@@ -1132,34 +1488,39 @@ function drawProminentLabelsStrip(
   let cursorY = topY;
   clean.forEach((lbl, i) => {
     const col = palette[i % palette.length];
-    ctx.font = `800 30px ${FONT_DISPLAY}`;
-    const lines = wrapTextLines(ctx, lbl, stripW - 108).slice(0, 2);
-    const rowH = Math.max(66, lines.length * 36 + 26);
+    const textMaxW = Math.max(120, safeStripW - 108);
+    const fitted = fitWrappedTextBlock(ctx, lbl, textMaxW, 86, {
+      fontWeight: 800,
+      maxFontSize: 30,
+      minFontSize: 18,
+      maxLines: 2,
+      lineHeightRatio: 1.2,
+    });
+    const rowH = Math.max(66, fitted.lines.length * fitted.lineHeight + 26);
 
-    fillCardWithShadow(ctx, -stripW / 2, cursorY, stripW, rowH, 20, col.bg, 0.08);
+    fillCardWithShadow(ctx, -safeStripW / 2, cursorY, safeStripW, rowH, 20, col.bg, 0.08);
     ctx.strokeStyle = col.border;
     ctx.lineWidth = 2.5;
-    drawRoundedRectPath(ctx, -stripW / 2, cursorY, stripW, rowH, 20);
+    drawRoundedRectPath(ctx, -safeStripW / 2, cursorY, safeStripW, rowH, 20);
     ctx.stroke();
 
     // Numbered pill on left
     ctx.fillStyle = col.badge;
     ctx.beginPath();
-    ctx.arc(-stripW / 2 + 38, cursorY + rowH / 2, 18, 0, Math.PI * 2);
+    ctx.arc(-safeStripW / 2 + 38, cursorY + rowH / 2, 18, 0, Math.PI * 2);
     ctx.fill();
     ctx.font = `800 22px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#FFFFFF';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(`${i + 1}`, -stripW / 2 + 38, cursorY + rowH / 2 + 1);
+    ctx.fillText(`${i + 1}`, -safeStripW / 2 + 38, cursorY + rowH / 2 + 1);
 
-    ctx.font = `800 30px ${FONT_DISPLAY}`;
+    ctx.font = `800 ${fitted.fontSize}px ${FONT_DISPLAY}`;
     ctx.fillStyle = col.fg;
     ctx.textAlign = 'left';
-    const lh = 36;
-    const textStartY = cursorY + rowH / 2 - ((lines.length - 1) * lh) / 2;
-    lines.forEach((ln, li) => {
-      ctx.fillText(ln, -stripW / 2 + 72, textStartY + li * lh);
+    const textStartY = cursorY + rowH / 2 - ((fitted.lines.length - 1) * fitted.lineHeight) / 2;
+    fitted.lines.forEach((ln, li) => {
+      ctx.fillText(ln, -safeStripW / 2 + 72, textStartY + li * fitted.lineHeight, textMaxW);
     });
     cursorY += rowH + gap;
   });
@@ -1258,31 +1619,17 @@ function drawIllustrationProp(
     ctx.arc(84, 64, 7, 0, Math.PI * 2);
     ctx.fill();
 
-    // Friendly character on right
-    ctx.save();
-    ctx.translate(220, 15);
-    ctx.fillStyle = '#F472B6';
-    drawRoundedRectPath(ctx, -46, 36, 92, 68, 30);
-    ctx.fill();
-    ctx.fillStyle = '#FDE68A';
-    ctx.beginPath();
-    ctx.arc(0, -14, 42, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#451A03';
-    ctx.beginPath();
-    ctx.arc(0, -24, 42, Math.PI, 0);
-    ctx.fill();
-    ctx.fillStyle = '#1E293B';
-    ctx.beginPath();
-    ctx.arc(-14, -12, 4.5, 0, Math.PI * 2);
-    ctx.arc(14, -12, 4.5, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = '#1E293B';
-    ctx.lineWidth = 4;
-    ctx.beginPath();
-    ctx.arc(0, -2, 14, 0.15 * Math.PI, 0.85 * Math.PI);
-    ctx.stroke();
-    ctx.restore();
+    // Friendly modern character on right
+    drawCharacterAvatar(ctx, {
+      x: 220,
+      y: 12,
+      shirtColor: '#EC4899',
+      hairColor: '#3E2723',
+      hairStyle: 'bob',
+      expression: 'happy',
+      nameTag: 'Customer',
+      tagColor: '#DB2777',
+    });
   } else if (props.variant === 'coffee-cup') {
     fillCardWithShadow(ctx, -95, -50, 190, 130, 32, '#FFFFFF', 0.08);
     ctx.fillStyle = '#92400E';
@@ -1295,42 +1642,38 @@ function drawIllustrationProp(
     ctx.arc(105, 10, 32, -Math.PI / 2, Math.PI / 2);
     ctx.stroke();
   } else if (props.variant === 'friends-chat') {
-    // Two friendly people chatting with speech bubbles
-    const drawPerson = (px: number, shirt: string, hair: string) => {
-      ctx.save();
-      ctx.translate(px, 24);
-      ctx.fillStyle = shirt;
-      drawRoundedRectPath(ctx, -46, 36, 92, 70, 30);
-      ctx.fill();
-      ctx.fillStyle = '#FDE68A';
-      ctx.beginPath();
-      ctx.arc(0, -14, 42, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = hair;
-      ctx.beginPath();
-      ctx.arc(0, -24, 42, Math.PI, 0);
-      ctx.fill();
-      ctx.fillStyle = '#1E293B';
-      ctx.beginPath();
-      ctx.arc(-13, -12, 4.5, 0, Math.PI * 2);
-      ctx.arc(13, -12, 4.5, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = '#1E293B';
-      ctx.lineWidth = 4;
-      ctx.beginPath();
-      ctx.arc(0, -2, 13, 0.15 * Math.PI, 0.85 * Math.PI);
-      ctx.stroke();
-      ctx.restore();
-    };
-    drawPerson(-130, '#3B82F6', '#1E293B');
-    drawPerson(130, '#EC4899', '#78350F');
-    // Small chat bubble above
-    fillCardWithShadow(ctx, -68, -118, 136, 72, 24, '#FFFFFF', 0.08);
+    // Two modern flat-vector characters chatting with speech bubble above
+    drawCharacterAvatar(ctx, {
+      x: -145,
+      y: 12,
+      shirtColor: '#2563EB',
+      hairColor: '#1E293B',
+      hairStyle: 'short',
+      expression: 'smile',
+      nameTag: props.data?.labels?.[0] || 'Alex',
+      tagColor: '#2563EB',
+    });
+    drawCharacterAvatar(ctx, {
+      x: 145,
+      y: 12,
+      shirtColor: '#EC4899',
+      hairColor: '#78350F',
+      hairStyle: 'bob',
+      expression: 'happy',
+      nameTag: props.data?.labels?.[1] || 'Mia',
+      tagColor: '#DB2777',
+    });
+    // Crisp chat bubble above
+    fillCardWithShadow(ctx, -74, -124, 148, 72, 24, '#FFFFFF', 0.09);
+    ctx.strokeStyle = '#E2E8F0';
+    ctx.lineWidth = 2;
+    drawRoundedRectPath(ctx, -74, -124, 148, 72, 24);
+    ctx.stroke();
     ctx.fillStyle = '#2563EB';
     [-26, 0, 26].forEach((dx, i) => {
       const bounce = Math.sin(time * 5 + i * 0.9) * 4;
       ctx.beginPath();
-      ctx.arc(dx, -82 + bounce, 7, 0, Math.PI * 2);
+      ctx.arc(dx, -88 + bounce, 7, 0, Math.PI * 2);
       ctx.fill();
     });
   } else if (props.variant === 'office-work') {
@@ -1959,34 +2302,22 @@ function drawIllustrationProp(
     const speech = props.data?.speechText || 'Could I have some water, please?';
     const reaction = props.data?.reactionText || 'Polite!';
 
-    // Speaker avatar on left
+    // Modern speaker avatar on left
     ctx.save();
-    ctx.translate(-295, 16);
     ctx.fillStyle = '#DBEAFE';
     ctx.beginPath();
-    ctx.arc(0, 0, 82, 0, Math.PI * 2);
+    ctx.arc(-295, 10, 86, 0, Math.PI * 2);
     ctx.fill();
-    ctx.fillStyle = '#3B82F6';
-    drawRoundedRectPath(ctx, -46, 28, 92, 54, 24);
-    ctx.fill();
-    ctx.fillStyle = '#FDE68A';
-    ctx.beginPath();
-    ctx.arc(0, -14, 42, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#1E293B';
-    ctx.beginPath();
-    ctx.arc(0, -24, 42, Math.PI, 0);
-    ctx.fill();
-    ctx.beginPath();
-    ctx.arc(-13, -12, 4.5, 0, Math.PI * 2);
-    ctx.arc(13, -12, 4.5, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = '#1E293B';
-    ctx.lineWidth = 4;
-    ctx.beginPath();
-    ctx.arc(0, -2, 13, 0.15 * Math.PI, 0.85 * Math.PI);
-    ctx.stroke();
     ctx.restore();
+    drawCharacterAvatar(ctx, {
+      x: -295,
+      y: 2,
+      shirtColor: '#2563EB',
+      hairColor: '#1E293B',
+      hairStyle: 'side',
+      expression: reaction.includes('blunt') ? 'curious' : 'smile',
+      scale: 0.92,
+    });
 
     // Speech bubble on right
     fillCardWithShadow(ctx, -185, -86, 585, 152, 34, '#FFFFFF', 0.09);
@@ -2018,57 +2349,355 @@ function drawIllustrationProp(
     const nodes = (props.data?.nodes ?? []).slice(0, 3);
     const quote = props.data?.speechText || 'I see TV every';
     const chip = (props.data?.highlightWord || 'night.').replace(/["“”]/g, '');
-    const wrong = props.data?.subtitle;
+    const contextRule = props.data?.subtitle || props.data?.title || 'Context & meaning';
     const iconKind = props.data?.sceneIcon || 'tv';
 
-    fillCardWithShadow(ctx, -430, -236, 860, 128, 40, '#FFFFFF', 0.08);
-    const slotW = nodes.length > 0 ? 760 / Math.max(nodes.length, 1) : 240;
-    nodes.forEach((node, i) => {
-      const nx = -380 + i * slotW + slotW / 2;
-      ctx.font = `800 28px ${FONT_DISPLAY}`;
-      ctx.fillStyle = node.color || '#475569';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(node.label, nx, -198, slotW - 24);
-      if (node.sublabel) {
-        ctx.font = `600 18px ${FONT_SANS}`;
-        ctx.fillStyle = '#94A3B8';
-        ctx.fillText(node.sublabel, nx, -168, slotW - 24);
-      }
-      if (i < nodes.length - 1) {
-        ctx.fillStyle = '#CBD5E1';
-        ctx.font = `700 22px ${FONT_SANS}`;
-        ctx.fillText('→', nx + slotW / 2, -184);
-      }
-    });
+    // 1. Cohesive integrated summary card on top (rule breakdown + context line)
+    fillCardWithShadow(ctx, -420, -214, 840, 168, 30, '#FFFFFF', 0.09);
+    ctx.save();
+    ctx.strokeStyle = '#E2E8F0';
+    ctx.lineWidth = 2;
+    drawRoundedRectPath(ctx, -420, -214, 840, 168, 30);
+    ctx.stroke();
+    ctx.restore();
 
-    if (wrong) {
-      fillCardWithShadow(ctx, -340, -88, 680, 50, 25, '#FFFFFF', 0.06);
-      ctx.font = `700 26px ${FONT_SANS}`;
-      ctx.fillStyle = '#0F172A';
+    if (nodes.length >= 2) {
+      const slotW = 760 / nodes.length;
+      nodes.forEach((node, i) => {
+        const nx = -380 + i * slotW + slotW / 2;
+        ctx.fillStyle = '#F8FAFC';
+        drawRoundedRectPath(ctx, nx - slotW * 0.42, -198, slotW * 0.84, 72, 18);
+        ctx.fill();
+        ctx.font = `800 26px ${FONT_DISPLAY}`;
+        ctx.fillStyle = node.color || '#334155';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(node.label, nx, -172, slotW * 0.78);
+        if (node.sublabel) {
+          ctx.font = `600 18px ${FONT_SANS}`;
+          ctx.fillStyle = '#64748B';
+          ctx.fillText(node.sublabel, nx, -142, slotW * 0.78);
+        }
+        if (i < nodes.length - 1) {
+          ctx.fillStyle = '#94A3B8';
+          ctx.font = `700 22px ${FONT_SANS}`;
+          ctx.fillText('→', nx + slotW / 2, -162);
+        }
+      });
+    } else {
+      ctx.font = `800 28px ${FONT_DISPLAY}`;
+      ctx.fillStyle = '#1E293B';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText(wrong, 0, -63, 640);
+      ctx.fillText(props.data?.title || 'KEY CONTRAST', 0, -162, 760);
     }
 
-    ctx.font = `800 58px ${FONT_DISPLAY}`;
+    // Thin divider + fitted context line (never squished!)
+    ctx.strokeStyle = '#EEF2F7';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(-388, -112);
+    ctx.lineTo(388, -112);
+    ctx.stroke();
+
+    const fittedRule = fitWrappedTextBlock(ctx, contextRule, 760, 48, {
+      fontWeight: 700,
+      fontFamily: FONT_DISPLAY,
+      maxFontSize: 28,
+      minFontSize: 18,
+      maxLines: 1,
+    });
+    ctx.font = `700 ${fittedRule.fontSize}px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#0F172A';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(`"${quote}`, 0, 16, 860);
+    ctx.fillText(fittedRule.lines[0] ?? contextRule, 0, -79, 760);
 
+    // 2. Large crisp quote line
+    const fittedQuote = fitWrappedTextBlock(ctx, quote, 800, 74, {
+      fontWeight: 800,
+      fontFamily: FONT_DISPLAY,
+      maxFontSize: 48,
+      minFontSize: 28,
+      maxLines: 2,
+      lineHeightRatio: 1.18,
+    });
+    ctx.font = `800 ${fittedQuote.fontSize}px ${FONT_DISPLAY}`;
+    ctx.fillStyle = '#0F172A';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const qBaseY = fittedQuote.lines.length > 1 ? -4 : 6;
+    fittedQuote.lines.forEach((ln, li) => {
+      ctx.fillText(
+        ln,
+        0,
+        qBaseY - ((fittedQuote.lines.length - 1) * fittedQuote.lineHeight) / 2 + li * fittedQuote.lineHeight,
+        800,
+      );
+    });
+
+    // 3. Framed rounded icon tile + sleek emphasis chip pill side-by-side / stacked cleanly
+    fillCardWithShadow(ctx, -186, 56, 152, 134, 30, '#FFFFFF', 0.11);
     ctx.save();
-    ctx.translate(0, 118);
+    ctx.strokeStyle = '#E2E8F0';
+    ctx.lineWidth = 2.5;
+    drawRoundedRectPath(ctx, -186, 56, 152, 134, 30);
+    ctx.stroke();
+    ctx.translate(-110, 123);
+    ctx.scale(0.84, 0.84);
     drawSceneIcon(ctx, iconKind);
     ctx.restore();
 
-    ctx.font = `700 36px ${FONT_DISPLAY}`;
-    const chipW = Math.min(360, Math.max(150, ctx.measureText(chip).width + 48));
-    fillCardWithShadow(ctx, -chipW / 2, 188, chipW, 58, 29, '#F8FAFC', 0.08);
-    ctx.fillStyle = '#64748B';
+    ctx.font = `800 34px ${FONT_DISPLAY}`;
+    const chipW = Math.min(340, Math.max(180, ctx.measureText(chip).width + 64));
+    fillCardWithShadow(ctx, 18, 88, chipW, 70, 35, '#EEF2FF', 0.08);
+    ctx.strokeStyle = '#C7D2FE';
+    ctx.lineWidth = 2.5;
+    drawRoundedRectPath(ctx, 18, 88, chipW, 70, 35);
+    ctx.stroke();
+    ctx.fillStyle = '#4338CA';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(chip, 0, 217, chipW - 24);
+    ctx.fillText(chip, 18 + chipW / 2, 123, chipW - 28);
+  } else if (props.variant === 'trio-icon-cards') {
+    const defaultNodes = [
+      { label: 'Look', sublabel: 'on purpose', sceneIcon: 'eye' as IllustrationSceneIcon, color: '#2563EB' },
+      { label: 'See', sublabel: 'automatic', sceneIcon: 'glasses' as IllustrationSceneIcon, color: '#64748B' },
+      { label: 'Watch', sublabel: 'moving', sceneIcon: 'tv' as IllustrationSceneIcon, color: '#D97706' },
+    ];
+    const nodes =
+      props.data?.nodes && props.data.nodes.length >= 2
+        ? props.data.nodes.slice(0, 3)
+        : defaultNodes;
+    const gap = 22;
+    const cw = nodes.length === 2 ? 360 : 264;
+    const ch = 250;
+    const startX = -((nodes.length * cw + (nodes.length - 1) * gap) / 2);
+
+    nodes.forEach((node, idx) => {
+      const stag = computeStaggerItemState(elElapsed, idx, 0.09, 0.36);
+      if (!stag.visible) return;
+      const cx = startX + idx * (cw + gap) + cw / 2;
+      const accent = node.color || defaultNodes[idx % 3].color;
+      const nodeIcon =
+        node.sceneIcon ||
+        (idx === 0 ? 'eye' : idx === 1 ? 'glasses' : 'tv');
+
+      ctx.save();
+      ctx.globalAlpha *= stag.opacity;
+      ctx.translate(cx, stag.translateY);
+      ctx.scale(stag.scale, stag.scale);
+
+      fillCardWithShadow(ctx, -cw / 2, -ch / 2, cw, ch, 32, '#FFFFFF', 0.1);
+      ctx.strokeStyle = hexToRgba(accent, 0.35);
+      ctx.lineWidth = 3;
+      drawRoundedRectPath(ctx, -cw / 2, -ch / 2, cw, ch, 32);
+      ctx.stroke();
+
+      // Tinted icon well
+      ctx.fillStyle = hexToRgba(accent, 0.08);
+      drawRoundedRectPath(ctx, -cw / 2 + 18, -ch / 2 + 18, cw - 36, 114, 22);
+      ctx.fill();
+      ctx.save();
+      ctx.translate(0, -ch / 2 + 75);
+      ctx.scale(0.68, 0.68);
+      drawSceneIcon(ctx, nodeIcon);
+      ctx.restore();
+
+      ctx.font = `800 34px ${FONT_DISPLAY}`;
+      ctx.fillStyle = accent;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(node.label, 0, 42, cw - 28);
+
+      if (node.sublabel) {
+        ctx.font = `600 22px ${FONT_SANS}`;
+        ctx.fillStyle = '#64748B';
+        ctx.fillText(node.sublabel, 0, 86, cw - 28);
+      }
+      ctx.restore();
+    });
+  } else if (props.variant === 'contrast-pair-cards') {
+    const labels =
+      props.data?.labels && props.data.labels.length >= 2
+        ? props.data.labels.slice(0, 2)
+        : ['Look', 'Watch'];
+    const nodes = props.data?.nodes?.slice(0, 2);
+    const leftTitle = nodes?.[0]?.label || labels[0];
+    const rightTitle = nodes?.[1]?.label || labels[1];
+    const leftSub = nodes?.[0]?.sublabel || '';
+    const rightSub = nodes?.[1]?.sublabel || '';
+    const leftColor = nodes?.[0]?.color || '#2563EB';
+    const rightColor = nodes?.[1]?.color || '#D97706';
+    const isSwapX = (props.data?.formula || 'cross').toLowerCase() !== 'arrow';
+
+    const cw = 326;
+    const ch = 224;
+    const leftCx = -235;
+    const rightCx = 235;
+
+    // Left Card
+    const s0 = computeStaggerItemState(elElapsed, 0, 0, 0.34);
+    if (s0.visible) {
+      ctx.save();
+      ctx.globalAlpha *= s0.opacity;
+      ctx.translate(leftCx, s0.translateY);
+      ctx.scale(s0.scale, s0.scale);
+      fillCardWithShadow(ctx, -cw / 2, -ch / 2, cw, ch, 34, '#FFFFFF', 0.1);
+      ctx.strokeStyle = leftColor;
+      ctx.lineWidth = 4;
+      drawRoundedRectPath(ctx, -cw / 2, -ch / 2, cw, ch, 34);
+      ctx.stroke();
+      const fittedL = fitWrappedTextBlock(ctx, leftTitle, cw - 40, 120, {
+        fontWeight: 800,
+        maxFontSize: 52,
+        minFontSize: 28,
+        maxLines: 2,
+      });
+      ctx.font = `800 ${fittedL.fontSize}px ${FONT_DISPLAY}`;
+      ctx.fillStyle = leftColor;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      const lyBase = leftSub ? -18 : 0;
+      fittedL.lines.forEach((ln, li) =>
+        ctx.fillText(ln, 0, lyBase - ((fittedL.lines.length - 1) * fittedL.lineHeight) / 2 + li * fittedL.lineHeight, cw - 36),
+      );
+      if (leftSub) {
+        ctx.font = `600 22px ${FONT_SANS}`;
+        ctx.fillStyle = '#64748B';
+        ctx.fillText(leftSub, 0, 56, cw - 36);
+      }
+      ctx.restore();
+    }
+
+    // Right Card
+    const s1 = computeStaggerItemState(elElapsed, 1, 0.12, 0.34);
+    if (s1.visible) {
+      ctx.save();
+      ctx.globalAlpha *= s1.opacity;
+      ctx.translate(rightCx, s1.translateY);
+      ctx.scale(s1.scale, s1.scale);
+      fillCardWithShadow(ctx, -cw / 2, -ch / 2, cw, ch, 34, '#FFFFFF', 0.1);
+      ctx.strokeStyle = rightColor;
+      ctx.lineWidth = 4;
+      drawRoundedRectPath(ctx, -cw / 2, -ch / 2, cw, ch, 34);
+      ctx.stroke();
+      const fittedR = fitWrappedTextBlock(ctx, rightTitle, cw - 40, 120, {
+        fontWeight: 800,
+        maxFontSize: 52,
+        minFontSize: 28,
+        maxLines: 2,
+      });
+      ctx.font = `800 ${fittedR.fontSize}px ${FONT_DISPLAY}`;
+      ctx.fillStyle = rightColor;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      const ryBase = rightSub ? -18 : 0;
+      fittedR.lines.forEach((ln, li) =>
+        ctx.fillText(ln, 0, ryBase - ((fittedR.lines.length - 1) * fittedR.lineHeight) / 2 + li * fittedR.lineHeight, cw - 36),
+      );
+      if (rightSub) {
+        ctx.font = `600 22px ${FONT_SANS}`;
+        ctx.fillStyle = '#64748B';
+        ctx.fillText(rightSub, 0, 56, cw - 36);
+      }
+      ctx.restore();
+    }
+
+    // Central swap-cross or arrow badge
+    ctx.save();
+    if (isSwapX) {
+      ctx.strokeStyle = '#94A3B8';
+      ctx.lineWidth = 4;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.arc(0, 0, 44, -Math.PI * 0.85, -Math.PI * 0.15);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(0, 0, 44, Math.PI * 0.15, Math.PI * 0.85);
+      ctx.stroke();
+    }
+    fillCardWithShadow(ctx, -28, -28, 56, 56, 28, isSwapX ? '#DC2626' : '#16A34A', 0.14);
+    ctx.strokeStyle = '#FFFFFF';
+    ctx.lineWidth = 5;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    if (isSwapX) {
+      ctx.moveTo(-10, -10);
+      ctx.lineTo(10, 10);
+      ctx.moveTo(10, -10);
+      ctx.lineTo(-10, 10);
+    } else {
+      ctx.moveTo(-12, 0);
+      ctx.lineTo(12, 0);
+      ctx.moveTo(2, -10);
+      ctx.lineTo(12, 0);
+      ctx.lineTo(2, 10);
+    }
+    ctx.stroke();
+    ctx.restore();
+  } else if (props.variant === 'quiz-fill-blank') {
+    const pillTitle = props.data?.title || 'Question';
+    const promptText = props.data?.speechText || "I can't ______ without my glasses.";
+    const iconKind = props.data?.sceneIcon || 'glasses';
+
+    fillCardWithShadow(ctx, -420, -142, 840, 284, 34, '#FFFFFF', 0.11);
+    ctx.strokeStyle = '#E2E8F0';
+    ctx.lineWidth = 2;
+    drawRoundedRectPath(ctx, -420, -142, 840, 284, 34);
+    ctx.stroke();
+
+    // Top Question Pill
+    ctx.font = `800 22px ${FONT_SANS}`;
+    const qPillW = Math.min(280, Math.max(146, ctx.measureText(pillTitle).width + 44));
+    ctx.fillStyle = '#EEF2FF';
+    drawRoundedRectPath(ctx, -qPillW / 2, -118, qPillW, 42, 21);
+    ctx.fill();
+    ctx.fillStyle = '#4338CA';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(pillTitle, 0, -97, qPillW - 20);
+
+    // Fill-in-the-blank prompt line(s)
+    const fittedQ = fitWrappedTextBlock(ctx, promptText, 760, 88, {
+      fontWeight: 700,
+      fontFamily: FONT_DISPLAY,
+      maxFontSize: 34,
+      minFontSize: 22,
+      maxLines: 2,
+      lineHeightRatio: 1.24,
+    });
+    ctx.font = `700 ${fittedQ.fontSize}px ${FONT_DISPLAY}`;
+    ctx.fillStyle = '#0F172A';
+    const qStartY = -28 - ((fittedQ.lines.length - 1) * fittedQ.lineHeight) / 2;
+    fittedQ.lines.forEach((ln, li) => {
+      const ly = qStartY + li * fittedQ.lineHeight;
+      ctx.fillText(ln, 0, ly, 760);
+      // Highlight blank underline nicely if ______ present
+      const blankMatch = ln.match(/_{3,}/);
+      if (blankMatch && blankMatch.index !== undefined) {
+        const lineW = ctx.measureText(ln).width;
+        const preW = ctx.measureText(ln.slice(0, blankMatch.index)).width;
+        const bW = ctx.measureText(blankMatch[0]).width;
+        const bx = -lineW / 2 + preW;
+        ctx.strokeStyle = '#4F46E5';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(bx, ly + fittedQ.fontSize * 0.45);
+        ctx.lineTo(bx + bW, ly + fittedQ.fontSize * 0.45);
+        ctx.stroke();
+      }
+    });
+
+    // Crisp vector icon below prompt
+    ctx.fillStyle = '#F8FAFC';
+    drawRoundedRectPath(ctx, -96, 30, 192, 92, 24);
+    ctx.fill();
+    ctx.save();
+    ctx.translate(0, 76);
+    ctx.scale(0.68, 0.68);
+    drawSceneIcon(ctx, iconKind);
+    ctx.restore();
   } else if (props.variant === 'airport-travel') {
     fillCardWithShadow(ctx, -370, -110, 740, 220, 34, '#FFFFFF', 0.09);
     ctx.fillStyle = '#2563EB';
@@ -2272,16 +2901,22 @@ function drawIllustrationProp(
       ctx.fillStyle = '#334155';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText(props.data?.title || 'Key Points', 0, -104);
+      ctx.fillText(props.data?.title || 'Key Points', 0, -104, 780);
       steps.forEach((st, i) => {
         const ry = -62 + i * 64;
         const w = 360 + i * 210;
         ctx.fillStyle = cols[i % cols.length];
         drawRoundedRectPath(ctx, -w / 2, ry, w, 52, 16);
         ctx.fill();
-        ctx.font = `800 26px ${FONT_DISPLAY}`;
+        const fitted = fitWrappedTextBlock(ctx, st, w - 28, 44, {
+          fontWeight: 800,
+          maxFontSize: 26,
+          minFontSize: 17,
+          maxLines: 1,
+        });
+        ctx.font = `800 ${fitted.fontSize}px ${FONT_DISPLAY}`;
         ctx.fillStyle = i === 2 ? '#0F172A' : '#FFFFFF';
-        ctx.fillText(st, 0, ry + 27);
+        ctx.fillText(fitted.lines[0] ?? st, 0, ry + 27, w - 24);
       });
     } else {
       fillCardWithShadow(ctx, -430, -124, 860, 248, 34, '#FFFFFF', 0.09);
@@ -2289,19 +2924,24 @@ function drawIllustrationProp(
       ctx.fillStyle = '#334155';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText(props.data?.title || 'Intensity Scale', 0, -88);
+      ctx.fillText(props.data?.title || 'Intensity Scale', 0, -88, 780);
       steps.forEach((st, i) => {
         const bx = -265 + i * 265;
         const barH = 56 + i * 28;
         ctx.fillStyle = cols[i % cols.length];
         drawRoundedRectPath(ctx, bx - 112, 74 - barH, 224, barH, 16);
         ctx.fill();
-        ctx.font = `800 26px ${FONT_DISPLAY}`;
+        const fitted = fitWrappedTextBlock(ctx, st, 200, Math.max(36, barH - 12), {
+          fontWeight: 800,
+          maxFontSize: 26,
+          minFontSize: 16,
+          maxLines: 2,
+          lineHeightRatio: 1.12,
+        });
+        ctx.font = `800 ${fitted.fontSize}px ${FONT_DISPLAY}`;
         ctx.fillStyle = i === 2 ? '#0F172A' : '#FFFFFF';
-        const lines = wrapTextLines(ctx, st, 200).slice(0, 2);
-        const lh = 28;
-        const ly = 74 - barH / 2 - ((lines.length - 1) * lh) / 2;
-        lines.forEach((ln, li) => ctx.fillText(ln, bx, ly + li * lh));
+        const ly = 74 - barH / 2 - ((fitted.lines.length - 1) * fitted.lineHeight) / 2;
+        fitted.lines.forEach((ln, li) => ctx.fillText(ln, bx, ly + li * fitted.lineHeight, 204));
       });
     }
   } else if (props.variant === 'phrasal-split') {
@@ -2365,8 +3005,8 @@ function drawIllustrationProp(
     ctx.font = `700 24px ${FONT_SANS}`;
     ctx.fillStyle = '#64748B';
     ctx.textAlign = 'center';
-    ctx.fillText(props.data?.title || 'SYLLABLE STRESS', 0, -76);
-    const gap = 170;
+    ctx.fillText(props.data?.title || 'SYLLABLE STRESS', 0, -76, 760);
+    const gap = Math.min(170, Math.floor(720 / Math.max(1, syllables.length)));
     const startX = -((syllables.length - 1) * gap) / 2;
     syllables.forEach((syl, idx) => {
       const sx = startX + idx * gap;
@@ -2377,7 +3017,7 @@ function drawIllustrationProp(
       ctx.fill();
       ctx.font = `${isStressed ? 800 : 700} ${isStressed ? 28 : 24}px ${FONT_DISPLAY}`;
       ctx.fillStyle = isStressed ? '#312E81' : '#475569';
-      ctx.fillText(syl, sx, 62);
+      ctx.fillText(syl, sx, 62, gap - 16);
     });
   } else if (props.variant === 'intonation-curve') {
     const rising = (props.data?.value ?? 0.8) >= 0.5;
@@ -2440,14 +3080,14 @@ function drawIllustrationProp(
     let cursorY = topY + 30;
     if (tagStr) {
       ctx.font = `800 24px ${FONT_DISPLAY}`;
-      const pillW = Math.min(380, Math.max(150, ctx.measureText(tagStr).width + 44));
+      const pillW = Math.min(420, Math.max(150, ctx.measureText(tagStr).width + 44));
       ctx.fillStyle = '#2563EB';
       drawRoundedRectPath(ctx, -252, cursorY, pillW, 42, 21);
       ctx.fill();
       ctx.fillStyle = '#FFFFFF';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText(tagStr, -252 + pillW / 2, cursorY + 21);
+      ctx.fillText(tagStr, -252 + pillW / 2, cursorY + 21, pillW - 24);
       cursorY += 60;
     } else {
       cursorY += 12;
@@ -2458,7 +3098,7 @@ function drawIllustrationProp(
     ctx.font = `800 34px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#1E3A8A';
     titleLines.forEach((ln) => {
-      ctx.fillText(ln, -252, cursorY + 14);
+      ctx.fillText(ln, -252, cursorY + 14, 595);
       cursorY += 42;
     });
 
@@ -2467,7 +3107,7 @@ function drawIllustrationProp(
       ctx.font = `600 30px ${FONT_DISPLAY}`;
       ctx.fillStyle = '#334155';
       bodyLines.forEach((ln) => {
-        ctx.fillText(ln, -252, cursorY + 14);
+        ctx.fillText(ln, -252, cursorY + 14, 595);
         cursorY += 38;
       });
     }
@@ -2511,7 +3151,7 @@ function drawIllustrationProp(
       ctx.fill();
       ctx.fillStyle = '#FFFFFF';
       ctx.textAlign = 'center';
-      ctx.fillText(props.data.highlightWord, 396 - pillW / 2, topY + 36);
+      ctx.fillText(props.data.highlightWord, 396 - pillW / 2, topY + 36, pillW - 20);
     }
 
     // Body icon
@@ -2527,7 +3167,7 @@ function drawIllustrationProp(
     ctx.font = `800 38px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#0F172A';
     titleLines.forEach((ln) => {
-      ctx.fillText(ln, -246, by);
+      ctx.fillText(ln, -246, by, 606);
       by += 46;
     });
     if (subLines.length > 0) {
@@ -2535,7 +3175,7 @@ function drawIllustrationProp(
       ctx.font = `600 30px ${FONT_DISPLAY}`;
       ctx.fillStyle = '#475569';
       subLines.forEach((ln) => {
-        ctx.fillText(ln, -246, by);
+        ctx.fillText(ln, -246, by, 606);
         by += 38;
       });
     }
@@ -2719,10 +3359,10 @@ function drawIllustrationProp(
     ctx.font = `800 30px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#334155';
     const lLines = wrapTextLines(ctx, leftTxt, 340).slice(0, 2);
-    lLines.forEach((ln, li) => ctx.fillText(ln, -224, -4 - ((lLines.length - 1) * 34) / 2 + li * 34));
+    lLines.forEach((ln, li) => ctx.fillText(ln, -224, -4 - ((lLines.length - 1) * 34) / 2 + li * 34, 344));
     ctx.font = `600 24px ${FONT_SANS}`;
     ctx.fillStyle = '#64748B';
-    ctx.fillText('✗ Literal', -224, 64);
+    ctx.fillText('✗ Literal', -224, 64, 340);
 
     fillCardWithShadow(ctx, 28, -126, 392, 252, 26, '#EEF2FF', 0.14);
     ctx.strokeStyle = '#4F46E5';
@@ -2734,14 +3374,14 @@ function drawIllustrationProp(
     ctx.fill();
     ctx.font = `800 20px ${FONT_SANS}`;
     ctx.fillStyle = '#FFFFFF';
-    ctx.fillText('★ RECOMMENDED', 169, -79);
+    ctx.fillText('★ RECOMMENDED', 169, -79, 196);
     ctx.font = `800 30px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#312E81';
     const rLines = wrapTextLines(ctx, rightTxt, 340).slice(0, 2);
-    rLines.forEach((ln, li) => ctx.fillText(ln, 224, -6 - ((rLines.length - 1) * 34) / 2 + li * 34));
+    rLines.forEach((ln, li) => ctx.fillText(ln, 224, -6 - ((rLines.length - 1) * 34) / 2 + li * 34, 344));
     ctx.font = `700 24px ${FONT_SANS}`;
     ctx.fillStyle = '#15803D';
-    ctx.fillText('✓ 100% Natural', 224, 66);
+    ctx.fillText('✓ 100% Natural', 224, 66, 340);
   } else if (props.variant === 'bs-accordion-faq') {
     fillCardWithShadow(ctx, -420, -128, 840, 256, 26, '#FFFFFF', 0.09);
     ctx.strokeStyle = '#CBD5E1';
@@ -2766,7 +3406,7 @@ function drawIllustrationProp(
     ctx.fillStyle = '#1E293B';
     const ansText = props.data?.speechText || props.data?.subtitle || 'Clear explanation';
     const ansLines = wrapTextLines(ctx, ansText, 768).slice(0, 3);
-    ansLines.forEach((ln, li) => ctx.fillText(ln, -386, -24 + li * 34));
+    ansLines.forEach((ln, li) => ctx.fillText(ln, -386, -24 + li * 34, 768));
   } else if (props.variant === 'bs-breadcrumb-path') {
     const crumbs = props.data?.labels?.slice(0, 3) ?? ['Context', 'Pattern', 'Fluent!'];
     const useVertical = crumbs.some((c) => c.length > 12);
@@ -2776,16 +3416,22 @@ function drawIllustrationProp(
       ctx.fillStyle = '#475569';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText(props.data?.title || 'KEY STEPS', 0, -106);
+      ctx.fillText(props.data?.title || 'KEY STEPS', 0, -106, 760);
       crumbs.forEach((c, i) => {
         const ry = -66 + i * 64;
         const active = i === crumbs.length - 1;
         ctx.fillStyle = active ? '#0D6EFD' : '#F1F5F9';
         drawRoundedRectPath(ctx, -385, ry, 770, 52, 18);
         ctx.fill();
-        ctx.font = `800 28px ${FONT_DISPLAY}`;
+        const fitted = fitWrappedTextBlock(ctx, `${i + 1}. ${c}`, 730, 44, {
+          fontWeight: 800,
+          maxFontSize: 28,
+          minFontSize: 18,
+          maxLines: 1,
+        });
+        ctx.font = `800 ${fitted.fontSize}px ${FONT_DISPLAY}`;
         ctx.fillStyle = active ? '#FFFFFF' : '#1E293B';
-        ctx.fillText(`${i + 1}. ${c}`, 0, ry + 27);
+        ctx.fillText(fitted.lines[0] ?? `${i + 1}. ${c}`, 0, ry + 27, 730);
       });
     } else {
       fillCardWithShadow(ctx, -425, -104, 850, 208, 28, '#FFFFFF', 0.09);
@@ -2802,9 +3448,17 @@ function drawIllustrationProp(
         ctx.fillStyle = active ? '#0D6EFD' : '#F1F5F9';
         drawRoundedRectPath(ctx, cx - 108, -24, 216, 68, 34);
         ctx.fill();
-        ctx.font = `800 26px ${FONT_DISPLAY}`;
+        const fitted = fitWrappedTextBlock(ctx, c, 192, 56, {
+          fontWeight: 800,
+          maxFontSize: 26,
+          minFontSize: 16,
+          maxLines: 2,
+          lineHeightRatio: 1.15,
+        });
+        ctx.font = `800 ${fitted.fontSize}px ${FONT_DISPLAY}`;
         ctx.fillStyle = active ? '#FFFFFF' : '#334155';
-        ctx.fillText(c, cx, 10);
+        const ly = 10 - ((fitted.lines.length - 1) * fitted.lineHeight) / 2;
+        fitted.lines.forEach((ln, li) => ctx.fillText(ln, cx, ly + li * fitted.lineHeight, 196));
         if (i < crumbs.length - 1) {
           ctx.font = `800 28px ${FONT_SANS}`;
           ctx.fillStyle = '#94A3B8';
@@ -3061,13 +3715,13 @@ function drawIllustrationProp(
     ctx.fillStyle = '#475569';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(props.data?.formula || 'Reading Context', 20, cardTop + 29);
+    ctx.fillText(props.data?.formula || 'Reading Context', 20, cardTop + 29, 550);
 
     let cy = cardTop + 92;
     ctx.font = `800 34px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#0F172A';
     titleLines.forEach((tln) => {
-      ctx.fillText(tln, 0, cy);
+      ctx.fillText(tln, 0, cy, 768);
       cy += 42;
     });
 
@@ -3079,7 +3733,7 @@ function drawIllustrationProp(
         idx === displayLines.length - 1 && wrappedBody.length > displayLines.length
           ? `${ln.slice(0, Math.max(8, ln.length - 3))}...`
           : ln;
-      ctx.fillText(lineTxt, 0, cy + idx * bodyLineH);
+      ctx.fillText(lineTxt, 0, cy + idx * bodyLineH, 768);
     });
   } else if (props.variant === 'css-grammar-equation') {
     const parts = props.data?.labels?.slice(0, 3) ?? ['Could you', 'V-inf', 'Polite!'];
@@ -3125,7 +3779,7 @@ function drawIllustrationProp(
     ctx.fillStyle = '#4338CA';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(props.data?.formula || 'FLASHCARD', 0, -64);
+    ctx.fillText(props.data?.formula || 'FLASHCARD', 0, -64, 210);
 
     ctx.font = `800 42px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#0F172A';
@@ -3137,7 +3791,7 @@ function drawIllustrationProp(
       props.data?.subtitle || props.data?.speechText || '',
       660,
     ).slice(0, 2);
-    subLines.forEach((ln, li) => ctx.fillText(ln, 0, 52 + li * 32));
+    subLines.forEach((ln, li) => ctx.fillText(ln, 0, 52 + li * 32, 660));
   } else if (props.variant === 'css-sticky-note') {
     ctx.save();
     ctx.rotate(-0.018);
@@ -3170,9 +3824,15 @@ function drawIllustrationProp(
     ctx.fillStyle = '#B45309';
     ctx.fillText(props.data?.formula || 'QUICK NOTE', 0, -68, 620);
 
-    ctx.font = `800 36px ${FONT_DISPLAY}`;
+    const stickyTitle = fitWrappedTextBlock(ctx, props.data?.title || 'Remember', 660, 60, {
+      fontWeight: 800,
+      maxFontSize: 36,
+      minFontSize: 22,
+      maxLines: 1,
+    });
+    ctx.font = `800 ${stickyTitle.fontSize}px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#1E293B';
-    ctx.fillText(props.data?.title || 'Remember', 0, -6, 670);
+    ctx.fillText(stickyTitle.lines[0] ?? 'Remember', 0, -6, 660);
 
     ctx.font = `600 26px ${FONT_SANS}`;
     ctx.fillStyle = '#334155';
@@ -3180,7 +3840,7 @@ function drawIllustrationProp(
     const wrappedSub = wrapTextLines(ctx, rawSub, 630).slice(0, 2);
     const subStartY = wrappedSub.length === 2 ? 44 : 58;
     wrappedSub.forEach((line, idx) => {
-      ctx.fillText(line, 0, subStartY + idx * 32);
+      ctx.fillText(line, 0, subStartY + idx * 32, 630);
     });
     ctx.restore();
   } else if (props.variant === 'bs-badge-cluster') {
@@ -3210,9 +3870,15 @@ function drawIllustrationProp(
         ctx.fillStyle = col.bg;
         drawRoundedRectPath(ctx, -380, py, 760, 52, 22);
         ctx.fill();
-        ctx.font = `800 28px ${FONT_DISPLAY}`;
+        const fitted = fitWrappedTextBlock(ctx, txt, 720, 44, {
+          fontWeight: 800,
+          maxFontSize: 28,
+          minFontSize: 18,
+          maxLines: 1,
+        });
+        ctx.font = `800 ${fitted.fontSize}px ${FONT_DISPLAY}`;
         ctx.fillStyle = col.fg;
-        ctx.fillText(txt, 0, py + 27);
+        ctx.fillText(fitted.lines[0] ?? txt, 0, py + 27, 720);
       });
     } else {
       fillCardWithShadow(ctx, -420, -124, 840, 248, 28, '#FFFFFF', 0.1);
@@ -3234,10 +3900,18 @@ function drawIllustrationProp(
         ctx.fillStyle = col.bg;
         drawRoundedRectPath(ctx, xs[i] - pw / 2, -20, pw, 80, 36);
         ctx.fill();
-        ctx.font = `800 26px ${FONT_DISPLAY}`;
+        const fitted = fitWrappedTextBlock(ctx, txt, pw - 24, 68, {
+          fontWeight: 800,
+          maxFontSize: 26,
+          minFontSize: 16,
+          maxLines: 2,
+          lineHeightRatio: 1.15,
+        });
+        ctx.font = `800 ${fitted.fontSize}px ${FONT_DISPLAY}`;
         ctx.fillStyle = col.fg;
-        const lines = wrapTextLines(ctx, txt, pw - 22).slice(0, 2);
-        lines.forEach((ln, li) => ctx.fillText(ln, xs[i], 20 - ((lines.length - 1) * 28) / 2 + li * 28));
+        fitted.lines.forEach((ln, li) =>
+          ctx.fillText(ln, xs[i], 20 - ((fitted.lines.length - 1) * fitted.lineHeight) / 2 + li * fitted.lineHeight, pw - 20),
+        );
       });
 
       if (props.data?.subtitle) {
@@ -3289,7 +3963,7 @@ function drawIllustrationProp(
       props.data?.subtitle || props.data?.speechText || '',
       540,
     ).slice(0, 2);
-    subLines.forEach((ln, li) => ctx.fillText(ln, -160, 48 + li * 32));
+    subLines.forEach((ln, li) => ctx.fillText(ln, -160, 48 + li * 32, 540));
   } else if (props.variant === 'bs-modal-quiz') {
     fillCardWithShadow(ctx, -415, -130, 830, 260, 26, '#FFFFFF', 0.13);
     ctx.strokeStyle = '#CBD5E1';
@@ -3311,9 +3985,18 @@ function drawIllustrationProp(
     ctx.fillText('✕', 380, -98);
 
     ctx.textAlign = 'center';
-    ctx.font = `800 32px ${FONT_DISPLAY}`;
+    const qText = props.data?.title || props.data?.speechText || 'Quick Question';
+    const fittedQ = fitWrappedTextBlock(ctx, qText, 760, 74, {
+      fontWeight: 800,
+      maxFontSize: 32,
+      minFontSize: 20,
+      maxLines: 2,
+      lineHeightRatio: 1.18,
+    });
+    ctx.font = `800 ${fittedQ.fontSize}px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#0F172A';
-    ctx.fillText(props.data?.title || props.data?.speechText || 'Quick Question', 0, -18, 760);
+    const qY = -16 - ((fittedQ.lines.length - 1) * fittedQ.lineHeight) / 2;
+    fittedQ.lines.forEach((ln, li) => ctx.fillText(ln, 0, qY + li * fittedQ.lineHeight, 760));
 
     const optA = props.data?.labels?.[0] || 'A';
     const optB = props.data?.labels?.[1] || 'B';
@@ -3324,11 +4007,29 @@ function drawIllustrationProp(
     drawRoundedRectPath(ctx, 20, 38, 350, 62, 18);
     ctx.fill();
 
-    ctx.font = `800 26px ${FONT_DISPLAY}`;
+    const fittedA = fitWrappedTextBlock(ctx, optA, 324, 52, {
+      fontWeight: 800,
+      maxFontSize: 26,
+      minFontSize: 16,
+      maxLines: 2,
+      lineHeightRatio: 1.15,
+    });
+    ctx.font = `800 ${fittedA.fontSize}px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#4338CA';
-    ctx.fillText(optA, -195, 70, 320);
+    const aY = 70 - ((fittedA.lines.length - 1) * fittedA.lineHeight) / 2;
+    fittedA.lines.forEach((ln, li) => ctx.fillText(ln, -195, aY + li * fittedA.lineHeight, 324));
+
+    const fittedB = fitWrappedTextBlock(ctx, optB, 324, 52, {
+      fontWeight: 800,
+      maxFontSize: 26,
+      minFontSize: 16,
+      maxLines: 2,
+      lineHeightRatio: 1.15,
+    });
+    ctx.font = `800 ${fittedB.fontSize}px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#15803D';
-    ctx.fillText(optB, 195, 70, 320);
+    const bY = 70 - ((fittedB.lines.length - 1) * fittedB.lineHeight) / 2;
+    fittedB.lines.forEach((ln, li) => ctx.fillText(ln, 195, bY + li * fittedB.lineHeight, 324));
   } else if (props.variant === 'dynamic-scene' && props.data?.dynamicScene) {
     drawDynamicScene(ctx, props.data.dynamicScene, time);
   } else {
@@ -3467,24 +4168,42 @@ function drawSentenceCard(
   props: SentenceCardProps,
   width: number,
 ) {
+  const safeWidth = Math.min(STAGE_WIDTH - 48, Math.max(260, width));
+  const innerMaxW = Math.max(180, safeWidth - 88);
   const textLen = props.text.trim().length;
-  const headFontSize = textLen > 95 ? 36 : textLen > 52 ? 40 : 46;
-  const lineH = Math.round(headFontSize * 1.28);
-  ctx.font = `700 ${headFontSize}px ${FONT_DISPLAY}`;
-  const innerMaxW = width - 96;
-  const lines = wrapTextLines(ctx, props.text, innerMaxW);
+  const widthScale = Math.min(1, safeWidth / 760);
+  const baseHeadFont = textLen > 95 ? 36 : textLen > 52 ? 40 : 46;
+  const maxHeadFont = Math.max(22, Math.round(baseHeadFont * widthScale));
 
-  ctx.font = `600 30px ${FONT_DISPLAY}`;
-  const subLines = props.subtext
-    ? props.subtext
-        .split(/\r?\n/)
-        .flatMap((part) => wrapTextLines(ctx, part, innerMaxW))
-        .slice(0, 5)
-    : [];
-  const subLineH = 38;
-  const subH = subLines.length > 0 ? subLines.length * subLineH + 18 : 0;
-  const cardH = Math.max(156, lines.length * lineH + subH + 74);
-  const x = -width / 2;
+  const fittedHead = fitWrappedTextBlock(ctx, props.text, innerMaxW, 380, {
+    fontWeight: 700,
+    maxFontSize: maxHeadFont,
+    minFontSize: 20,
+    maxLines: 6,
+    lineHeightRatio: 1.28,
+  });
+  const headFontSize = fittedHead.fontSize;
+  const lineH = fittedHead.lineHeight;
+  const lines = fittedHead.lines;
+
+  const subFontSize = Math.max(19, Math.round(30 * widthScale));
+  const subLineH = Math.round(subFontSize * 1.26);
+  const fittedSub = props.subtext
+    ? fitWrappedTextBlock(ctx, props.subtext, innerMaxW, 190, {
+        fontWeight: 600,
+        maxFontSize: subFontSize,
+        minFontSize: 16,
+        maxLines: 5,
+        lineHeightRatio: 1.26,
+      })
+    : null;
+  const subLines = fittedSub ? fittedSub.lines : [];
+  const actualSubFont = fittedSub ? fittedSub.fontSize : subFontSize;
+  const actualSubLineH = fittedSub ? fittedSub.lineHeight : subLineH;
+  const subH = subLines.length > 0 ? subLines.length * actualSubLineH + 18 : 0;
+  const stampPad = props.stampText ? 18 : 0;
+  const cardH = Math.max(156, lines.length * lineH + subH + 74 + stampPad);
+  const x = -safeWidth / 2;
   const y = -cardH / 2;
 
   const cardBg = props.bgColor || '#FFFFFF';
@@ -3497,14 +4216,20 @@ function drawSentenceCard(
       cardBg.includes('15, 23, 42'));
   const defaultTextColor = props.textColor || (isDarkBg ? '#F8FAFC' : '#0F172A');
 
-  fillCardWithShadow(ctx, x, y, width, cardH, 38, cardBg, isDarkBg ? 0.3 : 0.1);
+  fillCardWithShadow(ctx, x, y, safeWidth, cardH, 38, cardBg, isDarkBg ? 0.3 : 0.1);
 
-  // Render lines with optional emphasis word coloring
+  // Clip text inside the card boundary so no oversized token ever bleeds outside
+  ctx.save();
+  drawRoundedRectPath(ctx, x + 10, y + 8, safeWidth - 20, cardH - 16, 30);
+  ctx.clip();
+
+  // Render lines with optional emphasis word + soft tinted rounded highlight pill
   ctx.font = `700 ${headFontSize}px ${FONT_DISPLAY}`;
   ctx.textBaseline = 'middle';
   const totalContentH = (lines.length - 1) * lineH + subH;
-  const startTextY = y + cardH / 2 - totalContentH / 2;
+  const startTextY = y + (cardH - stampPad * 0.45) / 2 - totalContentH / 2;
   const emphasisLower = props.emphasisWord?.trim().toLowerCase();
+  const emphColor = props.emphasisColor || (isDarkBg ? '#FACC15' : '#2563EB');
 
   lines.forEach((line, lineIdx) => {
     const lineY = startTextY + lineIdx * lineH;
@@ -3515,42 +4240,64 @@ function drawSentenceCard(
       const match = line.slice(idx, idx + emphasisLower.length);
       const after = line.slice(idx + emphasisLower.length);
 
-      const totalW = ctx.measureText(line).width;
+      const beforeW = before ? ctx.measureText(before).width : 0;
+      const matchW = ctx.measureText(match).width;
+      const afterW = after ? ctx.measureText(after).width : 0;
+      const pillPadX = 12;
+      const gapL = before ? 4 : 0;
+      const gapR = after ? 4 : 0;
+      const totalW = beforeW + gapL + pillPadX * 2 + matchW + gapR + afterW;
+      const fitScaleX = totalW > innerMaxW ? innerMaxW / totalW : 1;
+
+      ctx.save();
+      if (fitScaleX < 1) {
+        ctx.scale(fitScaleX, 1);
+      }
       let cursorX = -totalW / 2;
       ctx.textAlign = 'left';
 
       if (before) {
         ctx.fillStyle = defaultTextColor;
         ctx.fillText(before, cursorX, lineY);
-        cursorX += ctx.measureText(before).width;
+        cursorX += beforeW + gapL;
       }
-      ctx.fillStyle = props.emphasisColor || (isDarkBg ? '#FACC15' : '#2563EB');
-      ctx.fillText(match, cursorX, lineY);
-      cursorX += ctx.measureText(match).width;
+
+      const pillW = matchW + pillPadX * 2;
+      const pillH = Math.round(headFontSize * 1.24);
+      ctx.fillStyle = hexToRgba(emphColor, isDarkBg ? 0.26 : 0.14);
+      drawRoundedRectPath(ctx, cursorX, lineY - pillH / 2, pillW, pillH, 12);
+      ctx.fill();
+
+      ctx.fillStyle = emphColor;
+      ctx.fillText(match, cursorX + pillPadX, lineY);
+      cursorX += pillW + gapR;
+
       if (after) {
         ctx.fillStyle = defaultTextColor;
         ctx.fillText(after, cursorX, lineY);
       }
+      ctx.restore();
     } else {
       ctx.textAlign = 'center';
       ctx.fillStyle = defaultTextColor;
-      ctx.fillText(line, 0, lineY);
+      ctx.fillText(line, 0, lineY, innerMaxW);
     }
   });
 
   if (subLines.length > 0) {
-    ctx.font = `600 30px ${FONT_DISPLAY}`;
+    ctx.font = `600 ${actualSubFont}px ${FONT_DISPLAY}`;
     ctx.textAlign = 'center';
     ctx.fillStyle = isDarkBg ? '#94A3B8' : '#475569';
     const subStartY = startTextY + (lines.length - 1) * lineH + Math.round(lineH * 0.88);
     subLines.forEach((sLn, sIdx) => {
-      ctx.fillText(sLn, 0, subStartY + sIdx * subLineH);
+      ctx.fillText(sLn, 0, subStartY + sIdx * actualSubLineH, innerMaxW);
     });
   }
+  ctx.restore();
 
-  // Top-right badge (check, cross, or question)
+  // Top-right badge (check, cross, or question) with crisp white halo ring
   if (props.badge === 'check' || props.badge === 'cross' || props.badge === 'question') {
-    const bx = x + width - 18;
+    const bx = x + safeWidth - 18;
     const by = y + 10;
     ctx.save();
     ctx.fillStyle =
@@ -3558,6 +4305,9 @@ function drawSentenceCard(
     ctx.beginPath();
     ctx.arc(bx, by, 30, 0, Math.PI * 2);
     ctx.fill();
+    ctx.strokeStyle = '#FFFFFF';
+    ctx.lineWidth = 4;
+    ctx.stroke();
     if (props.badge === 'question') {
       ctx.fillStyle = '#FFFFFF';
       ctx.font = `800 34px ${FONT_DISPLAY}`;
@@ -3585,19 +4335,27 @@ function drawSentenceCard(
     ctx.restore();
   }
 
-  // Optional stamp (e.g., RUDE / AVOID)
+  // Optional stamp (e.g., RUDE / AVOID) — neatly inset with crisp white border so it never clips
   if (props.stampText) {
     ctx.save();
-    ctx.translate(x + width - 90, y + cardH - 12);
-    ctx.rotate(-0.08);
+    ctx.font = `800 24px ${FONT_DISPLAY}`;
+    const pillW = Math.min(
+      Math.max(116, safeWidth - 56),
+      Math.max(126, ctx.measureText(props.stampText).width + 32),
+    );
+    const stampX = x + safeWidth - Math.max(82, pillW / 2 + 26);
+    ctx.translate(stampX, y + cardH - 18);
+    ctx.rotate(-0.07);
     ctx.fillStyle = props.stampColor || '#DC2626';
-    drawRoundedRectPath(ctx, -74, -24, 148, 48, 12);
+    drawRoundedRectPath(ctx, -pillW / 2, -22, pillW, 44, 12);
     ctx.fill();
-    ctx.font = `800 26px ${FONT_DISPLAY}`;
+    ctx.strokeStyle = '#FFFFFF';
+    ctx.lineWidth = 3;
+    ctx.stroke();
     ctx.fillStyle = '#FFFFFF';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(props.stampText, 0, 1);
+    ctx.fillText(props.stampText, 0, 1, pillW - 22);
     ctx.restore();
   }
 }
@@ -3613,15 +4371,16 @@ function drawToneMeter(
   const eased = easeInOutCubic(progress);
   const value = props.valueStart + (props.valueEnd - props.valueStart) * eased;
 
+  // Gradient bar
+  const barW = Math.min(STAGE_WIDTH - 80, Math.max(220, width));
+
   // Title
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.font = `700 24px ${FONT_SANS}`;
   ctx.fillStyle = '#64748B';
-  ctx.fillText(props.title, 0, -48);
+  ctx.fillText(props.title, 0, -48, barW);
 
-  // Gradient bar
-  const barW = width;
   const barH = 22;
   const grad = ctx.createLinearGradient(-barW / 2, 0, barW / 2, 0);
   grad.addColorStop(0, '#DC2626');
@@ -3647,14 +4406,15 @@ function drawToneMeter(
   ctx.restore();
 
   // Labels
+  const labelMaxW = Math.max(80, barW * 0.44);
   ctx.font = `700 28px ${FONT_SANS}`;
   ctx.textAlign = 'left';
   ctx.fillStyle = '#DC2626';
-  ctx.fillText(props.leftLabel, -barW / 2, 48);
+  ctx.fillText(props.leftLabel, -barW / 2, 48, labelMaxW);
 
   ctx.textAlign = 'right';
   ctx.fillStyle = '#16A34A';
-  ctx.fillText(props.rightLabel, barW / 2, 48);
+  ctx.fillText(props.rightLabel, barW / 2, 48, labelMaxW);
 }
 
 function drawWordStack(
@@ -3663,6 +4423,7 @@ function drawWordStack(
   width: number,
   time: number,
 ) {
+  const safeWidth = Math.min(STAGE_WIDTH - 48, Math.max(280, width));
   const rowH = 128;
   const gap = 28;
   const totalH = props.rows.length * rowH + (props.rows.length - 1) * gap;
@@ -3680,26 +4441,49 @@ function drawWordStack(
     ctx.translate(0, startY + idx * (rowH + gap) + rowH / 2 + slideY);
     ctx.scale(scale, scale);
 
-    fillCardWithShadow(ctx, -width / 2, -rowH / 2, width, rowH, 34, '#FFFFFF', 0.09);
+    fillCardWithShadow(ctx, -safeWidth / 2, -rowH / 2, safeWidth, rowH, 34, '#FFFFFF', 0.09);
 
-    ctx.font = `800 66px ${FONT_DISPLAY}`;
+    let phoneticW = 0;
+    const maxPhoneticW = Math.round(safeWidth * 0.32);
+    if (row.phonetic) {
+      ctx.font = `600 30px ${FONT_SANS}`;
+      phoneticW = Math.min(maxPhoneticW, ctx.measureText(row.phonetic).width) + 28;
+    }
+
+    const availMainW = Math.max(140, safeWidth - 112 - phoneticW);
+    let mainFontSize = 66;
+    while (mainFontSize > 26) {
+      ctx.font = `800 ${mainFontSize}px ${FONT_DISPLAY}`;
+      const w = ctx.measureText(row.prefix).width + ctx.measureText(row.suffix).width;
+      if (w <= availMainW) break;
+      mainFontSize -= 2;
+    }
+
+    ctx.font = `800 ${mainFontSize}px ${FONT_DISPLAY}`;
     ctx.textBaseline = 'middle';
     const prefixW = ctx.measureText(row.prefix).width;
     const suffixW = ctx.measureText(row.suffix).width;
     const fullW = prefixW + suffixW;
-    const leftX = row.phonetic ? -width / 2 + 64 : -fullW / 2;
+    const fitScaleX = fullW > availMainW ? availMainW / fullW : 1;
+    const leftX = row.phonetic ? -safeWidth / 2 + 56 : -(fullW * fitScaleX) / 2;
 
+    ctx.save();
+    ctx.translate(leftX, 0);
+    if (fitScaleX < 1) {
+      ctx.scale(fitScaleX, 1);
+    }
     ctx.textAlign = 'left';
     ctx.fillStyle = '#0F172A';
-    ctx.fillText(row.prefix, leftX, 0);
+    ctx.fillText(row.prefix, 0, 0);
     ctx.fillStyle = row.suffixColor;
-    ctx.fillText(row.suffix, leftX + prefixW, 0);
+    ctx.fillText(row.suffix, prefixW, 0);
+    ctx.restore();
 
     if (row.phonetic) {
-      ctx.font = `600 32px ${FONT_SANS}`;
+      ctx.font = `600 30px ${FONT_SANS}`;
       ctx.textAlign = 'right';
       ctx.fillStyle = '#64748B';
-      ctx.fillText(row.phonetic, width / 2 - 58, 2);
+      ctx.fillText(row.phonetic, safeWidth / 2 - 48, 2, maxPhoneticW);
     }
 
     ctx.restore();
@@ -3815,14 +4599,22 @@ function drawShape3D(
 
       const label = labels[i];
       if (label) {
+        const stepMaxW = Math.max(60, stepW - 22);
+        const fitted = fitWrappedTextBlock(ctx, label, stepMaxW, Math.max(28, sh - 16), {
+          fontWeight: 800,
+          maxFontSize: 28,
+          minFontSize: 15,
+          maxLines: 2,
+          lineHeightRatio: 1.2,
+        });
         ctx.fillStyle = props.textColor || '#FFFFFF';
-        ctx.font = `800 30px ${FONT_DISPLAY}`;
+        ctx.font = `800 ${fitted.fontSize}px ${FONT_DISPLAY}`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        const stepLines = wrapTextLines(ctx, label, stepW - 24).slice(0, 2);
-        const lh = 34;
-        const ly = sy + sh / 2 - ((stepLines.length - 1) * lh) / 2;
-        stepLines.forEach((ln, li) => ctx.fillText(ln, sx + stepW / 2, ly + li * lh));
+        const ly = sy + sh / 2 - ((fitted.lines.length - 1) * fitted.lineHeight) / 2;
+        fitted.lines.forEach((ln, li) =>
+          ctx.fillText(ln, sx + stepW / 2, ly + li * fitted.lineHeight, stepMaxW),
+        );
       }
       ctx.restore();
     }
@@ -3889,15 +4681,22 @@ function drawShape3D(
     };
     const fSize = sizeMap[props.textSize ?? 'headline'];
     const fWeight = weightMap[props.textWeight ?? 'bold'];
-    ctx.font = `${fWeight} ${fSize}px ${FONT_DISPLAY}`;
+    const textMaxW = Math.max(80, width - 52);
+    const textMaxH = Math.max(40, height - 20);
+    const fitted = fitWrappedTextBlock(ctx, props.textContent, textMaxW, textMaxH, {
+      fontWeight: fWeight,
+      maxFontSize: fSize,
+      minFontSize: 18,
+      maxLines: 5,
+      lineHeightRatio: 1.22,
+    });
+    ctx.font = `${fWeight} ${fitted.fontSize}px ${FONT_DISPLAY}`;
     ctx.fillStyle = props.textColor || '#FFFFFF';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    const lines = wrapTextLines(ctx, props.textContent, width - 64);
-    const lineH = fSize * 1.24;
-    const startY = -((lines.length - 1) * lineH) / 2;
-    lines.forEach((ln, idx) => {
-      ctx.fillText(ln, 0, startY + idx * lineH);
+    const startY = -((fitted.lines.length - 1) * fitted.lineHeight) / 2;
+    fitted.lines.forEach((ln, idx) => {
+      ctx.fillText(ln, 0, startY + idx * fitted.lineHeight, textMaxW);
     });
   }
 }
@@ -3912,9 +4711,17 @@ function drawKaraokeCard(
   if (words.length === 0) return;
 
   const isDarkBar = props.variant === 'dark-bar';
-  ctx.font = `700 42px ${FONT_DISPLAY}`;
-  const maxLineW = width - 104;
-  const asciiSpaceW = Math.max(14, ctx.measureText(' ').width * 1.45);
+  const safeWidth = Math.min(STAGE_WIDTH - 48, Math.max(320, width));
+  const maxLineW = Math.max(180, safeWidth - 112);
+  let fontSize = 44;
+  while (fontSize > 24) {
+    ctx.font = `700 ${fontSize}px ${FONT_DISPLAY}`;
+    const hasWideWord = words.some((tok) => ctx.measureText(tok.word).width > maxLineW);
+    if (!hasWideWord) break;
+    fontSize -= 2;
+  }
+  ctx.font = `700 ${fontSize}px ${FONT_DISPLAY}`;
+  const asciiSpaceW = Math.max(12, ctx.measureText(' ').width * 1.45);
   const isCjkOnly = (s: string) => /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]/.test(s) && !/[A-Za-z0-9]/.test(s);
   const gapBetween = (a: string, b: string) => (isCjkOnly(a) && isCjkOnly(b) ? 3 : asciiSpaceW);
 
@@ -3959,21 +4766,30 @@ function drawKaraokeCard(
   }
 
   const lines = pages[activePageIdx] ?? allLines.slice(0, 2);
-  const lineH = 62;
-  const cardH = Math.max(134, lines.length * lineH + 64);
-  const x = -width / 2;
+  const activeMaxLineW = Math.max(160, ...lines.map((l) => l.lineWidth));
+  const pillW = Math.min(safeWidth, Math.max(300, Math.round(activeMaxLineW + 104)));
+  const lineH = Math.round(fontSize * 1.42);
+  const cardH = Math.max(112, lines.length * lineH + 64);
+  const cardRadius = isDarkBar ? 28 : lines.length === 1 ? Math.round(cardH / 2) : 34;
+  const x = -pillW / 2;
   const y = -cardH / 2;
 
   fillCardWithShadow(
     ctx,
     x,
     y,
-    width,
+    pillW,
     cardH,
-    isDarkBar ? 28 : 36,
-    isDarkBar ? 'rgba(15, 23, 42, 0.78)' : '#FFFFFF',
-    isDarkBar ? 0.25 : 0.11,
+    cardRadius,
+    isDarkBar ? 'rgba(15, 23, 42, 0.84)' : '#FFFFFF',
+    isDarkBar ? 0.28 : 0.11,
   );
+  ctx.save();
+  ctx.strokeStyle = isDarkBar ? 'rgba(148, 163, 184, 0.28)' : '#E2E8F0';
+  ctx.lineWidth = 2;
+  drawRoundedRectPath(ctx, x, y, pillW, cardH, cardRadius);
+  ctx.stroke();
+  ctx.restore();
 
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
@@ -4089,35 +4905,63 @@ export function renderProjectFrame(
     const frame = computeElementFrameState(el, time);
     if (!frame.visible) continue;
 
+    const clampedWidth = Math.min(STAGE_WIDTH - 32, Math.max(120, el.layout.width || 600));
+    const halfBoundsW = (clampedWidth * frame.scale) / 2;
+    const drawX =
+      halfBoundsW * 2 >= STAGE_WIDTH - 32
+        ? STAGE_WIDTH / 2
+        : Math.max(halfBoundsW + 16, Math.min(STAGE_WIDTH - halfBoundsW - 16, el.layout.x));
+
     ctx.save();
     ctx.globalAlpha = frame.opacity;
-    ctx.translate(el.layout.x, el.layout.y + frame.translateY);
+    ctx.translate(drawX, el.layout.y + frame.translateY);
     ctx.scale(frame.scale, frame.scale);
 
     switch (el.props.kind) {
       case 'comparison-strip':
-        drawComparisonStrip(ctx, el.props, el.layout.width, time, el.startTime);
+        drawComparisonStrip(ctx, el.props, clampedWidth, time, el.startTime);
         break;
       case 'topic-pill':
-        drawTopicPill(ctx, el.props);
+        drawTopicPill(ctx, el.props, clampedWidth);
         break;
-      case 'illustration-prop':
-        drawIllustrationProp(ctx, el.props, time, el.startTime);
+      case 'illustration-prop': {
+        const hasCustomPrims =
+          Boolean(el.props.data?.customPrimitives?.length) ||
+          Boolean(getCustomComponentByVariant(el.props.variant)?.primitives?.length);
+        const fitScale = !hasCustomPrims && (clampedWidth < 840 || (el.layout.height && el.layout.height < 280))
+          ? Math.max(
+              0.45,
+              Math.min(
+                1,
+                clampedWidth / 860,
+                el.layout.height ? el.layout.height / 280 : 1,
+              ),
+            )
+          : 1;
+        if (fitScale < 0.999) {
+          ctx.save();
+          ctx.scale(fitScale, fitScale);
+          drawIllustrationProp(ctx, el.props, time, el.startTime);
+          ctx.restore();
+        } else {
+          drawIllustrationProp(ctx, el.props, time, el.startTime);
+        }
         break;
+      }
       case 'sentence-card':
-        drawSentenceCard(ctx, el.props, el.layout.width);
+        drawSentenceCard(ctx, el.props, clampedWidth);
         break;
       case 'tone-meter':
-        drawToneMeter(ctx, el.props, el.layout.width, time);
+        drawToneMeter(ctx, el.props, clampedWidth, time);
         break;
       case 'word-stack':
-        drawWordStack(ctx, el.props, el.layout.width, time);
+        drawWordStack(ctx, el.props, clampedWidth, time);
         break;
       case 'shape-3d':
-        drawShape3D(ctx, el.props, el.layout.width, el.layout.height ?? 200, Math.max(0, time - el.startTime));
+        drawShape3D(ctx, el.props, clampedWidth, el.layout.height ?? 200, Math.max(0, time - el.startTime));
         break;
       case 'karaoke-card':
-        drawKaraokeCard(ctx, el.props, el.layout.width, time);
+        drawKaraokeCard(ctx, el.props, clampedWidth, time);
         break;
     }
 
