@@ -44,6 +44,12 @@ import {
   exportProjectToServerDisk,
   exportProjectToVideo,
 } from '../engine/mp4Exporter';
+import {
+  cleanDownloadFileName,
+  cleanOutputTitleStem,
+  resolveTabOutputSubfolder,
+  TAB_OUTPUT_SUBFOLDERS,
+} from '../engine/outputNaming';
 import { parseScenePlanJson, scenePlanToProject } from '../engine/scenePlanAdapter';
 import { parseTranscriptAuto } from '../engine/transcriptParser';
 import {
@@ -148,6 +154,7 @@ export const BatchQueueModal: React.FC<BatchQueueModalProps> = ({
     undefined,
   );
   const [isProcessingBg, setIsProcessingBg] = useState(false);
+  const [bgUploadError, setBgUploadError] = useState<string | null>(null);
 
   // ── In-batch live preview state ───────────────────────────────────────────
   const [previewState, setPreviewState] = useState<{
@@ -167,7 +174,7 @@ export const BatchQueueModal: React.FC<BatchQueueModalProps> = ({
   const [useAiJson, setUseAiJson] = useState(true);
   const [geminiModel, setGeminiModel] = useState('gemini-4-hydrogen');
   const [saveMode, setSaveMode] = useState<'disk' | 'download'>('disk');
-  const [customSavePath, setCustomSavePath] = useState('output');
+  const [customSavePath, setCustomSavePath] = useState<string>(TAB_OUTPUT_SUBFOLDERS.batch);
   const [outputDirHandle, setOutputDirHandle] = useState<any>(null);
   const [outputDirName, setOutputDirName] = useState<string>('');
 
@@ -244,9 +251,10 @@ export const BatchQueueModal: React.FC<BatchQueueModalProps> = ({
   const encoding = resolveMp4EncodingParams(activeSettings);
 
   const handleUploadBatchBackground = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = '';
+    const inputEl = e.currentTarget;
+    const file = inputEl.files?.[0];
     if (!file) return;
+    setBgUploadError(null);
     setIsProcessingBg(true);
     try {
       const cfg = await resizeImageFileToStageDataUrl(file, {
@@ -260,9 +268,14 @@ export const BatchQueueModal: React.FC<BatchQueueModalProps> = ({
           project: { ...previewState.project, backgroundImage: cfg },
         });
       }
-    } catch {
-      // ignore malformed image
+    } catch (err) {
+      setBgUploadError(
+        err instanceof Error
+          ? err.message
+          : 'Không thể đọc file ảnh nền. Hãy thử file PNG, JPG hoặc WebP.',
+      );
     } finally {
+      inputEl.value = '';
       setIsProcessingBg(false);
     }
   };
@@ -351,9 +364,7 @@ export const BatchQueueModal: React.FC<BatchQueueModalProps> = ({
 
   const handleOpenOutputFolder = async () => {
     try {
-      const subPath = customSavePath.trim() && customSavePath.trim() !== 'output'
-        ? customSavePath.trim()
-        : undefined;
+      const subPath = resolveTabOutputSubfolder('Batch', customSavePath);
       const res = await fetch('/api/output/open', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -500,7 +511,7 @@ export const BatchQueueModal: React.FC<BatchQueueModalProps> = ({
   };
 
   const exportBaseName = (item: BatchJobItem): string =>
-    item.audioFile ? getBaseName(item.audioFile.name) : item.baseName;
+    cleanOutputTitleStem(item.audioFile ? getBaseName(item.audioFile.name) : item.baseName, 'Batch Video');
 
   // ── Build a LessonProject for preview or render mode ──────────────────────
   const buildProjectForItem = async (
@@ -685,10 +696,11 @@ export const BatchQueueModal: React.FC<BatchQueueModalProps> = ({
         });
 
         const promptText = await buildPromptForItem(item, idx);
-        promptFiles[`${item.baseName}.prompt.txt`] = promptText;
+        const promptFileName = cleanDownloadFileName(`${item.baseName} Prompt`, 'txt', 'Prompt');
+        promptFiles[promptFileName] = promptText;
 
         // Save individually as it completes
-        await saveTextOutput(promptText, `${item.baseName}.prompt.txt`);
+        await saveTextOutput(promptText, promptFileName);
 
         updateItem(item.id, {
           status: 'prompt-ready',
@@ -713,7 +725,12 @@ export const BatchQueueModal: React.FC<BatchQueueModalProps> = ({
     // Also produce combined ZIP of all generated prompts
     if (Object.keys(promptFiles).length >= 1) {
       const zipData = buildZipArchive(promptFiles);
-      const zipName = `prompts_batch_${Date.now()}.zip`;
+      const firstTitle = queueSnapshot[0]?.baseName || 'Batch';
+      const zipName = cleanDownloadFileName(
+        Object.keys(promptFiles).length === 1 ? `${firstTitle} Prompts` : 'Batch Prompts',
+        'zip',
+        'Batch Prompts',
+      );
       await saveBlobOutput(zipData, zipName, 'application/zip');
     }
 
@@ -791,7 +808,7 @@ export const BatchQueueModal: React.FC<BatchQueueModalProps> = ({
         });
 
         if (saveMode === 'disk') {
-          const effectivePath = customSavePath.trim() || 'output';
+          const effectivePath = resolveTabOutputSubfolder('Batch', customSavePath);
           const saved = await exportProjectToServerDisk(
             builtProject,
             item.audioFile,
@@ -808,6 +825,7 @@ export const BatchQueueModal: React.FC<BatchQueueModalProps> = ({
             {
               signal: controller.signal,
               directoryHandle: outputDirHandle,
+              sourceTab: 'Batch',
             },
           );
           const mb = (saved.byteLength / (1024 * 1024)).toFixed(2);
@@ -832,8 +850,10 @@ export const BatchQueueModal: React.FC<BatchQueueModalProps> = ({
             activeSettings,
             {
               signal: controller.signal,
+              customFileBase: fileBase,
               alsoSaveToServerOutput: true,
-              savePath: customSavePath.trim() || undefined,
+              savePath: resolveTabOutputSubfolder('Batch', customSavePath),
+              sourceTab: 'Batch',
             },
           );
           const mb = (exported.byteLength / (1024 * 1024)).toFixed(2);
@@ -1152,6 +1172,7 @@ export const BatchQueueModal: React.FC<BatchQueueModalProps> = ({
                   type="button"
                   onClick={() => {
                     setBatchBackgroundImage(undefined);
+                    setBgUploadError(null);
                     if (previewState) {
                       setPreviewState({
                         itemId: previewState.itemId,
@@ -1165,6 +1186,11 @@ export const BatchQueueModal: React.FC<BatchQueueModalProps> = ({
                   <Trash2 className="w-3.5 h-3.5" />
                 </button>
               </div>
+            )}
+            {bgUploadError && (
+              <p className="text-[11px] font-medium text-red-600 bg-red-50 border border-red-200 rounded px-2 py-1">
+                {bgUploadError}
+              </p>
             )}
           </div>
 
@@ -1274,7 +1300,7 @@ export const BatchQueueModal: React.FC<BatchQueueModalProps> = ({
                         disabled={isRunning}
                         value={customSavePath}
                         onChange={(e) => setCustomSavePath(e.target.value)}
-                        placeholder="Bỏ trống = thư mục output/ của project, tên file = tên audio"
+                        placeholder="Thư mục con trong output/ (mặc định: Batch)"
                         className="flex-1 px-3 py-1.5 text-xs bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:opacity-50 font-mono"
                       />
                     </div>

@@ -11,6 +11,7 @@ import {
   resolveMp4EncodingParams,
   ResolvedMp4Encoding,
 } from './mp4Config';
+import { cleanOutputTitleStem, resolveTabOutputSubfolder } from './outputNaming';
 import { LessonProject } from './types';
 
 export interface ExportVideoProgress {
@@ -44,13 +45,7 @@ function checkAborted(signal?: AbortSignal): void {
 }
 
 function sanitizeFileBase(raw: string): string {
-  return (
-    raw
-      .replace(/[\x00-\x1f\\/:*?"<>|]/g, '_')
-      .trim()
-      .replace(/[.\s]+$/, '')
-      .slice(0, 120) || 'kineticsub-video'
-  );
+  return cleanOutputTitleStem(raw, 'KineticSub Video');
 }
 
 function triggerBlobDownload(blob: Blob, fileName: string): void {
@@ -412,8 +407,8 @@ async function exportWithWebCodecsMp4(
 
     muxer.finalize();
     const mp4Blob = new Blob([muxer.target.buffer], { type: 'video/mp4' });
-    const base = sanitizeFileBase(options?.customFileBase || project.id);
-    const fileName = options?.customFileBase ? `${base}.mp4` : `${base}_${safeHeight}p.mp4`;
+    const base = sanitizeFileBase(options?.customFileBase || project.title || project.id);
+    const fileName = `${base}.mp4`;
     if (!options?.skipDownload) {
       triggerBlobDownload(mp4Blob, fileName);
       onProgress({ progress: 1, stageLabel: 'Đã tải xong file MP4!' });
@@ -520,6 +515,7 @@ export async function exportBlobToServerOutput(
   signal?: AbortSignal,
   sourceTab?: string,
 ): Promise<{ savedPath: string; relativePath?: string; fileName: string; byteLength: number }> {
+  const resolvedFolder = resolveTabOutputSubfolder(sourceTab, savePath);
   const chunkLimit = 4 * 1024 * 1024;
   let lastJson: { savedPath?: string; relativePath?: string; fileName?: string; bytes?: number } = {};
   for (let offset = 0; offset < blob.size; offset += chunkLimit) {
@@ -532,7 +528,7 @@ export async function exportBlobToServerOutput(
       {
         'Content-Type': 'application/octet-stream',
         'x-file-name': encodeURIComponent(fileName),
-        ...(savePath ? { 'x-save-path': encodeURIComponent(savePath) } : {}),
+        'x-save-path': encodeURIComponent(resolvedFolder),
         ...(sourceTab ? { 'x-source-tab': encodeURIComponent(sourceTab) } : {}),
       },
       'Lỗi lưu file MP4 vào thư mục output',
@@ -541,7 +537,7 @@ export async function exportBlobToServerOutput(
     lastJson = (await res.json().catch(() => ({}))) as typeof lastJson;
   }
   return {
-    savedPath: lastJson.savedPath || `${savePath || 'output'}/${fileName}`,
+    savedPath: lastJson.savedPath || `output/${resolvedFolder}/${fileName}`,
     relativePath: lastJson.relativePath,
     fileName: lastJson.fileName || fileName,
     byteLength: lastJson.bytes ?? blob.size,
@@ -664,8 +660,7 @@ async function exportWithServerFfmpeg(
       stageLabel: 'Đang ghép MP4 (FFmpeg H.264 / AAC)...',
     });
 
-    const baseName = sanitizeFileBase(customFileBase || project.id);
-    const exportBaseName = customFileBase ? baseName : `${baseName}_${safeHeight}p`;
+    const exportBaseName = sanitizeFileBase(customFileBase || project.title || project.id);
     const finishRes = await fetch(`/api/render/${jobId}/finish`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -802,7 +797,7 @@ async function exportProjectToWebmFallback(
     await donePromise;
 
     const blob = new Blob(chunks, { type: 'video/webm' });
-    const fileName = `${sanitizeFileBase(project.id)}_${encoding.height}p.webm`;
+    const fileName = `${sanitizeFileBase(project.title || project.id)}.webm`;
     triggerBlobDownload(blob, fileName);
     return {
       format: 'webm',
@@ -1069,10 +1064,16 @@ export async function exportProjectToServerDisk(
     checkAborted(options?.signal);
     onProgress({ progress: 0.9, stageLabel: 'FFmpeg đang xuất MP4 ra ổ cứng...' });
 
+    const resolvedFolder = resolveTabOutputSubfolder(options?.sourceTab, customSavePath);
     const finishRes = await fetch(`/api/render/${jobId}/finish`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fileName: baseName, saveToDisk: true, savePath: customSavePath || undefined }),
+      body: JSON.stringify({
+        fileName: baseName,
+        saveToDisk: true,
+        savePath: resolvedFolder,
+        sourceTab: options?.sourceTab,
+      }),
       signal: options?.signal,
     });
 

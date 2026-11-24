@@ -6,6 +6,7 @@ import {
   renderProjectFrame,
   STAGE_HEIGHT,
   STAGE_WIDTH,
+  subscribeBgImageLoaded,
 } from '../engine/canvasRenderer';
 import { subscribeCustomComponents } from '../engine/customComponentStore';
 import { LAYOUT_COMPOSITIONS } from '../engine/illustrationLayouts';
@@ -110,6 +111,7 @@ export const StagePreview: React.FC<StagePreviewProps> = ({
   const [assetVersion, setAssetVersion] = useState(0);
   const [dbVersion, setDbVersion] = useState(0);
   const [isProcessingBg, setIsProcessingBg] = useState(false);
+  const [bgUploadError, setBgUploadError] = useState<string | null>(null);
   const [isWatermarkOpen, setIsWatermarkOpen] = useState(false);
   const dragStateRef = useRef<{
     id: string;
@@ -119,6 +121,10 @@ export const StagePreview: React.FC<StagePreviewProps> = ({
 
   useEffect(() => {
     return subscribeCustomComponents(() => setDbVersion((v) => v + 1));
+  }, []);
+
+  useEffect(() => {
+    return subscribeBgImageLoaded(() => setAssetVersion((v) => v + 1));
   }, []);
 
   void dbVersion;
@@ -136,7 +142,7 @@ export const StagePreview: React.FC<StagePreviewProps> = ({
     return () => {
       active = false;
     };
-  }, [project]);
+  }, [project.backgroundImage?.dataUrl]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -152,9 +158,10 @@ export const StagePreview: React.FC<StagePreviewProps> = ({
   }, [project, currentTime, selectedElementId, isPlaying, isExportingVideo, assetVersion]);
 
   const handleUploadBgImage = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = '';
+    const inputEl = e.currentTarget;
+    const file = inputEl.files?.[0];
     if (!file) return;
+    setBgUploadError(null);
     setIsProcessingBg(true);
     try {
       const config = await resizeImageFileToStageDataUrl(file, {
@@ -162,9 +169,14 @@ export const StagePreview: React.FC<StagePreviewProps> = ({
         scrimOpacity: project.backgroundImage?.scrimOpacity ?? 0.22,
       });
       onChangeBackgroundImage(config);
-    } catch {
-      // Ignore invalid image decode error silently
+    } catch (err) {
+      setBgUploadError(
+        err instanceof Error
+          ? err.message
+          : 'Không thể đọc file ảnh nền. Hãy thử file PNG, JPG hoặc WebP.',
+      );
     } finally {
+      inputEl.value = '';
       setIsProcessingBg(false);
     }
   };
@@ -422,7 +434,10 @@ export const StagePreview: React.FC<StagePreviewProps> = ({
             />
             <button
               type="button"
-              onClick={() => onChangeBackgroundImage(undefined)}
+              onClick={() => {
+                setBgUploadError(null);
+                onChangeBackgroundImage(undefined);
+              }}
               aria-label="Xóa ảnh nền"
               className="p-1 text-slate-400 hover:text-red-600 rounded"
             >
@@ -431,6 +446,11 @@ export const StagePreview: React.FC<StagePreviewProps> = ({
           </div>
         )}
       </div>
+      {bgUploadError && (
+        <p className="w-full mt-1.5 text-[11px] text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-2.5 py-1.5">
+          {bgUploadError}
+        </p>
+      )}
 
       {/* Watermark & Outro (Tùy chọn) for Studio 9:16 */}
       {onChangeWatermark && (

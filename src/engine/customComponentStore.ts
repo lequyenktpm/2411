@@ -386,10 +386,11 @@ Trả về **DUY NHẤT 1 KHỐI JSON HỢP LỆ** (không viết thêm giải t
 5. \`"line"\` / \`"arrow"\`: \`{ "shape": "arrow", "x": -40, "y": 10, "x2": 40, "y2": 10, "stroke": "#2563EB", "lineWidth": 6 }\`
 6. \`"polygon"\`: \`{ "shape": "polygon", "points": [[-30,20],[0,-40],[30,20]], "fill": "#F59E0B" }\`
 7. \`"icon"\` (dùng 1 trong các icon có sẵn: ${iconsList}): \`{ "shape": "icon", "icon": "briefcase", "x": -150, "y": 10 }\`
-8. \`"text"\`: \`{ "shape": "text", "x": 0, "y": -88, "text": "KEY PHRASE", "fill": "#4338CA", "fontSize": 26, "fontWeight": 800, "align": "center" }\`
+8. \`"text"\`: \`{ "shape": "text", "x": 0, "y": -88, "text": "KEY PHRASE", "fill": "#4338CA", "fontSize": 36, "fontWeight": 800, "align": "center" }\` (fontSize >= 24; chữ chính 36–48; nhãn 30–38)
 
-# YÊU CẦU THẨM MỸ BẮT BUỘC
+# YÊU CẦU THẨM MỸ & DỄ ĐỌC TRÊN ĐIỆN THOẠI (9:16)
 - Luôn có ít nhất 8–16 primitives phân lớp rõ ràng: nền thẻ bo tròn có bóng (\`shadow: true\`), nhãn tiêu đề \`pill\` + \`text\` hoặc header bar giống Bootstrap Card, 1–2 khối minh họa trực quan (ghép hình vector + \`icon\`), chữ ngắn rõ nghĩa, mũi tên hoặc dấu nhấn màu hài hòa (#2563EB, #16A34A, #F59E0B, #7C3AED, #DC2626).
+- **QUAN TRỌNG**: Mọi primitive \`text\` phải có \`fontSize\` >= 24 (khuyên dùng 32–44 cho nội dung nổi bật, 28–34 cho nhãn), không dùng chữ nhỏ 16–22 khó đọc trên màn hình điện thoại.
 - Điền \`keywords\` (6–12 từ khóa tiếng Anh/Việt viết thường) để hệ thống tự khớp chính xác khi tạo video mới!
 
 # MẪU JSON ĐẦU RA
@@ -402,16 +403,16 @@ Trả về **DUY NHẤT 1 KHỐI JSON HỢP LỆ** (không viết thêm giải t
   "keywords": ["interview", "resume", "cv", "hire", "job", "hr", "candidate", "phỏng vấn"],
   "defaultIcon": "briefcase",
   "primitives": [
-    { "shape": "rect", "x": -340, "y": -145, "w": 680, "h": 290, "radius": 32, "fill": "#FFFFFF", "stroke": "#E2E8F0", "lineWidth": 2, "shadow": true },
-    { "shape": "pill", "x": -120, "y": -122, "w": 240, "h": 42, "fill": "#EEF2FF" },
-    { "shape": "text", "x": 0, "y": -101, "text": "JOB INTERVIEW", "fill": "#4338CA", "fontSize": 22, "fontWeight": 800, "align": "center" },
-    { "shape": "rect", "x": -280, "y": -55, "w": 240, "h": 170, "radius": 24, "fill": "#F8FAFC", "stroke": "#CBD5E1", "lineWidth": 2 },
-    { "shape": "icon", "icon": "briefcase", "x": -160, "y": 15 },
-    { "shape": "text", "x": -160, "y": 90, "text": "Strengths & CV", "fill": "#334155", "fontSize": 22, "fontWeight": 700, "align": "center" },
-    { "shape": "arrow", "x": -25, "y": 30, "x2": 35, "y2": 30, "stroke": "#16A34A", "lineWidth": 6 },
-    { "shape": "rect", "x": 50, "y": -55, "w": 240, "h": 170, "radius": 24, "fill": "#ECFDF5", "stroke": "#86EFAC", "lineWidth": 2 },
-    { "shape": "icon", "icon": "handshake", "x": 170, "y": 15 },
-    { "shape": "text", "x": 170, "y": 90, "text": "Confident Answer", "fill": "#15803D", "fontSize": 22, "fontWeight": 700, "align": "center" }
+    { "shape": "rect", "x": -360, "y": -150, "w": 720, "h": 300, "radius": 32, "fill": "#FFFFFF", "stroke": "#E2E8F0", "lineWidth": 2, "shadow": true },
+    { "shape": "pill", "x": -150, "y": -132, "w": 300, "h": 48, "fill": "#EEF2FF" },
+    { "shape": "text", "x": 0, "y": -108, "text": "JOB INTERVIEW", "fill": "#4338CA", "fontSize": 30, "fontWeight": 800, "align": "center" },
+    { "shape": "rect", "x": -315, "y": -60, "w": 270, "h": 185, "radius": 24, "fill": "#F8FAFC", "stroke": "#CBD5E1", "lineWidth": 2 },
+    { "shape": "icon", "icon": "briefcase", "x": -180, "y": 5 },
+    { "shape": "text", "x": -180, "y": 90, "text": "Strengths & CV", "fill": "#334155", "fontSize": 30, "fontWeight": 700, "align": "center" },
+    { "shape": "arrow", "x": -30, "y": 28, "x2": 30, "y2": 28, "stroke": "#16A34A", "lineWidth": 6 },
+    { "shape": "rect", "x": 45, "y": -60, "w": 270, "h": 185, "radius": 24, "fill": "#ECFDF5", "stroke": "#86EFAC", "lineWidth": 2 },
+    { "shape": "icon", "icon": "handshake", "x": 180, "y": 5 },
+    { "shape": "text", "x": 180, "y": 90, "text": "Confident Answer", "fill": "#15803D", "fontSize": 30, "fontWeight": 700, "align": "center" }
   ]
 }
 \`\`\``;

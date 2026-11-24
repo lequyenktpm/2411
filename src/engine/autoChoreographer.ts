@@ -249,3 +249,128 @@ export function choreographFromTranscript(
   }
   return baseProject;
 }
+
+/**
+ * Updates a project's cues and karaoke-card elements with newly synced timings,
+ * optionally scaling visual elements proportionally so scene transitions stay aligned
+ * with the real audio while preserving user edits & background image.
+ */
+export function resyncProjectTimingToCues(
+  project: LessonProject,
+  nextCues: TranscriptCue[],
+  options?: { resyncVisuals?: boolean; audioDurationSec?: number },
+): LessonProject {
+  if (!Array.isArray(nextCues) || nextCues.length === 0) return project;
+
+  const oldCues = project.cues || [];
+  const oldSpanEnd = Math.max(0.5, oldCues[oldCues.length - 1]?.end ?? project.duration);
+  const newSpanEnd = Math.max(0.5, nextCues[nextCues.length - 1]?.end ?? oldSpanEnd);
+  const spanScale = newSpanEnd / oldSpanEnd;
+
+  const oldById = new Map<string, TranscriptCue>();
+  oldCues.forEach((c) => oldById.set(c.id, c));
+  const nextById = new Map<string, TranscriptCue>();
+  nextCues.forEach((c) => nextById.set(c.id, c));
+
+  let karaokeIdx = 0;
+  const nextElements: SceneElement[] = project.elements.map((el) => {
+    if (el.props.kind === 'karaoke-card') {
+      const matched = nextById.get(el.props.cueId) ?? nextCues[karaokeIdx];
+      karaokeIdx += 1;
+      if (!matched) return el;
+      return {
+        ...el,
+        startTime: matched.start,
+        endTime: matched.end,
+        props: {
+          ...el.props,
+          cueId: matched.id,
+          words: matched.words,
+        },
+      };
+    }
+
+    if (!options?.resyncVisuals) {
+      return el;
+    }
+
+    // Proportional remap relative to cue boundaries so illustrations stay synced
+    const mapTime = (t: number): number => {
+      if (oldCues.length === nextCues.length && oldCues.length > 0) {
+        const idx = oldCues.findIndex((oc) => t >= oc.start - 0.05 && t <= oc.end + 0.05);
+        if (idx >= 0) {
+          const oc = oldCues[idx];
+          const nc = nextCues[idx];
+          const ocDur = Math.max(0.15, oc.end - oc.start);
+          const ncDur = Math.max(0.15, nc.end - nc.start);
+          const ratio = Math.max(0, Math.min(1, (t - oc.start) / ocDur));
+          return Number((nc.start + ratio * ncDur).toFixed(2));
+        }
+      }
+      return Number(Math.max(0, t * spanScale).toFixed(2));
+    };
+
+    const nextStart = mapTime(el.startTime);
+    const nextEnd = Math.max(nextStart + 0.4, mapTime(el.endTime));
+    if (el.props.kind === 'comparison-strip') {
+      return {
+        ...el,
+        startTime: nextStart,
+        endTime: nextEnd,
+        props: {
+          ...el.props,
+          items: el.props.items.map((it) =>
+            it.activateAt !== undefined ? { ...it, activateAt: mapTime(it.activateAt) } : it,
+          ),
+        },
+      };
+    }
+    if (el.props.kind === 'tone-meter') {
+      return {
+        ...el,
+        startTime: nextStart,
+        endTime: nextEnd,
+        props: {
+          ...el.props,
+          animateStart: mapTime(el.props.animateStart),
+          animateEnd: Math.max(mapTime(el.props.animateStart) + 0.25, mapTime(el.props.animateEnd)),
+        },
+      };
+    }
+    if (el.props.kind === 'word-stack') {
+      return {
+        ...el,
+        startTime: nextStart,
+        endTime: nextEnd,
+        props: {
+          ...el.props,
+          rows: el.props.rows.map((r) => ({ ...r, appearAt: mapTime(r.appearAt) })),
+        },
+      };
+    }
+    return {
+      ...el,
+      startTime: nextStart,
+      endTime: nextEnd,
+    };
+  });
+
+  const outroSec =
+    project.watermark &&
+    project.watermark.outroSeconds > 0 &&
+    (project.watermark.outroLine1.trim() || project.watermark.outroLine2.trim())
+      ? Number(project.watermark.outroSeconds || 0)
+      : 0;
+  const maxElEnd = nextElements.reduce((mx, el) => Math.max(mx, el.endTime), 0);
+  const nextDuration = Number(
+    Math.max(3, options?.audioDurationSec ?? 0, newSpanEnd + 0.35 + outroSec, maxElEnd + outroSec).toFixed(2),
+  );
+
+  return {
+    ...project,
+    duration: nextDuration,
+    cues: nextCues,
+    elements: resolveProjectOverlaps(nextElements),
+  };
+}
+

@@ -2,6 +2,7 @@ import { spawn, ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { cleanOutputTitleStem, resolveTabOutputSubfolder } from '../engine/outputNaming.ts';
 import { interpolateWordTimings } from '../engine/transcriptParser.ts';
 
 export interface WhisperWordChunk {
@@ -858,9 +859,13 @@ export async function synthesizeElevenLabsTtsBuffer(
   return Buffer.from(await res.arrayBuffer());
 }
 
-export function resolveSafeOutputDir(rawSubPath?: string): { baseDir: string; targetDir: string } {
+export function resolveSafeOutputDir(rawSubPath?: string, sourceTab?: string): { baseDir: string; targetDir: string } {
   const baseDir = path.resolve(process.env.BATCH_OUTPUT_DIR || 'output');
-  const trimmed = (rawSubPath || '').trim().replace(/^[/\\]+/, '');
+  const raw = (rawSubPath || '').trim().replace(/^[/\\]+/, '');
+  const trimmed =
+    raw || sourceTab
+      ? resolveTabOutputSubfolder(sourceTab, raw)
+      : '';
   const candidate = trimmed ? path.resolve(baseDir, trimmed) : baseDir;
   const targetDir =
     candidate === baseDir || candidate.startsWith(baseDir + path.sep) ? candidate : baseDir;
@@ -876,14 +881,8 @@ export function resolveSafeOutputFile(relPath: string): { baseDir: string; fileP
   return { baseDir, filePath: candidate };
 }
 
-export function sanitizeOutputStem(raw: string, fallback = 'video_output'): string {
-  return (
-    raw
-      .replace(/[\x00-\x1f\\/:*?"<>|]/g, '_')
-      .trim()
-      .replace(/[.\s]+$/, '')
-      .slice(0, 120) || fallback
-  );
+export function sanitizeOutputStem(raw: string, fallback = 'KineticSub Video'): string {
+  return cleanOutputTitleStem(raw, fallback);
 }
 
 export async function probeMediaMeta(filePath: string): Promise<{

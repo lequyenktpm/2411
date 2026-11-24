@@ -1,16 +1,24 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  adjustCuesTiming,
   cuesToBlockTranscript,
   cuesToSrt,
   interpolateWordTimings,
   parseTranscriptAuto,
+  shiftCuesAndWords,
   stripTimestampsFromScript,
 } from './transcriptParser';
 import { inferSpokenLanguageFromText } from '../server/mediaHelpers';
 import { buildSceneGenerationPrompt } from './aiPromptBuilder';
-import { choreographFromTranscript } from './autoChoreographer';
-import { computeElementFrameState } from './animationMath';
+import { choreographFromTranscript, resyncProjectTimingToCues } from './autoChoreographer';
+import { computeElementFrameState, computeStaggerItemState } from './animationMath';
+import {
+  cleanDownloadFileName,
+  cleanOutputTitleStem,
+  resolveTabOutputSubfolder,
+  TAB_OUTPUT_SUBFOLDERS,
+} from './outputNaming';
 import { generatePythonProjectFiles } from './pythonGenerator';
 import {
   PRESET_3D_SHAPES_KARAOKE,
@@ -1664,6 +1672,214 @@ test('audioMixHelper ducks BGM during speech, boosts during outro tail, and writ
   assert.equal(String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]), 'RIFF');
   assert.equal(String.fromCharCode(bytes[8], bytes[9], bytes[10], bytes[11]), 'WAVE');
 });
+
+test('English Reels supports targetLang localization, full untruncated quiz text, composition switching, backgroundImage, and mobile typography prompt rules', () => {
+  const sampleLesson = `## New Year, New Me
+Matt wants to make big changes in his life this year. He wrote down a list of resolutions to buy fewer clothes, save money, and travel worldwide.
+
+True / False Quiz
+Q1. Why did Matt write a list of plans?
+(A) Because he forgot everything last year.
+(B) He has a list of plans and intends to do them.
+Answer: B
+Explanation: Matt wrote resolutions and intends to follow through with every single plan.`;
+
+  // 1. Japanese targetLang: zero Vietnamese stage chrome leaks & full option text preserved
+  const jaReels = buildReelCardsRuleBased(sampleLesson, {
+    title: 'New Year, New Me',
+    mode: 'auto',
+    targetLang: '日本語',
+  });
+  assert.ok(jaReels.cards[0].content.includes('今日のテーマ:'));
+  const jaProject = reelCardsToLessonProject(jaReels.cards, {
+    title: 'New Year, New Me',
+    targetLang: '日本語',
+    backgroundImage: {
+      dataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=',
+      fit: 'cover',
+      scrimOpacity: 0.25,
+      fileName: 'bg.png',
+    },
+  });
+  assert.equal(jaProject.backgroundImage?.fileName, 'bg.png');
+  assert.equal(findVisualOverlaps(jaProject.elements).length, 0);
+
+  const jaTextAll = jaProject.elements
+    .map((el) => {
+      if (el.props.kind === 'topic-pill') return el.props.text;
+      if (el.props.kind === 'comparison-strip') return el.props.items.map((i) => `${i.label} ${i.sublabel || ''}`).join(' ');
+      if (el.props.kind === 'sentence-card') return `${el.props.text} ${el.props.subtext || ''}`;
+      if (el.props.kind === 'illustration-prop') return `${el.props.data?.title || ''} ${el.props.data?.formula || ''} ${el.props.data?.highlightWord || ''}`;
+      return '';
+    })
+    .join(' ');
+  assert.ok(!jaTextAll.includes('Mở bài'));
+  assert.ok(!jaTextAll.includes('ĐÁP ÁN ĐÚNG'));
+  assert.ok(!jaTextAll.includes('ĐANG ĐỌC'));
+  assert.ok(jaTextAll.includes('He has a list of plans and intends to do them.'));
+
+  // 2. English targetLang check + prompt typography check
+  const enPrompt = buildEnglishReelsWebAiPrompt({
+    sourceText: sampleLesson,
+    title: 'New Year, New Me',
+    mode: 'auto',
+    targetLang: 'English',
+  });
+  assert.ok(enPrompt.includes('TYPOGRAPHY & MOBILE READABILITY'));
+  assert.ok(!enPrompt.includes('1. Mở bài'));
+
+  const enReels = buildReelCardsRuleBased(sampleLesson, {
+    title: 'New Year, New Me',
+    mode: 'auto',
+    targetLang: 'English',
+  });
+  const enProject = reelCardsToLessonProject(enReels.cards, {
+    title: 'New Year, New Me',
+    targetLang: 'English',
+    compositionId: '3d-shapes',
+  });
+  assert.equal(enProject.compositionId, '3d-shapes');
+  assert.ok(enProject.elements.some((el) => el.type === 'shape-3d'));
+  assert.equal(findVisualOverlaps(enProject.elements).length, 0);
+
+  // 3. Switching to word-reveal transforms layout visibly
+  const wordRevealProj = reelCardsToLessonProject(enReels.cards, {
+    title: 'New Year, New Me',
+    targetLang: 'English',
+    compositionId: 'word-reveal',
+  });
+  assert.equal(wordRevealProj.compositionId, 'word-reveal');
+  assert.ok(!wordRevealProj.elements.some((el) => el.id.startsWith('reel-prop-')));
+  assert.ok(wordRevealProj.elements.some((el) => el.id.startsWith('reel-card-') && el.type === 'sentence-card'));
+  assert.equal(findVisualOverlaps(wordRevealProj.elements).length, 0);
+
+  // 4. Custom composition AI prompt without manual labels does NOT leak Step 1/2/3
+  const aiCustomPrompt = buildSceneGenerationPrompt(PRESET_JP_EN_POLITE.cues, {
+    title: 'AI Autonomous Custom',
+    style: 'tiktok-cards',
+    compositionId: 'custom',
+    customConfig: {
+      variant: 'css-sticky-note',
+      sceneIcon: 'sparkles',
+      title: '',
+      subtitle: '',
+      speechText: '',
+      labels: [],
+      highlightWord: '',
+      accentColor: '#4F46E5',
+      showStrip: true,
+      showToneMeter: false,
+      showSentenceCard: true,
+    },
+  });
+  assert.ok(aiCustomPrompt.includes('TYPOGRAPHY & MOBILE READABILITY'));
+  assert.ok(!aiCustomPrompt.includes('nhãn gợi ý (`labels`):'));
+  assert.ok(aiCustomPrompt.includes('BẮT BUỘC SÁT NGỮ CẢNH'));
+  assert.ok(aiCustomPrompt.includes('AI LÀ NGƯỜI SÁNG TẠO CHÍNH'));
+});
+
+test('outputNaming cleans underscores, dates, timestamps, and routes tabs into subfolders inside output/', () => {
+  assert.equal(
+    cleanOutputTitleStem('2026-11-24_Hotel_Check-in_720p_ab12.mp4'),
+    'Hotel Check-in',
+  );
+  assert.equal(
+    cleanOutputTitleStem('Quiz_5s_Daily_Routine_1732440000000_reels_mp4'),
+    'Quiz 5s Daily Routine',
+  );
+  assert.equal(
+    cleanDownloadFileName('20261124_Can_Could_May_1080p', 'mp4'),
+    'Can Could May.mp4',
+  );
+  assert.equal(
+    cleanDownloadFileName('', 'srt', 'Fallback Title'),
+    'Fallback Title.srt',
+  );
+
+  assert.equal(resolveTabOutputSubfolder('Studio 9:16'), TAB_OUTPUT_SUBFOLDERS.studio);
+  assert.equal(resolveTabOutputSubfolder('English Reels'), TAB_OUTPUT_SUBFOLDERS.reels);
+  assert.equal(resolveTabOutputSubfolder('Edu Merge'), TAB_OUTPUT_SUBFOLDERS.merge);
+  assert.equal(resolveTabOutputSubfolder('Edu Karaoke'), TAB_OUTPUT_SUBFOLDERS.karaoke);
+  assert.equal(resolveTabOutputSubfolder('Reading Along'), TAB_OUTPUT_SUBFOLDERS.reading);
+  assert.equal(resolveTabOutputSubfolder('Batch'), TAB_OUTPUT_SUBFOLDERS.batch);
+  assert.equal(
+    resolveTabOutputSubfolder('English Reels', 'output/output/Custom Folder'),
+    'output/Custom Folder',
+  );
+});
+
+test('shiftCuesAndWords, adjustCuesTiming, and resyncProjectTimingToCues adjust timing while preserving backgroundImage', () => {
+  const baseCues = PRESET_JP_EN_POLITE.cues.slice(0, 2).map((cue) => ({
+    ...cue,
+    words: (cue.words || []).map((w) => ({ ...w })),
+  }));
+
+  const shifted = shiftCuesAndWords(baseCues, 200);
+  assert.ok(Math.abs(shifted[0].start - (baseCues[0].start + 0.2)) < 0.001);
+  assert.ok(Math.abs(shifted[0].end - (baseCues[0].end + 0.2)) < 0.001);
+  if (shifted[0].words && baseCues[0].words) {
+    assert.ok(Math.abs(shifted[0].words[0].start - (baseCues[0].words[0].start + 0.2)) < 0.001);
+  }
+
+  const clampedNegative = shiftCuesAndWords(baseCues, -10000);
+  assert.equal(clampedNegative[0].start, 0);
+  assert.ok(clampedNegative[0].end > clampedNegative[0].start);
+
+  const fitted = adjustCuesTiming(baseCues, { targetDurationSec: 10 });
+  assert.ok(Math.abs(fitted[fitted.length - 1].end - 10) < 0.02);
+  for (const cue of fitted) {
+    assert.ok(cue.end > cue.start);
+    if (cue.words) {
+      for (let i = 0; i < cue.words.length; i += 1) {
+        assert.ok(cue.words[i].end >= cue.words[i].start);
+        if (i > 0) {
+          assert.ok(cue.words[i].start >= cue.words[i - 1].start);
+        }
+      }
+    }
+  }
+
+  const projectWithBg = {
+    ...PRESET_JP_EN_POLITE,
+    backgroundImage: {
+      dataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=',
+      fit: 'cover' as const,
+      scrimOpacity: 0.25,
+      fileName: 'preserved.png',
+    },
+  };
+  const updatedCues = adjustCuesTiming(PRESET_JP_EN_POLITE.cues, { speedFactor: 1.25 });
+  const resynced = resyncProjectTimingToCues(projectWithBg, updatedCues, { resyncVisuals: true });
+  assert.equal(resynced.backgroundImage?.fileName, 'preserved.png');
+  const lastCueEnd = updatedCues[updatedCues.length - 1].end;
+  assert.ok(resynced.duration >= lastCueEnd);
+  assert.ok(Math.abs(resynced.duration - (lastCueEnd + 0.35)) < 0.8);
+  const karaokeEl = resynced.elements.find((el) => el.type === 'karaoke-card');
+  assert.ok(karaokeEl && karaokeEl.props.kind === 'karaoke-card');
+  if (karaokeEl && karaokeEl.props.kind === 'karaoke-card') {
+    assert.ok(Math.abs(karaokeEl.startTime - updatedCues[0].start) < 0.01);
+    assert.ok(Math.abs(karaokeEl.endTime - updatedCues[0].end) < 0.01);
+    assert.equal(karaokeEl.props.words?.length ?? 0, updatedCues[0].words?.length ?? 0);
+  }
+});
+
+test('computeStaggerItemState reveals staggered children smoothly without negative progress', () => {
+  const before = computeStaggerItemState(0.05, 2, 0.08, 0.36);
+  assert.equal(before.opacity, 0);
+  assert.ok(before.translateY > 0);
+  assert.ok(before.scale < 1);
+
+  const mid = computeStaggerItemState(0.30, 1, 0.08, 0.36);
+  assert.ok(mid.opacity > 0 && mid.opacity < 1);
+  assert.ok(mid.progress > 0 && mid.progress < 1);
+
+  const done = computeStaggerItemState(1.2, 2, 0.08, 0.36);
+  assert.equal(done.opacity, 1);
+  assert.equal(done.translateY, 0);
+  assert.equal(done.scale, 1);
+});
+
+
 
 
 

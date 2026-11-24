@@ -9,7 +9,10 @@ import { EnglishReelsTab } from './components/EnglishReelsTab';
 import { GlobalOutputPanel, emitOutputUpdated } from './components/GlobalOutputPanel';
 import { StagePreview } from './components/StagePreview';
 import { TimelineAndInspector } from './components/TimelineAndInspector';
-import { choreographFromTranscript } from './engine/autoChoreographer';
+import {
+  choreographFromTranscript,
+  resyncProjectTimingToCues,
+} from './engine/autoChoreographer';
 import { syncCustomComponentsFromServer } from './engine/customComponentStore';
 import { hydrateClientApiKeysFromServer } from './utils/apiKeysStore';
 import {
@@ -27,6 +30,7 @@ import {
   ExportVideoResult,
   exportProjectToVideo,
 } from './engine/mp4Exporter';
+import { cleanOutputTitleStem, TAB_OUTPUT_SUBFOLDERS } from './engine/outputNaming';
 import {
   PRESET_3D_SHAPES_KARAOKE,
   PRESET_ED_PRONUNCIATION,
@@ -35,7 +39,8 @@ import {
   PRESET_XUN52000_DARK,
 } from './engine/demoPresets';
 import { FlexibleSceneDocument, scenePlanToProject } from './engine/scenePlanAdapter';
-import { cuesToBlockTranscript } from './engine/transcriptParser';
+import { adjustCuesTiming, cuesToBlockTranscript } from './engine/transcriptParser';
+import { resyncCuesToAudioFile } from './engine/ttsSyncHelper';
 import {
   BackgroundImageConfig,
   CanvasThemeId,
@@ -83,7 +88,7 @@ export default function App() {
     title: '',
     subtitle: '',
     speechText: '',
-    labels: ['Step 1', 'Step 2', 'Step 3'],
+    labels: [],
     highlightWord: '',
     accentColor: '#4F46E5',
     showStrip: true,
@@ -171,7 +176,11 @@ export default function App() {
             : presetId === 'xun'
               ? PRESET_XUN52000_DARK
               : PRESET_3D_SHAPES_KARAOKE;
-    setProject(next);
+    setProject((prev) => ({
+      ...next,
+      backgroundImage: prev.backgroundImage,
+      watermark: prev.watermark,
+    }));
     setCurrentTime(
       presetId === 'jp-en'
         ? 4.8
@@ -397,6 +406,60 @@ export default function App() {
     }));
   }, []);
 
+  const handleAdjustProjectTiming = useCallback(
+    (adjust: {
+      offsetMs?: number;
+      speedFactor?: number;
+      targetDurationSec?: number;
+      resyncVisuals?: boolean;
+    }) => {
+      setIsPlaying(false);
+      setProject((prev) => {
+        const nextCues = adjustCuesTiming(prev.cues, {
+          offsetMs: adjust.offsetMs,
+          speedFactor: adjust.speedFactor,
+          targetDurationSec: adjust.targetDurationSec,
+        });
+        return resyncProjectTimingToCues(prev, nextCues, {
+          resyncVisuals: adjust.resyncVisuals ?? true,
+          audioDurationSec: audioDurationSec ?? undefined,
+        });
+      });
+    },
+    [audioDurationSec],
+  );
+
+  const handleResyncCuesToAudio = useCallback(
+    async (
+      mode: 'fast-forced' | 'whisper',
+      options?: { resyncVisuals?: boolean; onProgress?: (pct: number, label: string) => void },
+    ) => {
+      if (!audioFile) {
+        throw new Error('Chưa có file Audio để đồng bộ lại.');
+      }
+      setIsPlaying(false);
+      const res = await resyncCuesToAudioFile({
+        audioFile,
+        cues: project.cues,
+        alignMode: mode,
+        onProgress: options?.onProgress,
+      });
+      setProject((prev) =>
+        resyncProjectTimingToCues(prev, res.cues, {
+          resyncVisuals: options?.resyncVisuals ?? true,
+          audioDurationSec: audioDurationSec ?? undefined,
+        }),
+      );
+      return {
+        cueCount: res.cues.length,
+        backendUsed: res.backendUsed,
+        blockTranscript: res.blockTranscript,
+        srt: res.srt,
+      };
+    },
+    [audioFile, project.cues, audioDurationSec],
+  );
+
   const handleChangeWatermark = useCallback((wm: WatermarkOutroConfig) => {
     setProject((prev) => {
       const cuesMax = prev.cues.reduce((mx, c) => Math.max(mx, c.end), 0);
@@ -571,9 +634,10 @@ export default function App() {
       setExportError(null);
 
       try {
-        const baseSlug =
-          targetProject.id.replace(/[^a-zA-Z0-9-_]+/g, '_').slice(0, 32) || 'studio_video';
-        const uniqueFileBase = `${baseSlug}_${resolvedExport.height}p_${Date.now().toString(36).slice(-4)}`;
+        const cleanFileBase = cleanOutputTitleStem(
+          targetProject.title || targetProject.id,
+          'Studio Video',
+        );
         const result = await exportProjectToVideo(
           targetProject,
           audioFile,
@@ -584,8 +648,9 @@ export default function App() {
           mp4Settings,
           {
             signal: controller.signal,
-            customFileBase: uniqueFileBase,
+            customFileBase: cleanFileBase,
             alsoSaveToServerOutput: true,
+            savePath: TAB_OUTPUT_SUBFOLDERS.studio,
             sourceTab: 'Studio 9:16',
           },
         );
@@ -790,7 +855,9 @@ export default function App() {
               <AutomationPipelinePanel
                 project={project}
                 audioUrl={audioUrl}
+                audioFile={audioFile}
                 audioFileName={audioFileName}
+                audioDurationSec={audioDurationSec}
                 currentTime={currentTime}
                 mp4Settings={mp4Settings}
                 customCompositionConfig={customCompositionConfig}
@@ -808,6 +875,8 @@ export default function App() {
                 onClearAudio={handleClearAudio}
                 onApplyTranscript={handleApplyTranscript}
                 onApplyAudioAndCues={handleApplyGeneratedAudioAndCues}
+                onResyncCuesToAudio={handleResyncCuesToAudio}
+                onAdjustTiming={handleAdjustProjectTiming}
                 onApplyScenePlan={handleApplyScenePlan}
                 onApplyAndRenderVideo={handleApplyAndRenderVideo}
                 onSeek={handleSeek}

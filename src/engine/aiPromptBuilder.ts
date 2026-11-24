@@ -1,3 +1,4 @@
+import { TYPOGRAPHY_MOBILE_READABILITY_PROMPT_BLOCK } from './englishReelsEngine';
 import { LAYOUT_COMPOSITIONS } from './illustrationLayouts';
 import { formatTimeToken } from './transcriptParser';
 import {
@@ -39,17 +40,24 @@ export function buildSceneGenerationPrompt(
   // ── Style guide block ──────────────────────────────────────────────────────
   let styleGuide: string;
 
-  if (options?.compositionId === 'custom' && options?.customConfig) {
-    const cc = options.customConfig;
-    styleGuide = `CHẾ ĐỘ TỰ SÁNG TẠO & TÙY BIẾN COMPONENT TỪ KHO:
-- Người dùng đã chọn component chủ đạo từ Kho Component: \`variant: "${cc.variant}"\`${cc.sceneIcon ? `, \`sceneIcon: "${cc.sceneIcon}"\`` : ''}.
-- Tham số tùy biến yêu cầu áp dụng vào các thẻ minh họa trọng tâm:
-  + Tiêu đề (\`title\`): "${cc.title || options?.title || 'Key Rule'}"
-  + Phụ đề (\`subtitle\`): "${cc.subtitle || 'Điền ghi chú ngắn sát câu thoại'}"
-  + Nhãn (\`labels\`): ${JSON.stringify(cc.labels && cc.labels.length > 0 ? cc.labels : ['Step 1', 'Step 2', 'Step 3'])}
-  + Từ nhấn (\`highlightWord\`): "${cc.highlightWord || ''}"
-  + Màu nhấn (\`accentColor\`): "${cc.accentColor || '#4F46E5'}"
-- Hãy giữ đúng \`variant: "${cc.variant}"\` hoặc biến tấu sáng tạo thêm bằng \`customPrimitives\` dựa theo phong cách này, đồng bộ với từng câu thoại.`;
+  if (options?.compositionId === 'custom') {
+    const cc = options?.customConfig;
+    const hintParts: string[] = [];
+    if (cc?.variant) hintParts.push(`component gợi ý từ người dùng: \`variant: "${cc.variant}"\``);
+    if (cc?.sceneIcon) hintParts.push(`\`sceneIcon: "${cc.sceneIcon}"\``);
+    if (cc?.title?.trim()) hintParts.push(`tiêu đề ưu tiên (\`title\`): "${cc.title.trim()}"`);
+    if (cc?.subtitle?.trim()) hintParts.push(`phụ đề (\`subtitle\`): "${cc.subtitle.trim()}"`);
+    if (cc?.labels && cc.labels.length > 0) hintParts.push(`nhãn gợi ý (\`labels\`): ${JSON.stringify(cc.labels)}`);
+    if (cc?.highlightWord?.trim()) hintParts.push(`từ nhấn (\`highlightWord\`): "${cc.highlightWord.trim()}"`);
+    if (cc?.accentColor?.trim()) hintParts.push(`màu nhấn (\`accentColor\`): "${cc.accentColor.trim()}"`);
+
+    styleGuide = `CHẾ ĐỘ TỰ SÁNG TẠO COMPONENT TỪ KHO (AI LÀ NGƯỜI SÁNG TẠO CHÍNH — STRICT CONTEXT MATCH):
+- **NGUYÊN TẮC CỐT LÕI**: AI tự do sáng tạo, phối hợp đa dạng toàn bộ Kho Component (54+ mẫu \`bs-*\`, \`css-*\`, life scenes, \`dynamic_scene\`) VÀ \`customPrimitives[]\` cho từng câu thoại — KHÔNG rập khuôn 1 mẫu duy nhất cho cả bài.
+- **BẮT BUỘC SÁT NGỮ CẢNH (STRICT CONTEXT)**: Mỗi \`variant\`, \`sceneIcon\`, \`title\`, \`labels\` (tự nghĩ 2–3 nhãn súc tích theo đúng câu nói) hoặc \`customPrimitives\` phải phản ánh CHÍNH XÁC ý nghĩa từ vựng / tình huống của cue tại mốc thời gian đó. Tuyệt đối KHÔNG dùng nhãn chung chung vô nghĩa (như "Step 1", "Step 2") hay icon lạc đề.${
+      hintParts.length > 0
+        ? `\n- **Gợi ý tùy chọn từ người dùng** (chỉ áp dụng ở các cue liên quan, không nhồi vào mọi cue nếu lệch ngữ cảnh): ${hintParts.join(', ')}.`
+        : ''
+    }`;
   } else if (isWordReveal || options?.compositionId === 'word-reveal') {
     styleGuide = `PHONG CÁCH WORD-REVEAL (@xun52000 — Kinetic Typography tập trung chữ lớn):
 - Đặt "theme": "${options?.theme ?? 'studio-slate'}" (hoặc "pastel-sunrise" / "soft-lavender" / "mint-breeze" / "warm-paper").
@@ -176,7 +184,9 @@ Bạn có **2 cách tùy biến component** thay vì xuất thẻ lặp lại nh
      + \`{ "shape": "arrow", "x": -60, "y": 25, "x2": 60, "y2": 25, "stroke": "#2563EB", "lineWidth": 5 }\`
      + \`{ "shape": "polygon", "points": [{"x":0,"y":-40},{"x":40,"y":20},{"x":-40,"y":20}], "fill": "#4F46E5" }\`
      + \`{ "shape": "icon", "icon": "sparkles", "x": -220, "y": 15 }\` (chọn \`icon\` trong kho 42 \`sceneIcon\`)
-     + \`{ "shape": "text", "x": 40, "y": -4, "text": "PRO TIP", "fill": "#0F172A", "fontSize": 28, "fontWeight": 800, "align": "center" }\`
+     + \`{ "shape": "text", "x": 40, "y": -4, "text": "PRO TIP", "fill": "#0F172A", "fontSize": 36, "fontWeight": 800, "align": "center" }\`
+
+${TYPOGRAPHY_MOBILE_READABILITY_PROMPT_BLOCK}
    - **Mẫu công thức Bootstrap 5 & Modern CSS chuẩn đẹp (tham khảo phối màu \`#2563EB\`, \`#4F46E5\`, \`#16A34A\`, \`#D97706\`, \`#E11D48\`)**:
      + *Left-Border Callout Card*: card trắng \`shadow: true\` + thanh nhấn dọc \`w: 12\` bên trái \`x: -334\` + badge \`pill\` + \`text\` tiêu đề đậm.
      + *Bootstrap Colored Header + Divider*: \`rect\` nền trắng + \`rect\` header màu phía trên + \`line\` ngăn cách + 2–3 \`pill\` bên dưới.
@@ -192,11 +202,12 @@ Bạn có **2 cách tùy biến component** thay vì xuất thẻ lặp lại nh
    - Họ sơ đồ / 3D / \`dynamic_scene\` (\`staircase_3d\`, \`word_stack\`, \`phrase-icon-split\`, \`split-compare\`, \`triple-card-grid\`)
    - Họ tự thiết kế \`customPrimitives\` (nên tạo ít nhất 1–2 element dùng \`customPrimitives\` may đo riêng cho từ khóa/ngữ cảnh bài học để video không giống khuôn đúc sẵn).
 
-# QUY TẮC DÀN CẢNH TỰ ĐỘNG BẮT BUỘC
-1. **Phủ kín 100% thời lượng**: Từ \`${totalStart}\` đến \`${totalEnd}\`, luôn có ít nhất 1–2 thành phần thị giác đang hiển thị phù hợp với nội dung đang nói (không để màn hình trống > 1.5s).
-2. **Không bao giờ chồng đè**: Trong cùng 1 vùng (B, C, D, hoặc E), phần tử cũ phải có \`end <= start\` của phần tử tiếp theo trong cùng vùng đó.
-3. **Bắt đúng câu ví dụ**: Bất kỳ câu mẫu/cụm từ trọng tâm nào trong transcript (đặc biệt các câu tiếng Anh/ngoại ngữ hoặc câu nằm trong ngoặc) phải xuất hiện trên \`sentence_card\` đúng lúc Audio đọc đến cue đó.
-4. **Định dạng đầu ra**: Chỉ trả về 1 object JSON theo mẫu sau:
+# QUY TẮC DÀN CẢNH TỰ ĐỘNG & CHUYỂN CẢNH MƯỢT BẮT BUỘC
+1. **Phủ kín 100% thời lượng (Mượt, không giật cục)**: Từ \`${totalStart}\` đến \`${totalEnd}\`, luôn có ít nhất 1–2 thành phần thị giác đang hiển thị phù hợp với nội dung đang nói. Hạn chế cắt nhảy đột ngột < 1.2s trừ câu rất ngắn; mỗi phần tử nên kéo dài tối thiểu **1.8s–4.5s** để hiệu ứng trượt/nảy & stagger bên trong Bootstrap/CSS card kịp bung mượt trước khi chuyển sang cảnh mới.
+2. **Đa tầng đồng bộ (Flex Layering)**: Trong cùng 1 cue, đặt \`comparison_strip\` ở Vùng A giữ nhịp tổng thể (có \`activateAt\` khớp từng cue) + \`illustration\` (\`bs-*\` / \`css-*\` / life scene) ở Vùng C + \`sentence_card\` câu ví dụ ở Vùng D. Khi sang cue mới có thể giữ lại Vùng A/B và chỉ chuyển mượt Vùng C/D thay vì thay toàn bộ màn hình cùng 1 tích tắc!
+3. **Không bao giờ chồng đè**: Trong cùng 1 vùng (B, C, D, hoặc E), phần tử cũ phải có \`end <= start\` của phần tử tiếp theo trong cùng vùng đó.
+4. **Bắt đúng ngữ cảnh & câu ví dụ**: Chọn \`variant\` & \`sceneIcon\` khớp **trực tiếp nghĩa từ vựng / ngữ cảnh đời sống** trong câu nói (VD: giá tiền/quần áo → \`shopping-price\`; hỏi lịch sự/nâng cấp câu → \`dialogue-upgrade\` / \`bs-pricing-tier\` / \`css-toggle-switch\`; quy tắc ngữ pháp → \`css-grammar-equation\` / \`css-sticky-note\`; mẹo nhớ nhanh → \`bs-alert-tip\` / \`bs-toast-notify\`). Bất kỳ câu mẫu/cụm từ trọng tâm nào trong transcript phải xuất hiện trên \`sentence_card\` đúng lúc Audio đọc đến cue đó.
+5. **Định dạng đầu ra**: Chỉ trả về 1 object JSON theo mẫu sau:
 
 \`\`\`json
 {

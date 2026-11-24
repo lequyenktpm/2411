@@ -71,21 +71,56 @@ export function estimateElementHalfExtents(el: SceneElement): {
   let baseHalfH = 90;
 
   switch (el.props.kind) {
-    case 'comparison-strip':
-      baseHalfH = 60;
+    case 'comparison-strip': {
+      const items = el.props.items || [];
+      const isLongStack = items.some((i) => i.label.trim().length > 16) || items.length > 4;
+      if (isLongStack && items.length > 0) {
+        const totalH = items.reduce((acc, item, idx) => {
+          const fSize = item.label.length > 78 ? 25 : 28;
+          const lines = Math.min(3, estimateWrappedLineCount(item.label, 630, fSize));
+          const rowH = Math.max(76, lines * Math.round(fSize * 1.26) + 28);
+          return acc + rowH + (idx > 0 ? 12 : 0);
+        }, 0);
+        baseHalfH = Math.ceil(totalH / 2) + 8;
+      } else {
+        baseHalfH = 60;
+      }
       break;
-    case 'topic-pill':
-      baseHalfH = 42;
+    }
+    case 'topic-pill': {
+      const lines = Math.min(3, estimateWrappedLineCount(el.props.text || '', 796, 30));
+      const pillH = lines <= 1 ? 74 : lines * 38 + 32;
+      baseHalfH = Math.ceil(pillH / 2) + 6;
       break;
+    }
     case 'illustration-prop': {
       const variant = el.props.variant;
       const data = el.props.data;
+      const hasNativeLabels =
+        variant === 'flow-diagram' ||
+        variant === 'timeline-track' ||
+        variant === 'tense-timeline' ||
+        variant === 'degree-scale' ||
+        variant === 'phrasal-split' ||
+        variant === 'syllable-stress' ||
+        variant === 'bs-list-group' ||
+        variant === 'bs-pricing-tier' ||
+        variant === 'bs-breadcrumb-path' ||
+        variant === 'css-bento-stats' ||
+        variant === 'css-chat-thread' ||
+        variant === 'css-roadmap-steps' ||
+        variant === 'css-grammar-equation' ||
+        variant === 'bs-badge-cluster' ||
+        variant === 'bs-modal-quiz' ||
+        variant === 'dynamic-scene' ||
+        variant === 'custom-vector';
+
       if (variant === 'flow-diagram') {
         baseHalfH = 118;
       } else if (variant === 'gauge-arc') {
         baseHalfH = 148;
       } else if (variant === 'timeline-track') {
-        baseHalfH = 112;
+        baseHalfH = 122;
       } else if (variant === 'checklist-card') {
         const rows = Math.max(2, Math.min(4, data?.checklist?.length ?? 3));
         baseHalfH = Math.round((86 + rows * 68) / 2);
@@ -106,23 +141,57 @@ export function estimateElementHalfExtents(el: SceneElement): {
         variant === 'degree-scale' ||
         variant === 'idiom-split' ||
         variant === 'phrasal-split' ||
-        variant === 'syllable-stress'
+        variant === 'syllable-stress' ||
+        variant === 'bs-badge-cluster' ||
+        variant === 'css-roadmap-steps' ||
+        variant === 'bs-breadcrumb-path' ||
+        variant === 'bs-list-group'
       ) {
-        baseHalfH = 128;
+        baseHalfH = 144;
       } else if (variant === 'css-browser-mockup') {
-        const speechLen = (data?.speechText || data?.subtitle || '').length;
-        const estLines = Math.min(5, Math.max(2, Math.ceil(speechLen / 52)));
-        baseHalfH = Math.round((256 + (estLines - 2) * 32) / 2);
+        const bodyTxt = data?.speechText || data?.subtitle || '';
+        const bodyFont = bodyTxt.length > 145 ? 30 : 32;
+        const bodyLineH = Math.round(bodyFont * 1.28);
+        const estLines = Math.min(7, Math.max(2, estimateWrappedLineCount(bodyTxt, 760, bodyFont)));
+        const titleLines = Math.min(2, estimateWrappedLineCount(data?.title || 'Reading Context', 760, 34));
+        const cardH = Math.max(250, 90 + titleLines * 42 + estLines * bodyLineH + 38);
+        baseHalfH = Math.ceil(cardH / 2) + 8;
+      } else if (variant === 'bs-progress-meter') {
+        baseHalfH = 116;
+      } else if (variant === 'bs-alert-tip' || variant === 'bs-card-header') {
+        baseHalfH = 152;
       } else {
         baseHalfH = 132;
+      }
+
+      if (!hasNativeLabels && !data?.customPrimitives?.length && data?.labels?.length) {
+        const clean = data.labels.map((l) => l.trim()).filter(Boolean).slice(0, 3);
+        const stripH =
+          clean.length >= 2 && clean.every((l) => l.length <= 13)
+            ? 74
+            : clean.reduce((sum, l, idx) => sum + (l.length > 36 ? 98 : 66) + (idx > 0 ? 10 : 0), 0);
+        if (stripH > 0) {
+          baseHalfH += Math.ceil((stripH + 16) / 2);
+        }
       }
       break;
     }
     case 'sentence-card': {
-      const innerW = Math.max(240, (el.layout.width || 820) - 110);
-      const lines = estimateWrappedLineCount(el.props.text, innerW, 50);
-      const subH = el.props.subtext ? 46 : 0;
-      const cardH = Math.max(148, lines * 66 + subH + 74);
+      const innerW = Math.max(240, (el.layout.width || 820) - 96);
+      const textLen = (el.props.text || '').trim().length;
+      const headFontSize = textLen > 95 ? 36 : textLen > 52 ? 40 : 46;
+      const lineH = Math.round(headFontSize * 1.28);
+      const lines = estimateWrappedLineCount(el.props.text, innerW, headFontSize);
+      const subLines = el.props.subtext
+        ? Math.min(
+            5,
+            el.props.subtext
+              .split(/\r?\n/)
+              .reduce((acc, part) => acc + estimateWrappedLineCount(part, innerW, 30), 0),
+          )
+        : 0;
+      const subH = subLines > 0 ? subLines * 38 + 18 : 0;
+      const cardH = Math.max(156, lines * lineH + subH + 74);
       const badgeExtra = el.props.badge && el.props.badge !== 'none' ? 16 : 0;
       const stampExtra = el.props.stampText ? 20 : 0;
       baseHalfH = Math.ceil((cardH + badgeExtra + stampExtra) / 2);
@@ -305,6 +374,27 @@ export function resolveProjectOverlaps(elements: SceneElement[]): SceneElement[]
       }
     }
 
+    // Recompute actual total height after first shrink; if comparison-strip floor kept sum > availableH,
+    // proportionally tighten non-strip items so no bottom item gets clamped back up onto a predecessor.
+    const scaledTotal = activeIndices.reduce(
+      (acc, idx) => acc + estimateElementBounds(placed[idx]).height,
+      0,
+    );
+    if (scaledTotal > availableH && availableH > 200) {
+      const extraRatio = Math.max(0.56, Math.min(1, availableH / scaledTotal));
+      for (const idx of activeIndices) {
+        const el = placed[idx];
+        const nextScale = Number(((el.layout.scale || 1) * extraRatio).toFixed(3));
+        placed[idx] = {
+          ...el,
+          layout: {
+            ...el.layout,
+            scale: Math.max(0.56, nextScale),
+          },
+        };
+      }
+    }
+
     // Re-stack cleanly top-down inside STAGE_SAFE_TOP..STAGE_SAFE_BOTTOM
     let cursorY = STAGE_SAFE_TOP;
     for (let i = 0; i < activeIndices.length; i++) {
@@ -312,54 +402,60 @@ export function resolveProjectOverlaps(elements: SceneElement[]): SceneElement[]
       const el = placed[idx];
       const { halfH } = estimateElementHalfExtents(el);
       const nextY = Math.round(cursorY + halfH);
-      // Only shift upward if it was pushing down, or shift smoothly to eliminate overlap
       placed[idx] = {
         ...el,
         layout: {
           ...el.layout,
-          y: Math.min(STAGE_SAFE_BOTTOM - halfH, nextY),
+          y: nextY,
         },
       };
-      cursorY = placed[idx].layout.y + halfH + TIGHT_MIN_VERTICAL_GAP;
+      cursorY = nextY + halfH + TIGHT_MIN_VERTICAL_GAP;
     }
   }
 
   // Pass 3: Final safety assertion pass across all time overlaps in case Pass 2 pulled an element
   // into conflict with another companion outside that single sample time
   for (let i = 0; i < placed.length; i++) {
-    const current = placed[i];
-    const curBounds = estimateElementBounds(current);
+    let current = placed[i];
+    let curBounds = estimateElementBounds(current);
+    let maxPrevBottom = -Infinity;
+
     for (let j = 0; j < i; j++) {
       const prev = placed[j];
       if (!intervalsOverlap(current, prev)) continue;
       const prevBounds = estimateElementBounds(prev);
       if (!horizontalOverlap(curBounds, prevBounds)) continue;
       if (curBounds.top < prevBounds.bottom + TIGHT_MIN_VERTICAL_GAP) {
-        const shiftedY = Math.round(prevBounds.bottom + TIGHT_MIN_VERTICAL_GAP + curBounds.halfH);
-        if (shiftedY + curBounds.halfH <= STAGE_SAFE_BOTTOM) {
-          placed[i] = {
-            ...current,
-            layout: { ...current.layout, y: shiftedY },
-          };
-        } else {
-          // Shrink both slightly so they coexist above STAGE_SAFE_BOTTOM
-          const nextScale = Number(Math.max(0.68, (current.layout.scale || 1) * 0.88).toFixed(3));
-          const updated: SceneElement = {
-            ...current,
-            layout: { ...current.layout, scale: nextScale },
-          };
-          const updatedHalfH = estimateElementHalfExtents(updated).halfH;
-          placed[i] = {
-            ...updated,
-            layout: {
-              ...updated.layout,
-              y: Math.min(
-                STAGE_SAFE_BOTTOM - updatedHalfH,
-                Math.round(prevBounds.bottom + TIGHT_MIN_VERTICAL_GAP + updatedHalfH),
-              ),
-            },
-          };
-        }
+        maxPrevBottom = Math.max(maxPrevBottom, prevBounds.bottom);
+      }
+    }
+
+    if (maxPrevBottom > -Infinity) {
+      const targetTop = maxPrevBottom + TIGHT_MIN_VERTICAL_GAP;
+      const shiftedY = Math.round(targetTop + curBounds.halfH);
+      if (shiftedY + curBounds.halfH <= STAGE_SAFE_BOTTOM) {
+        placed[i] = {
+          ...current,
+          layout: { ...current.layout, y: shiftedY },
+        };
+      } else {
+        const roomH = Math.max(60, STAGE_SAFE_BOTTOM - targetTop);
+        const curFullH = Math.max(1, curBounds.halfH * 2);
+        const fitFactor = Math.min(0.9, roomH / curFullH);
+        const nextScale = Number(Math.max(0.44, (current.layout.scale || 1) * fitFactor).toFixed(3));
+        const updated: SceneElement = {
+          ...current,
+          layout: { ...current.layout, scale: nextScale },
+        };
+        const updatedHalfH = estimateElementHalfExtents(updated).halfH;
+        const nextY = Math.round(targetTop + updatedHalfH);
+        placed[i] = {
+          ...updated,
+          layout: {
+            ...updated.layout,
+            y: nextY,
+          },
+        };
       }
     }
   }

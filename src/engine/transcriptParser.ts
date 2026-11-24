@@ -432,4 +432,57 @@ export function refineCuesWithWhisperWords(
   });
 }
 
+export function shiftCuesAndWords(cues: TranscriptCue[], offsetMs: number): TranscriptCue[] {
+  if (!Array.isArray(cues) || cues.length === 0) return [];
+  const shiftSec = offsetMs / 1000;
+  if (Math.abs(shiftSec) < 0.0005) return cues;
+
+  return cues.map((cue) => {
+    const start = Number(Math.max(0, cue.start + shiftSec).toFixed(3));
+    const end = Number(Math.max(start + 0.12, cue.end + shiftSec).toFixed(3));
+    const words =
+      cue.words && cue.words.length > 0
+        ? cue.words.map((w) => {
+            const ws = Number(Math.max(start, w.start + shiftSec).toFixed(3));
+            const we = Number(Math.max(ws + 0.04, Math.min(end, w.end + shiftSec)).toFixed(3));
+            return { ...w, start: ws, end: we };
+          })
+        : interpolateWordTimings(cue.text, start, end);
+    return { ...cue, start, end, words };
+  });
+}
+
+export function adjustCuesTiming(
+  cues: TranscriptCue[],
+  options: {
+    offsetMs?: number;
+    speedFactor?: number;
+    targetDurationSec?: number;
+  },
+): TranscriptCue[] {
+  if (!Array.isArray(cues) || cues.length === 0) return [];
+  const lastEnd = cues.reduce((mx, c) => Math.max(mx, c.end), 0);
+  const rawScale =
+    options.targetDurationSec && options.targetDurationSec > 0.3 && lastEnd > 0.3
+      ? options.targetDurationSec / lastEnd
+      : options.speedFactor ?? 1;
+  const scale = Math.max(0.5, Math.min(2.0, rawScale));
+  const shiftSec = (options.offsetMs ?? 0) / 1000;
+
+  return cues.map((cue) => {
+    const start = Number(Math.max(0, cue.start * scale + shiftSec).toFixed(3));
+    const end = Number(Math.max(start + 0.12, cue.end * scale + shiftSec).toFixed(3));
+    const words =
+      cue.words && cue.words.length > 0
+        ? cue.words.map((w) => {
+            const ws = Number(Math.max(start, w.start * scale + shiftSec).toFixed(3));
+            const we = Number(Math.max(ws + 0.04, Math.min(end, w.end * scale + shiftSec)).toFixed(3));
+            return { ...w, start: ws, end: we };
+          })
+        : interpolateWordTimings(cue.text, start, end);
+    return { ...cue, start, end, words };
+  });
+}
+
+
 

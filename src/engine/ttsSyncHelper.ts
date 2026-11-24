@@ -1,4 +1,5 @@
 import { buildApiKeyHeaders, loadClientApiKeys } from '../utils/apiKeysStore';
+import { cleanDownloadFileName } from './outputNaming';
 import {
   cuesToBlockTranscript,
   cuesToSrt,
@@ -28,6 +29,7 @@ export interface TtsSynthesizeResponse {
   segmentDurations?: number[];
   spokenDurations?: number[];
   pauseDurations?: number[];
+  hasWordBoundaries?: boolean;
   cues?: TranscriptCue[];
   srt?: string;
   vtt?: string;
@@ -415,7 +417,7 @@ export async function synthesizeAudioAndSyncCues(params: {
   let detectedLanguage: string | undefined;
   let whisperAligned = false;
 
-  if (useWhisperAlign && finalCues.length > 0) {
+  if (useWhisperAlign && finalCues.length > 0 && !data.hasWordBoundaries) {
     try {
       params.onProgress?.(74, 'Đang căn nhịp từng từ theo kịch bản (Fast Forced Align)...');
       const alignData = await alignAudioWithProgressJob(
@@ -441,19 +443,18 @@ export async function synthesizeAudioAndSyncCues(params: {
     } catch {
       // Keep exact per-line MP3 durations measured by FFmpeg
     }
+  } else if (data.hasWordBoundaries) {
+    whisperAligned = true;
+    providerUsed = `${providerUsed} (WordBoundary)`;
   }
 
   params.onProgress?.(100, 'Hoàn tất đồng bộ Audio & Sub!');
   const srt = finalCues.length > 0 ? cuesToSrt(finalCues) : data.srt || '';
   const blockTranscript = finalCues.length > 0 ? cuesToBlockTranscript(finalCues) : '';
-  const safeStem =
-    (params.title || 'kineticsub_audio')
-      .trim()
-      .replace(/[^a-zA-Z0-9-_]+/g, '_')
-      .slice(0, 36) || 'kineticsub_audio';
+  const cleanMp3Name = cleanDownloadFileName(params.title || 'KineticSub Audio', 'mp3', 'KineticSub Audio');
   const audioFile = base64ToMp3File(
     data.audioBase64,
-    `${safeStem}.mp3`,
+    cleanMp3Name,
     data.mimeType || 'audio/mpeg',
   );
 
@@ -469,3 +470,84 @@ export async function synthesizeAudioAndSyncCues(params: {
     whisperAligned,
   };
 }
+
+export async function resyncCuesToAudioFile(params: {
+  audioFile: File;
+  cues: TranscriptCue[];
+  alignMode?: 'fast-forced' | 'whisper';
+  lang?: string;
+  whisperModel?: string;
+  onProgress?: (progress: number, stageLabel: string) => void;
+}): Promise<{ cues: TranscriptCue[]; backendUsed: string; srt: string; blockTranscript: string }> {
+  const mode = params.alignMode ?? 'fast-forced';
+  const referenceText = params.cues
+    .map((c) => c.text.trim())
+    .filter(Boolean)
+    .join('\n');
+
+  const alignData = await alignAudioWithProgressJob(
+    {
+      audioFile: params.audioFile,
+      lang: params.lang || 'auto',
+      model: params.whisperModel || 'Xenova/whisper-small',
+      referenceText: referenceText || undefined,
+      alignMode: referenceText ? mode : 'whisper',
+    },
+    params.onProgress,
+  );
+
+  let nextCues: TranscriptCue[] = params.cues;
+  if (Array.isArray(alignData.cues) && alignData.cues.length > 0) {
+    if (params.cues.length > 0 && Array.isArray(alignData.words) && alignData.words.length > 0) {
+      // Map cue [start, end] spans onto alignData.cues when counts match, otherwise map words
+      if (alignData.cues.length === params.cues.length) {
+        nextCues = params.cues.map((orig, idx) => {
+          const ac = alignData.cues![idx];
+          const cueWords = alignData.words!.filter(
+            (w) => w.end > ac.start - 0.1 && w.start < ac.end + 0.1,
+          );
+          const refined = refineCuesWithWhisperWords(
+            [{ ...orig, start: ac.start, end: ac.end }],
+            cueWords,
+          )[0];
+          return refined || { ...orig, start: ac.start, end: ac.end };
+        });
+      } else {
+        // Re-segment words by original cue word count proportionally across detected words
+        const totalAligned = alignData.words.length;
+        const totalOrigWords = Math.max(
+          1,
+          params.cues.reduce((s, c) => s + Math.max(1, c.words.length || c.text.split(/\s+/).length), 0),
+        );
+        let cursorIdx = 0;
+        nextCues = params.cues.map((orig, cIdx) => {
+          const origCount = Math.max(1, orig.words.length || orig.text.split(/\s+/).length);
+          const take =
+            cIdx === params.cues.length - 1
+              ? Math.max(1, totalAligned - cursorIdx)
+              : Math.max(1, Math.round((origCount / totalOrigWords) * totalAligned));
+          const slice = alignData.words!.slice(cursorIdx, Math.min(totalAligned, cursorIdx + take));
+          cursorIdx += slice.length;
+          if (slice.length > 0) {
+            const st = slice[0].start;
+            const en = Math.max(st + 0.25, slice[slice.length - 1].end);
+            return refineCuesWithWhisperWords([{ ...orig, start: st, end: en }], slice)[0] ?? orig;
+          }
+          return orig;
+        });
+      }
+    } else {
+      nextCues = alignData.cues;
+    }
+  } else if (Array.isArray(alignData.words) && alignData.words.length > 0 && params.cues.length > 0) {
+    nextCues = refineCuesWithWhisperWords(params.cues, alignData.words);
+  }
+
+  return {
+    cues: nextCues,
+    backendUsed: alignData.backendUsed || mode,
+    srt: cuesToSrt(nextCues),
+    blockTranscript: cuesToBlockTranscript(nextCues),
+  };
+}
+

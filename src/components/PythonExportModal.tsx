@@ -4,6 +4,7 @@ import {
   generatePythonProjectFiles,
   VideoMakerFileName,
 } from '../engine/pythonGenerator';
+import { cleanDownloadFileName } from '../engine/outputNaming';
 import { LessonProject } from '../engine/types';
 import { buildZipArchive } from '../utils/zipBuilder';
 
@@ -59,7 +60,11 @@ export const PythonExportModal: React.FC<PythonExportModalProps> = ({
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `video_maker_${project.id}.zip`;
+    a.download = cleanDownloadFileName(
+      `${project.title || project.id} Python Code`,
+      'zip',
+      'Video Maker Python',
+    );
     a.click();
     URL.revokeObjectURL(url);
   };

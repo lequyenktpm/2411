@@ -52,6 +52,11 @@ import {
 } from '../engine/mp4Config';
 import { ExportAbortedError, exportProjectToServerDisk } from '../engine/mp4Exporter';
 import {
+  cleanDownloadFileName,
+  cleanOutputTitleStem,
+  TAB_OUTPUT_SUBFOLDERS,
+} from '../engine/outputNaming';
+import {
   cleanReadingWorksheetInput,
   buildReadingWebAiPrompt,
   parseReadingWebAiResponse,
@@ -597,7 +602,7 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
           }}
           className="px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-lg font-mono"
         >
-          <option value="">Thư mục gốc (output/)</option>
+          <option value="">Tự động theo module (Edu Merge / Edu Karaoke / Reading Along)</option>
           {outputFolders.map((folder) => (
             <option key={folder} value={folder}>
               output/{folder}
@@ -611,7 +616,7 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
           type="text"
           value={selectedSavePath}
           onChange={(e) => setSelectedSavePath(e.target.value)}
-          placeholder="Hoặc nhập tên thư mục con (để trống = output/)"
+          placeholder="Để trống = tự vào thư mục con của module trong output/"
           className="px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-lg font-mono"
         />
       </div>
@@ -753,8 +758,8 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
           watermarkOpacity: watermarkOutro.watermarkOpacity,
           outroText,
           outroDuration: watermarkOutro.outroSeconds,
-          outputName: outStem,
-          savePath: selectedSavePath.trim(),
+          outputName: cleanOutputTitleStem(outStem, 'Edu Merged Video'),
+          savePath: selectedSavePath.trim() || TAB_OUTPUT_SUBFOLDERS.merge,
         }),
       });
       const data = await parseApiJson<{
@@ -791,8 +796,10 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
 
     try {
       if (mergeMode === 'single' && mergeVideoFile && mergeAudioFile) {
-        const resolvedName =
-          mergeOutputName.trim() || mergeVideoFile.name.replace(/\.[^.]+$/, '') || 'video_output';
+        const resolvedName = cleanOutputTitleStem(
+          mergeOutputName.trim() || mergeVideoFile.name.replace(/\.[^.]+$/, ''),
+          'Edu Merged Video',
+        );
         const data = await runSingleMergeJob(mergeVideoFile, mergeAudioFile, resolvedName, controller);
         setMergeStatus(
           `Hoàn tất! Đã lưu ${data.fileName} (${data.savedPath})${data.copiedLocal ? ` · Đã lưu thêm vào "${localDirName}"` : ''}`,
@@ -980,8 +987,10 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
             })
           : '');
 
-      const resolvedKmName =
-        kmOutputName.trim() || kmVideoFile.name.replace(/\.[^.]+$/, '') || 'karaoke_output';
+      const resolvedKmName = cleanOutputTitleStem(
+        kmOutputName.trim() || kmVideoFile.name.replace(/\.[^.]+$/, ''),
+        'Edu Karaoke Video',
+      );
       const outroText = [watermarkOutro.outroLine1.trim(), watermarkOutro.outroLine2.trim()]
         .filter(Boolean)
         .join('\n');
@@ -1028,7 +1037,7 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
           musicPreset: kmMusicFile ? 'none' : kmMusicPreset,
           sfxPreset: kmSfxFile ? 'none' : kmSfxPreset,
           outputName: resolvedKmName,
-          savePath: selectedSavePath.trim(),
+          savePath: selectedSavePath.trim() || TAB_OUTPUT_SUBFOLDERS.karaoke,
         }),
       });
       const data = await parseApiJson<{
@@ -1460,8 +1469,7 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
         setReadingTitle(cleanTitle);
       }
 
-      const safeSlug =
-        cleanTitle.replace(/[^a-zA-Z0-9-_]+/g, '_').slice(0, 32) || 'reading_along';
+      const cleanReadingTitle = cleanOutputTitleStem(cleanTitle, 'Reading Along');
       const voiceObj = allReadingVoices.find((v) => v.id === readingVoice);
       const baseLang = voiceObj?.lang || 'en-US';
       const activeIntroText = readingIntroEnabled
@@ -1506,7 +1514,11 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
         });
         if (introRes.audioBase64) {
           partsToConcat.push({
-            file: decodeBase64AudioClip(introRes.audioBase64, `${safeSlug}_intro.mp3`, introRes.mimeType || 'audio/mpeg'),
+            file: decodeBase64AudioClip(
+              introRes.audioBase64,
+              cleanDownloadFileName(`${cleanReadingTitle} Intro`, 'mp3', 'Reading Intro'),
+              introRes.mimeType || 'audio/mpeg',
+            ),
             pauseAfterSec: 0.45,
             role: 'intro',
           });
@@ -1537,7 +1549,11 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
         });
         if (outroRes.audioBase64) {
           partsToConcat.push({
-            file: decodeBase64AudioClip(outroRes.audioBase64, `${safeSlug}_outro.mp3`, outroRes.mimeType || 'audio/mpeg'),
+            file: decodeBase64AudioClip(
+              outroRes.audioBase64,
+              cleanDownloadFileName(`${cleanReadingTitle} Outro`, 'mp3', 'Reading Outro'),
+              outroRes.mimeType || 'audio/mpeg',
+            ),
             pauseAfterSec: 0.45,
             role: 'outro',
           });
@@ -1549,7 +1565,7 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
 
       const combined = await concatAudioFilesWithGaps(
         partsToConcat.map((p) => ({ file: p.file, pauseAfterSec: p.pauseAfterSec })),
-        `${safeSlug}_speech.wav`,
+        cleanDownloadFileName(cleanReadingTitle, 'wav', 'Reading Speech'),
       );
 
       const introIdx = partsToConcat.findIndex((p) => p.role === 'intro');
@@ -1624,7 +1640,7 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
           introEndSec: exactIntroEndSec,
           outroStartSec: outroStartSec ?? metrics.outroStart,
           minTotalDurationSec: metrics.effectiveTotalDuration,
-          outputFileName: `${safeSlug}_reading_mix.wav`,
+          outputFileName: cleanDownloadFileName(cleanReadingTitle, 'wav', 'Reading Along'),
         });
         if (mixed.file) {
           finalAudioFile = mixed.file;
@@ -1794,15 +1810,10 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
         throw new ExportAbortedError();
       }
 
-      const uniqueSuffix = Date.now().toString(36).slice(-5);
-      const baseStem = `${
-        (targetTitle || 'reading_along')
-          .replace(/[^a-zA-Z0-9-_]+/g, '_')
-          .slice(0, 38) || 'reading_along'
-      }_${uniqueSuffix}`;
+      const baseStem = cleanOutputTitleStem(targetTitle, 'Reading Along');
 
       const dummyProject: LessonProject = {
-        id: `reading-along-${uniqueSuffix}`,
+        id: 'reading-along-preview',
         title: targetTitle,
         subtitle: readingTopic,
         theme: 'pastel-sunrise',
@@ -1826,7 +1837,7 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
           fps: readingFps,
         },
         baseStem,
-        selectedSavePath.trim() || undefined,
+        selectedSavePath.trim() || TAB_OUTPUT_SUBFOLDERS.reading,
         {
           signal: controller.signal,
           directoryHandle: localDirHandle || undefined,

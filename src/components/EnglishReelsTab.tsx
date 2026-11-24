@@ -13,6 +13,7 @@ import {
   Film,
   Globe,
   HelpCircle,
+  Image as ImageIcon,
   Loader2,
   Pause,
   Play,
@@ -29,7 +30,9 @@ import {
   renderProjectFrame,
   STAGE_HEIGHT,
   STAGE_WIDTH,
+  subscribeBgImageLoaded,
 } from '../engine/canvasRenderer';
+import { resyncProjectTimingToCues } from '../engine/autoChoreographer';
 import {
   buildEnglishReelsWebAiPrompt,
   buildReelCardsRuleBased,
@@ -53,8 +56,17 @@ import {
   ExportResolutionId,
 } from '../engine/mp4Config';
 import { ExportAbortedError, exportProjectToVideo } from '../engine/mp4Exporter';
+import {
+  cleanDownloadFileName,
+  cleanOutputTitleStem,
+  TAB_OUTPUT_SUBFOLDERS,
+} from '../engine/outputNaming';
 import { FlexibleSceneDocument } from '../engine/scenePlanAdapter';
-import { synthesizeAudioWithProgressJob } from '../engine/ttsSyncHelper';
+import { adjustCuesTiming } from '../engine/transcriptParser';
+import {
+  resyncCuesToAudioFile,
+  synthesizeAudioWithProgressJob,
+} from '../engine/ttsSyncHelper';
 import {
   mixVoiceWithBgmPreset,
   STUDIO_BGM_PRESETS,
@@ -62,12 +74,15 @@ import {
 } from '../engine/audioMixHelper';
 import { cleanReadingWorksheetInput } from '../engine/readingPromptBuilder';
 import {
+  BackgroundFitMode,
+  BackgroundImageConfig,
   CANVAS_THEMES,
   CanvasThemeId,
   IllustrationSceneIcon,
   IllustrationVariant,
   LayoutCompositionId,
   LessonProject,
+  TranscriptCue,
   WatermarkCorner,
   WatermarkOutroConfig,
 } from '../engine/types';
@@ -79,6 +94,7 @@ import { ApiKeyInlineControl } from './ApiKeyInlineControl';
 import { TtsProviderInfo } from './AudioSubtitleStudioModal';
 import { emitOutputUpdated } from './GlobalOutputPanel';
 import { buildApiKeyHeaders, useClientApiKeys } from '../utils/apiKeysStore';
+import { resizeImageFileToStageDataUrl } from '../utils/imageResize';
 
 interface EnglishReelsTabProps {
   onSendToStudio: (project: LessonProject, audioFile: File | null) => void;
@@ -164,10 +180,15 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
   const [ttsRate, setTtsRate] = useState(1.0);
   const [selectedTheme, setSelectedTheme] = useState<CanvasThemeId>('pastel-sunrise');
   const [selectedComposition, setSelectedComposition] = useState<LayoutCompositionId>('story-scenes');
+  const [backgroundImage, setBackgroundImage] = useState<BackgroundImageConfig | undefined>(undefined);
+  const [isProcessingBg, setIsProcessingBg] = useState(false);
+  const [bgUploadError, setBgUploadError] = useState<string | null>(null);
+  const [bgAssetVersion, setBgAssetVersion] = useState(0);
 
   const [isGeneratingAudio, setIsGeneratingAudio] = useState(false);
   const [isGeneratingAiCards, setIsGeneratingAiCards] = useState(false);
   const [isPreviewingVoice, setIsPreviewingVoice] = useState(false);
+  const [isResyncingReels, setIsResyncingReels] = useState(false);
   const [ttsProgress, setTtsProgress] = useState(0);
   const [ttsStageLabel, setTtsStageLabel] = useState('');
   const [studioError, setStudioError] = useState<string | null>(null);
@@ -191,6 +212,9 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
   const [generatedAudioUrl, setGeneratedAudioUrl] = useState<string | null>(null);
   const [generatedDurations, setGeneratedDurations] = useState<number[] | undefined>(undefined);
   const [generatedTimings, setGeneratedTimings] = useState<ReelCardTimingMeta[] | undefined>(undefined);
+  const [customSyncedCues, setCustomSyncedCues] = useState<TranscriptCue[] | null>(null);
+  const [syncedTimingOffsetMs, setSyncedTimingOffsetMs] = useState(0);
+  const [syncedSpeedFactor, setSyncedSpeedFactor] = useState(1);
   const [synthesizedAudioSig, setSynthesizedAudioSig] = useState<string>('');
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
   const [videoTime, setVideoTime] = useState(0.5);
@@ -239,10 +263,39 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
   );
 
   const videoCanvasRef = useRef<HTMLCanvasElement>(null);
+  const bgInputRef = useRef<HTMLInputElement>(null);
   const lessonAudioRef = useRef<HTMLAudioElement>(null);
   const videoRafRef = useRef<number | null>(null);
   const lastRafTsRef = useRef<number | null>(null);
   const exportAbortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    return subscribeBgImageLoaded(() => setBgAssetVersion((v) => v + 1));
+  }, []);
+
+  const handleUploadBgImage = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const inputEl = e.currentTarget;
+    const file = inputEl.files?.[0];
+    if (!file) return;
+    setBgUploadError(null);
+    setIsProcessingBg(true);
+    try {
+      const config = await resizeImageFileToStageDataUrl(file, {
+        fit: backgroundImage?.fit ?? 'cover',
+        scrimOpacity: backgroundImage?.scrimOpacity ?? 0.22,
+      });
+      setBackgroundImage(config);
+    } catch (err) {
+      setBgUploadError(
+        err instanceof Error
+          ? err.message
+          : 'Không thể đọc file ảnh nền. Hãy thử file PNG, JPG hoặc WebP.',
+      );
+    } finally {
+      inputEl.value = '';
+      setIsProcessingBg(false);
+    }
+  };
 
   const { keys: clientKeys } = useClientApiKeys();
 
@@ -297,36 +350,57 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
 
   const vectorCatalog = useMemo(() => getEffectiveVectorCatalog(), []);
 
-  const previewProject = useMemo(
-    () =>
-      reelCardsToLessonProject(cards, {
-        title: lessonTitle,
-        theme: selectedTheme,
-        compositionId: sceneJsonOverride ? undefined : selectedComposition,
-        cardDurationsSec:
-          generatedDurations && generatedDurations.length === cards.length
-            ? generatedDurations
-            : undefined,
-        cardTimings:
-          generatedTimings && generatedTimings.length === cards.length
-            ? generatedTimings
-            : undefined,
-        audioFileName: generatedAudioFile?.name,
-        sceneJsonOverride,
-        watermark: watermarkConfig,
-      }),
-    [
-      cards,
-      lessonTitle,
-      selectedTheme,
-      selectedComposition,
-      generatedDurations,
-      generatedTimings,
-      generatedAudioFile?.name,
+  const previewProject = useMemo(() => {
+    const baseProj = reelCardsToLessonProject(cards, {
+      title: lessonTitle,
+      theme: selectedTheme,
+      targetLang,
+      backgroundImage,
+      compositionId: sceneJsonOverride ? undefined : selectedComposition,
+      cardDurationsSec:
+        generatedDurations && generatedDurations.length === cards.length
+          ? generatedDurations
+          : undefined,
+      cardTimings:
+        generatedTimings && generatedTimings.length === cards.length
+          ? generatedTimings
+          : undefined,
+      audioFileName: generatedAudioFile?.name,
       sceneJsonOverride,
-      watermarkConfig,
-    ],
-  );
+      watermark: watermarkConfig,
+    });
+    if (
+      !customSyncedCues &&
+      syncedTimingOffsetMs === 0 &&
+      Math.abs(syncedSpeedFactor - 1) < 0.001
+    ) {
+      return baseProj;
+    }
+    const sourceCues =
+      customSyncedCues && customSyncedCues.length === baseProj.cues.length
+        ? customSyncedCues
+        : baseProj.cues;
+    const adjusted = adjustCuesTiming(sourceCues, {
+      offsetMs: syncedTimingOffsetMs,
+      speedFactor: syncedSpeedFactor,
+    });
+    return resyncProjectTimingToCues(baseProj, adjusted, { resyncVisuals: true });
+  }, [
+    cards,
+    lessonTitle,
+    selectedTheme,
+    targetLang,
+    backgroundImage,
+    selectedComposition,
+    generatedDurations,
+    generatedTimings,
+    generatedAudioFile?.name,
+    sceneJsonOverride,
+    watermarkConfig,
+    customSyncedCues,
+    syncedTimingOffsetMs,
+    syncedSpeedFactor,
+  ]);
 
   useEffect(() => {
     setVideoTime((prev) => Math.min(prev, Math.max(0.1, previewProject.duration)));
@@ -338,10 +412,16 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
+    let cancelled = false;
     void ensureProjectAssetsLoaded(previewProject).then(() => {
-      renderProjectFrame(ctx, previewProject, videoTime, null);
+      if (!cancelled) {
+        renderProjectFrame(ctx, previewProject, videoTime, null);
+      }
     });
-  }, [previewProject, videoTime, previewViewMode]);
+    return () => {
+      cancelled = true;
+    };
+  }, [previewProject, videoTime, previewViewMode, bgAssetVersion]);
 
   useEffect(() => {
     if (!isVideoPlaying) {
@@ -464,12 +544,15 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
     setSynthesizedAudioSig('');
     setGeneratedDurations(undefined);
     setGeneratedTimings(undefined);
+    setCustomSyncedCues(null);
+    setSyncedTimingOffsetMs(0);
+    setSyncedSpeedFactor(1);
   };
 
   const handleApplyPastedAiJson = () => {
     setAiJsonError(null);
     setAiJsonNotice(null);
-    const parsed = parseEnglishReelsAiJson(pastedAiJson);
+    const parsed = parseEnglishReelsAiJson(pastedAiJson, { targetLang });
     if (!parsed) {
       setAiJsonError(
         'Không đọc được JSON định dạng chuẩn English Reels / KineticSub. Hãy copy toàn bộ đoạn JSON AI trả về.',
@@ -723,8 +806,7 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
       throw new Error(data?.error || 'Không thể tạo audio TTS từ server.');
     }
 
-    const safeSlug = lessonTitle.replace(/[^a-zA-Z0-9-_]+/g, '_').slice(0, 32) || 'english_reels';
-    const rawFileName = `${safeSlug}.mp3`;
+    const rawFileName = cleanDownloadFileName(lessonTitle, 'mp3', 'English Reels');
     const rawAudioFile = base64ToMp3File(data.audioBase64, rawFileName);
 
     const segDurs: number[] = Array.isArray(data.segmentDurations) ? data.segmentDurations : [];
@@ -769,6 +851,8 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
     const proj = reelCardsToLessonProject(cards, {
       title: lessonTitle,
       theme: selectedTheme,
+      targetLang,
+      backgroundImage,
       compositionId: sceneJsonOverride ? undefined : selectedComposition,
       cardDurationsSec: durations,
       cardTimings: timings,
@@ -776,6 +860,27 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
       sceneJsonOverride,
       watermark: watermarkConfig,
     });
+
+    // If Edge TTS returned real WordBoundary cues matching project cues, refine spoken word timings
+    let syncedProj: LessonProject = proj;
+    if (data.hasWordBoundaries && Array.isArray(data.cues) && data.cues.length > 0 && data.cues.length === proj.cues.length) {
+      const mergedCues = proj.cues.map((orig, idx) => {
+        const wc = data.cues![idx];
+        if (wc && Array.isArray(wc.words) && wc.words.length > 0) {
+          return {
+            ...orig,
+            words: wc.words.map((w) => ({ ...w })),
+          };
+        }
+        return orig;
+      });
+      syncedProj = resyncProjectTimingToCues(proj, mergedCues, { resyncVisuals: false });
+      setCustomSyncedCues(syncedProj.cues);
+    } else {
+      setCustomSyncedCues(null);
+    }
+    setSyncedTimingOffsetMs(0);
+    setSyncedSpeedFactor(1);
 
     let finalAudioFile: File = rawAudioFile;
     if (bgmPreset !== 'none' && bgmVolume > 0) {
@@ -786,8 +891,8 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
         bgmVolume,
         speechWindows,
         outroStartSec,
-        minTotalDurationSec: proj.duration,
-        outputFileName: `${safeSlug}_bgm.wav`,
+        minTotalDurationSec: syncedProj.duration,
+        outputFileName: cleanDownloadFileName(lessonTitle, 'wav', 'English Reels'),
       });
       if (mixed.file) {
         finalAudioFile = mixed.file;
@@ -804,11 +909,41 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
     setGeneratedTimings(timings);
     setSynthesizedAudioSig(signatureAtStart);
 
-    const syncedProj: LessonProject = {
-      ...proj,
+    syncedProj = {
+      ...syncedProj,
       audioFileName: finalAudioFile.name,
     };
     return { audioFile: finalAudioFile, durations, timings, project: syncedProj };
+  };
+
+  const handleResyncReelsAudio = async () => {
+    if (!generatedAudioFile || isResyncingReels) return;
+    setStudioError(null);
+    setIsResyncingReels(true);
+    setTtsProgress(10);
+    setTtsStageLabel('Đang khớp lại Sub & Karaoke với Audio Reels...');
+    try {
+      const res = await resyncCuesToAudioFile({
+        audioFile: generatedAudioFile,
+        cues: previewProject.cues,
+        alignMode: 'fast-forced',
+        lang: selectedVoiceLang,
+        onProgress: (pct, lbl) => {
+          setTtsProgress(pct);
+          setTtsStageLabel(lbl);
+        },
+      });
+      setCustomSyncedCues(res.cues);
+      setSyncedTimingOffsetMs(0);
+      setSyncedSpeedFactor(1);
+      setExportNotice(`Đã khớp lại ${res.cues.length > 0 ? `${res.cues.length} ` : ''}mốc Sub & Karaoke theo Audio (${res.backendUsed})!`);
+    } catch (err) {
+      setStudioError(err instanceof Error ? err.message : 'Lỗi đồng bộ lại Sub & Karaoke.');
+    } finally {
+      setIsResyncingReels(false);
+      setTtsProgress(0);
+      setTtsStageLabel('');
+    }
   };
 
   const handleGeneratePreviewVideoAudio = async () => {
@@ -858,9 +993,7 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
         throw new ExportAbortedError();
       }
 
-      const safeSlug =
-        lessonTitle.replace(/[^a-zA-Z0-9-_]+/g, '_').slice(0, 32) || 'english_reels';
-      const uniqueExportBase = `${safeSlug}_reels_${Date.now().toString(36).slice(-5)}`;
+      const cleanExportBase = cleanOutputTitleStem(lessonTitle, 'English Reels');
 
       const result = await exportProjectToVideo(
         targetProject,
@@ -877,8 +1010,9 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
         },
         {
           signal: controller.signal,
-          customFileBase: uniqueExportBase,
+          customFileBase: cleanExportBase,
           alsoSaveToServerOutput: true,
+          savePath: TAB_OUTPUT_SUBFOLDERS.reels,
           sourceTab: 'English Reels',
         },
       );
@@ -920,7 +1054,7 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
         throw new Error(data?.error || 'Gemini không trả về kết quả hợp lệ.');
       }
       setPastedAiJson(data.text);
-      const parsed = parseEnglishReelsAiJson(data.text);
+      const parsed = parseEnglishReelsAiJson(data.text, { targetLang });
       if (!parsed) {
         throw new Error('JSON AI trả về chưa khớp schema cards.');
       }
@@ -1096,8 +1230,22 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
                   Bản dịch mục tiêu
                 </label>
                 <select
+                  aria-label="Bản dịch mục tiêu"
                   value={targetLang}
-                  onChange={(e) => setTargetLang(e.target.value)}
+                  onChange={(e) => {
+                    const nextLang = e.target.value;
+                    setTargetLang(nextLang);
+                    if (!pastedAiJson.trim() && !sceneJsonOverride) {
+                      const cleaned = cleanReadingWorksheetInput(rawText, lessonTitle);
+                      const built = buildReelCardsRuleBased(rawText, {
+                        title: cleaned.title || lessonTitle,
+                        mode,
+                        targetLang: nextLang,
+                      });
+                      setCards(built.cards);
+                      invalidateSynthesizedAudio();
+                    }
+                  }}
                   className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-lg"
                 >
                   <option value="Tiếng Việt">Dịch sang Tiếng Việt</option>
@@ -1754,23 +1902,113 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
                   {videoTime.toFixed(1)}s / {previewProject.duration.toFixed(1)}s
                 </span>
               </div>
+
+              {/* Audio <-> Sub/Karaoke Resync & Offset Controls for Reels Video */}
+              <div className="p-2 rounded-lg bg-slate-50 border border-slate-200/80 flex flex-wrap items-center justify-between gap-1.5 text-[10px]">
+                <div className="flex items-center gap-1">
+                  {generatedAudioFile && (
+                    <button
+                      type="button"
+                      disabled={isResyncingReels || isGeneratingAudio}
+                      onClick={() => void handleResyncReelsAudio()}
+                      className="inline-flex items-center gap-1 px-2 py-1 font-semibold text-white bg-indigo-600 rounded hover:bg-indigo-700 disabled:opacity-50"
+                      title="Căn chỉnh lại từng mốc Sub & Karaoke khớp đúng audio vừa tạo"
+                    >
+                      {isResyncingReels ? (
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                      ) : (
+                        <Sparkles className="w-3 h-3" />
+                      )}
+                      <span>Khớp lại Sub/Karaoke</span>
+                    </button>
+                  )}
+                  <span className="text-slate-600 font-medium">
+                    Độ trễ: {syncedTimingOffsetMs > 0 ? `+${syncedTimingOffsetMs}` : syncedTimingOffsetMs}ms · {syncedSpeedFactor.toFixed(2)}x
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setSyncedTimingOffsetMs((v) => v - 100)}
+                    className="px-1.5 py-0.5 font-mono bg-white border border-slate-200 rounded hover:bg-slate-100"
+                  >
+                    -100ms
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSyncedTimingOffsetMs((v) => v + 100)}
+                    className="px-1.5 py-0.5 font-mono bg-white border border-slate-200 rounded hover:bg-slate-100"
+                  >
+                    +100ms
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSyncedSpeedFactor((v) => Number(Math.max(0.7, v - 0.05).toFixed(2)))}
+                    className="px-1.5 py-0.5 font-mono bg-white border border-slate-200 rounded hover:bg-slate-100"
+                    title="Karaoke nhanh hơn 5%"
+                  >
+                    Nhanh hơn
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSyncedSpeedFactor((v) => Number(Math.min(1.4, v + 0.05).toFixed(2)))}
+                    className="px-1.5 py-0.5 font-mono bg-white border border-slate-200 rounded hover:bg-slate-100"
+                    title="Karaoke chậm lại 5%"
+                  >
+                    Chậm lại
+                  </button>
+                  {(syncedTimingOffsetMs !== 0 || syncedSpeedFactor !== 1 || customSyncedCues) && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCustomSyncedCues(null);
+                        setSyncedTimingOffsetMs(0);
+                        setSyncedSpeedFactor(1);
+                      }}
+                      className="px-1.5 py-0.5 font-medium text-indigo-700 bg-indigo-50 border border-indigo-200 rounded"
+                    >
+                      Đặt lại
+                    </button>
+                  )}
+                </div>
+              </div>
             </div>
           ) : (
             activeCard && (
               <div
-                className="mx-auto w-full max-w-[290px] aspect-[9/16] rounded-[24px] p-5 flex flex-col justify-between border border-slate-200 shadow-sm"
+                className="relative overflow-hidden mx-auto w-full max-w-[290px] aspect-[9/16] rounded-[24px] p-5 flex flex-col justify-between border border-slate-200 shadow-sm"
                 style={{
                   background: `linear-gradient(180deg, ${CANVAS_THEMES[selectedTheme]?.bgTop || '#F5F3FF'} 0%, ${CANVAS_THEMES[selectedTheme]?.bgBottom || '#FFF5EB'} 100%)`,
                   color: CANVAS_THEMES[selectedTheme]?.isDark ? '#F8FAFC' : '#0F172A',
                 }}
               >
-                <div className="flex justify-center pt-2">
+                {backgroundImage && (
+                  <>
+                    <img
+                      src={backgroundImage.dataUrl}
+                      alt="Ảnh nền xem trước thẻ"
+                      data-testid="reels-card-bg-image"
+                      className="absolute inset-0 w-full h-full pointer-events-none"
+                      style={{
+                        objectFit: backgroundImage.fit === 'contain' ? 'contain' : 'cover',
+                      }}
+                    />
+                    <div
+                      className="absolute inset-0 pointer-events-none"
+                      style={{
+                        backgroundColor: `rgba(15, 23, 42, ${backgroundImage.scrimOpacity ?? 0.22})`,
+                      }}
+                    />
+                  </>
+                )}
+
+                <div className="relative z-10 flex justify-center pt-2">
                   <span className="px-3 py-1 text-[11px] font-bold tracking-wide bg-indigo-100 text-indigo-800 rounded-lg">
                     {activeCard.badge || activeCard.type.toUpperCase()}
                   </span>
                 </div>
 
-                <div className="bg-white text-slate-900 rounded-2xl p-4 shadow-sm border border-slate-200/80 space-y-2.5 text-center">
+                <div className="relative z-10 bg-white/95 text-slate-900 rounded-2xl p-4 shadow-sm border border-slate-200/80 space-y-2.5 text-center">
                   {activeCard.type === 'vocab' && activeCard.title !== activeCard.content && (
                     <div className="text-base font-extrabold text-indigo-700">{activeCard.title}</div>
                   )}
@@ -1814,7 +2052,7 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
                   )}
                 </div>
 
-                <div className="flex flex-col items-center gap-2 pb-1">
+                <div className="relative z-10 flex flex-col items-center gap-2 pb-1">
                   <button
                     type="button"
                     disabled={isPreviewingVoice}
@@ -2084,8 +2322,12 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
                   Bố cục KineticSub
                 </label>
                 <select
+                  aria-label="Bố cục KineticSub"
                   value={selectedComposition}
-                  onChange={(e) => setSelectedComposition(e.target.value as LayoutCompositionId)}
+                  onChange={(e) => {
+                    setSelectedComposition(e.target.value as LayoutCompositionId);
+                    setSceneJsonOverride(null);
+                  }}
                   className="w-full px-2 py-1.5 text-xs bg-white border border-slate-200 rounded-lg"
                 >
                   {LAYOUT_COMPOSITIONS.map((c) => (
@@ -2096,6 +2338,85 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
                 </select>
               </div>
             </div>
+
+            {/* Background Image Upload (Auto-Resize 9:16) */}
+            <div className="pt-1 border-t border-slate-200/80 flex flex-wrap items-center justify-between gap-2">
+              <input
+                ref={bgInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(e) => void handleUploadBgImage(e)}
+              />
+              <button
+                type="button"
+                disabled={isExportingVideo || isProcessingBg}
+                onClick={() => bgInputRef.current?.click()}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-100 disabled:opacity-50"
+              >
+                <ImageIcon className="w-3.5 h-3.5 text-indigo-600" />
+                <span>
+                  {isProcessingBg
+                    ? 'Đang resize 9:16...'
+                    : backgroundImage
+                      ? `Ảnh nền: ${backgroundImage.fileName || 'Đã nạp'}`
+                      : 'Tải ảnh nền (Tự resize 9:16)'}
+                </span>
+              </button>
+
+              {backgroundImage && (
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setBackgroundImage((prev) =>
+                        prev
+                          ? {
+                              ...prev,
+                              fit: (prev.fit === 'contain' ? 'cover' : 'contain') as BackgroundFitMode,
+                            }
+                          : undefined,
+                      )
+                    }
+                    className="px-2 py-1 text-[10px] font-semibold bg-white border border-slate-200 rounded text-slate-700 hover:bg-slate-50"
+                    title="Đổi chế độ phủ khung 9:16"
+                  >
+                    {backgroundImage.fit === 'contain' ? 'Vừa khung' : 'Phủ đầy'}
+                  </button>
+                  <input
+                    type="range"
+                    aria-label="Độ tối lớp phủ ảnh nền Reels"
+                    min={0}
+                    max={0.7}
+                    step={0.05}
+                    value={backgroundImage.scrimOpacity ?? 0.22}
+                    onChange={(e) =>
+                      setBackgroundImage((prev) =>
+                        prev ? { ...prev, scrimOpacity: Number(e.target.value) } : undefined,
+                      )
+                    }
+                    title="Làm dịu ảnh nền để chữ nổi rõ hơn"
+                    className="w-16 accent-indigo-600 h-1"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setBgUploadError(null);
+                      setBackgroundImage(undefined);
+                    }}
+                    aria-label="Xóa ảnh nền Reels"
+                    className="p-1 text-slate-400 hover:text-red-600 rounded"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
+            </div>
+            {bgUploadError && (
+              <p className="text-[11px] text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-2.5 py-1.5">
+                {bgUploadError}
+              </p>
+            )}
             <div className="grid grid-cols-3 gap-2 pt-1 border-t border-slate-200/80">
               <div>
                 <label className="block text-[10px] font-semibold text-slate-600 mb-1">
@@ -2143,7 +2464,7 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
             </div>
           </div>
 
-          {(isGeneratingAudio || isPreviewingVoice) && (
+          {(isGeneratingAudio || isPreviewingVoice || isResyncingReels) && (
             <div className="p-2.5 rounded-lg bg-indigo-50 border border-indigo-200 space-y-1.5">
               <div className="flex items-center justify-between text-[11px] font-medium text-indigo-900">
                 <span className="truncate">{ttsStageLabel || 'Đang tổng hợp Audio TTS...'}</span>

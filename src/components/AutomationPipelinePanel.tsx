@@ -18,6 +18,7 @@ import {
   Volume2,
 } from 'lucide-react';
 import { buildSceneGenerationPrompt } from '../engine/aiPromptBuilder';
+import { cleanDownloadFileName } from '../engine/outputNaming';
 import {
   fetchTtsVoicesCatalog,
   synthesizeAudioAndSyncCues,
@@ -72,7 +73,9 @@ export type PresetId = 'jp-en' | 'water' | 'ed' | '3d' | 'xun';
 interface AutomationPipelinePanelProps {
   project: LessonProject;
   audioUrl?: string | null;
+  audioFile?: File | null;
   audioFileName?: string;
+  audioDurationSec?: number | null;
   currentTime: number;
   isExportingVideo: boolean;
   exportProgress: number;
@@ -90,6 +93,21 @@ interface AutomationPipelinePanelProps {
   onClearAudio: () => void;
   onApplyTranscript: (cues: TranscriptCue[], title: string) => void;
   onApplyAudioAndCues?: (audioFile: File | null, cues: TranscriptCue[], title?: string) => void;
+  onResyncCuesToAudio?: (
+    mode: 'fast-forced' | 'whisper',
+    options?: { resyncVisuals?: boolean; onProgress?: (pct: number, label: string) => void },
+  ) => Promise<{
+    cueCount: number;
+    backendUsed: string;
+    blockTranscript: string;
+    srt: string;
+  } | null>;
+  onAdjustTiming?: (adjust: {
+    offsetMs?: number;
+    speedFactor?: number;
+    targetDurationSec?: number;
+    resyncVisuals?: boolean;
+  }) => void;
   onApplyScenePlan: (
     words: WordTiming[],
     plan: ScenePlanDocument,
@@ -111,7 +129,9 @@ interface AutomationPipelinePanelProps {
 export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = ({
   project,
   audioUrl,
+  audioFile,
   audioFileName,
+  audioDurationSec,
   currentTime,
   isExportingVideo,
   exportProgress,
@@ -129,6 +149,8 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
   onClearAudio,
   onApplyTranscript,
   onApplyAudioAndCues,
+  onResyncCuesToAudio,
+  onAdjustTiming,
   onApplyScenePlan,
   onApplyAndRenderVideo,
   onSeek,
@@ -150,7 +172,7 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
     title: '',
     subtitle: '',
     speechText: '',
-    labels: ['Step 1', 'Step 2', 'Step 3'],
+    labels: [],
     highlightWord: '',
     accentColor: '#4F46E5',
     showStrip: true,
@@ -189,6 +211,9 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
   const [inlineTtsStageLabel, setInlineTtsStageLabel] = useState('');
   const [inlineTtsNotice, setInlineTtsNotice] = useState<string | null>(null);
   const [inlineGeneratedSrt, setInlineGeneratedSrt] = useState<string | null>(null);
+  const [isResyncingTiming, setIsResyncingTiming] = useState(false);
+  const [resyncProgress, setResyncProgress] = useState(0);
+  const [resyncStageLabel, setResyncStageLabel] = useState('');
 
   const audioInputRef = useRef<HTMLInputElement>(null);
   const transcriptInputRef = useRef<HTMLInputElement>(null);
@@ -397,7 +422,7 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
         }
       }
       setInlineTtsNotice(
-        `Đã xuất Audio (${res.durationSec.toFixed(1)}s · ${res.providerUsed}) và tự đồng bộ lại toàn bộ ${res.cues.length} mốc Sub khớp 100% với Audio${res.whisperAligned ? ' (đã căn từng từ bằng Whisper)' : ''}.`,
+        `Đã xuất Audio (${res.durationSec.toFixed(1)}s · ${res.providerUsed}) và tự đồng bộ lại toàn bộ ${res.cues.length} mốc Sub khớp 100% với Audio${res.whisperAligned ? ' (đã căn từng từ)' : ''}.`,
       );
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Không thể xuất Audio TTS từ Sub.');
@@ -405,6 +430,41 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
       setIsGeneratingInlineAudio(false);
       setInlineTtsProgress(0);
       setInlineTtsStageLabel('');
+    }
+  };
+
+  const handleRunResync = async (mode: 'fast-forced' | 'whisper') => {
+    if (!onResyncCuesToAudio || isResyncingTiming) return;
+    setErrorMsg(null);
+    setInlineTtsNotice(null);
+    setIsResyncingTiming(true);
+    setResyncProgress(6);
+    setResyncStageLabel(
+      mode === 'fast-forced'
+        ? 'Đang khớp nhịp Audio ↔ Sub & Karaoke (Fast Forced Align)...'
+        : 'Đang phân tích giọng nói bằng Whisper AI để khớp Sub...',
+    );
+    try {
+      const res = await onResyncCuesToAudio(mode, {
+        resyncVisuals: true,
+        onProgress: (pct, lbl) => {
+          setResyncProgress(pct);
+          setResyncStageLabel(lbl);
+        },
+      });
+      if (res) {
+        if (res.blockTranscript) setRawTranscript(res.blockTranscript);
+        if (res.srt) setInlineGeneratedSrt(res.srt);
+        setInlineTtsNotice(
+          `Đã khớp lại ${res.cueCount} mốc Sub & Karaoke theo Audio (${res.backendUsed}).`,
+        );
+      }
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Không thể khớp lại timestamp theo Audio.');
+    } finally {
+      setIsResyncingTiming(false);
+      setResyncProgress(0);
+      setResyncStageLabel('');
     }
   };
 
@@ -800,7 +860,11 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
                     <audio controls src={audioUrl} className="flex-1 min-w-[200px] h-8" />
                     <a
                       href={audioUrl}
-                      download={audioFileName || 'kineticsub_audio.mp3'}
+                      download={cleanDownloadFileName(
+                        customTitle || project.title || audioFileName || 'Audio',
+                        'mp3',
+                        'Audio',
+                      )}
                       className="inline-flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-semibold text-emerald-700 bg-white border border-emerald-200 rounded-lg hover:bg-emerald-50"
                     >
                       <Download className="w-3 h-3" />
@@ -816,7 +880,11 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
                           const u = URL.createObjectURL(blob);
                           const a = document.createElement('a');
                           a.href = u;
-                          a.download = `${(customTitle || 'subtitles').replace(/[^a-zA-Z0-9-_]+/g, '_')}.srt`;
+                          a.download = cleanDownloadFileName(
+                            customTitle || project.title || 'Subtitles',
+                            'srt',
+                            'Subtitles',
+                          );
                           a.click();
                           setTimeout(() => URL.revokeObjectURL(u), 3000);
                         }}
@@ -825,6 +893,132 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
                         <Download className="w-3 h-3" />
                         <span>Tải .SRT mới</span>
                       </button>
+                    )}
+                  </div>
+                )}
+
+                {/* Audio ↔ Subtitle / Karaoke Resync & Fine-Tune Bar */}
+                {(audioFile || project.cues.length > 0) && (onResyncCuesToAudio || onAdjustTiming) && (
+                  <div className="pt-2 border-t border-slate-200/80 space-y-2">
+                    {(() => {
+                      const cuesEnd = project.cues.reduce((mx, c) => Math.max(mx, c.end), 0);
+                      const driftSec =
+                        audioDurationSec && cuesEnd > 0 ? audioDurationSec - cuesEnd : 0;
+                      const hasNoticeableDrift = Math.abs(driftSec) > 0.8;
+                      return (
+                        <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                          <span className="font-semibold text-slate-700">
+                            Khớp Sub &amp; tốc độ Karaoke với Audio
+                          </span>
+                          <span
+                            className={`font-mono tabular-nums ${
+                              hasNoticeableDrift ? 'text-amber-700 font-semibold' : 'text-slate-500'
+                            }`}
+                          >
+                            {audioDurationSec
+                              ? `Audio: ${audioDurationSec.toFixed(1)}s · Sub: ${cuesEnd.toFixed(1)}s`
+                              : `Sub kết thúc: ${cuesEnd.toFixed(1)}s`}
+                            {hasNoticeableDrift
+                              ? ` (lệch ${driftSec > 0 ? '+' : ''}${driftSec.toFixed(1)}s)`
+                              : ''}
+                          </span>
+                        </div>
+                      );
+                    })()}
+
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {audioFile && onResyncCuesToAudio && (
+                        <>
+                          <button
+                            type="button"
+                            disabled={isResyncingTiming || isGeneratingInlineAudio}
+                            onClick={() => void handleRunResync('fast-forced')}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold text-white bg-indigo-600 rounded-md hover:bg-indigo-700 disabled:opacity-50"
+                            title="Dùng cho Audio AI / đọc đúng kịch bản (nhanh dưới 0.5s)"
+                          >
+                            {isResyncingTiming ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <Sparkles className="w-3 h-3" />
+                            )}
+                            <span>Khớp nhanh Audio ↔ Sub</span>
+                          </button>
+                          <button
+                            type="button"
+                            disabled={isResyncingTiming || isGeneratingInlineAudio}
+                            onClick={() => void handleRunResync('whisper')}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-md hover:bg-indigo-100 disabled:opacity-50"
+                            title="Dùng khi audio thu ngoài / lệch lời / cần nhận diện từng từ bằng AI"
+                          >
+                            <Mic className="w-3 h-3" />
+                            <span>Khớp bằng Whisper AI</span>
+                          </button>
+                        </>
+                      )}
+
+                      {onAdjustTiming && audioDurationSec && audioDurationSec > 0.5 && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onAdjustTiming({
+                              targetDurationSec: audioDurationSec,
+                              resyncVisuals: true,
+                            })
+                          }
+                          className="px-2 py-1 text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-md hover:bg-emerald-100"
+                          title="Co giãn đều toàn bộ Sub & Karaoke khớp tổng thời lượng file Audio"
+                        >
+                          Khớp đúng {audioDurationSec.toFixed(1)}s Audio
+                        </button>
+                      )}
+
+                      {onAdjustTiming && (
+                        <div className="flex flex-wrap items-center gap-1 ml-auto">
+                          <span className="text-[10px] text-slate-500 mr-0.5">Dịch mốc:</span>
+                          {([-200, -50, 50, 200] as const).map((ms) => (
+                            <button
+                              key={ms}
+                              type="button"
+                              onClick={() => onAdjustTiming({ offsetMs: ms, resyncVisuals: true })}
+                              className="px-1.5 py-0.5 text-[10px] font-mono bg-white border border-slate-200 rounded hover:bg-slate-100 text-slate-700"
+                            >
+                              {ms > 0 ? `+${ms}ms` : `${ms}ms`}
+                            </button>
+                          ))}
+                          <span className="text-[10px] text-slate-500 ml-1 mr-0.5">Tốc độ:</span>
+                          <button
+                            type="button"
+                            onClick={() => onAdjustTiming({ speedFactor: 0.95, resyncVisuals: true })}
+                            className="px-1.5 py-0.5 text-[10px] font-mono bg-white border border-slate-200 rounded hover:bg-slate-100 text-slate-700"
+                            title="Chạy chữ nhanh hơn 5% (thu ngắn thời lượng)"
+                          >
+                            0.95x
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onAdjustTiming({ speedFactor: 1.05, resyncVisuals: true })}
+                            className="px-1.5 py-0.5 text-[10px] font-mono bg-white border border-slate-200 rounded hover:bg-slate-100 text-slate-700"
+                            title="Chạy chữ chậm lại 5% (kéo giãn thời lượng)"
+                          >
+                            1.05x
+                          </button>
+                        </div>
+                      )}
+                    </div>
+
+                    {isResyncingTiming && (
+                      <div className="p-2 rounded-lg bg-indigo-50 border border-indigo-200 space-y-1">
+                        <div className="flex items-center justify-between text-[10px] font-medium text-indigo-900">
+                          <span className="truncate">{resyncStageLabel}</span>
+                          <span className="font-mono tabular-nums">{resyncProgress}%</span>
+                        </div>
+                        <div className="w-full h-1 bg-indigo-200 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-indigo-600 transition-all duration-150"
+                            style={{ width: `${Math.max(5, resyncProgress)}%` }}
+                          />
+                        </div>
+                      </div>
                     )}
                   </div>
                 )}
@@ -1063,10 +1257,13 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
 
                   {compositionMode === 'custom' && (
                     <div className="p-2.5 rounded-lg bg-white border border-indigo-200/80 space-y-2 text-[11px]">
+                      <div className="px-2.5 py-1.5 rounded-md bg-indigo-50/70 border border-indigo-100 text-[10.5px] text-indigo-900">
+                        <span className="font-semibold">AI tự sáng tạo theo ngữ cảnh:</span> Để trống các ô bên dưới để AI tự chọn Component từ Kho ({activeVectorCount}) và thiết kế <code className="font-mono">customPrimitives</code> sát từng câu thoại. Chỉ điền khi bạn muốn gợi ý/ép một mẫu riêng.
+                      </div>
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                         <div>
                           <label htmlFor="custom-comp-variant" className="block text-[10px] font-semibold text-slate-600 mb-0.5">
-                            Component từ Kho ({activeVectorCount})
+                            Component ưu tiên từ Kho ({activeVectorCount})
                           </label>
                           <select
                             id="custom-comp-variant"
@@ -1088,7 +1285,7 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
                         </div>
                         <div>
                           <label htmlFor="custom-comp-icon" className="block text-[10px] font-semibold text-slate-600 mb-0.5">
-                            Biểu tượng (sceneIcon)
+                            Biểu tượng gợi ý (tùy chọn)
                           </label>
                           <select
                             id="custom-comp-icon"
@@ -1116,7 +1313,7 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
                           aria-label="Tiêu đề component"
                           value={activeCustomConfig.title || ''}
                           onChange={(e) => updateCustomConfig({ ...activeCustomConfig, title: e.target.value })}
-                          placeholder="Tiêu đề (title)..."
+                          placeholder="Tiêu đề (tùy chọn — để trống cho AI)..."
                           className="px-2 py-1 text-xs bg-slate-50 border border-slate-200 rounded"
                         />
                         <input
@@ -1124,7 +1321,7 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
                           aria-label="Phụ đề component"
                           value={activeCustomConfig.subtitle || ''}
                           onChange={(e) => updateCustomConfig({ ...activeCustomConfig, subtitle: e.target.value })}
-                          placeholder="Phụ đề (subtitle)..."
+                          placeholder="Phụ đề (tùy chọn)..."
                           className="px-2 py-1 text-xs bg-slate-50 border border-slate-200 rounded"
                         />
                         <input
@@ -1132,7 +1329,7 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
                           aria-label="Từ khóa nhấn mạnh"
                           value={activeCustomConfig.highlightWord || ''}
                           onChange={(e) => updateCustomConfig({ ...activeCustomConfig, highlightWord: e.target.value })}
-                          placeholder="Từ nhấn mạnh..."
+                          placeholder="Từ nhấn mạnh (tùy chọn)..."
                           className="px-2 py-1 text-xs bg-slate-50 border border-slate-200 rounded"
                         />
                       </div>
@@ -1143,7 +1340,7 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
                           aria-label="Nội dung thoại minh họa"
                           value={activeCustomConfig.speechText || ''}
                           onChange={(e) => updateCustomConfig({ ...activeCustomConfig, speechText: e.target.value })}
-                          placeholder="Câu / Text trên component..."
+                          placeholder="Text gợi ý (tùy chọn)..."
                           className="px-2 py-1 text-xs bg-slate-50 border border-slate-200 rounded"
                         />
                         <input
@@ -1156,7 +1353,7 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
                               labels: e.target.value.split(',').map((s) => s.trim()).filter(Boolean),
                             })
                           }
-                          placeholder="Nhãn: Step 1, Step 2, Step 3"
+                          placeholder="Nhãn tùy chọn (để trống để AI nghĩ sát câu)..."
                           className="px-2 py-1 text-xs bg-slate-50 border border-slate-200 rounded"
                         />
                         <div className="flex items-center gap-2">

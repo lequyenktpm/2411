@@ -12,6 +12,7 @@ import { MsEdgeTTS, OUTPUT_FORMAT, ProsodyOptions } from 'msedge-tts';
 import { buildFfmpegArgs } from './src/engine/ffmpegArgs.ts';
 import { alignKnownTextToPcmFloat, parseWavBufferToMonoFloat32 } from './src/engine/forcedAligner.ts';
 import { detectReelMode, splitMultipleExercisesFromText } from './src/engine/englishReelsEngine.ts';
+import { cleanOutputTitleStem, resolveTabOutputSubfolder } from './src/engine/outputNaming.ts';
 import {
   formatTimeToken,
   interpolateWordTimings,
@@ -551,18 +552,61 @@ function pickEdgeVoiceForLang(lang: string, requestedVoice: string): string {
   return 'en-US-JennyNeural';
 }
 
-async function synthesizeEdgeTtsSingleChunk(text: string, voice: string, rate = 1.0): Promise<Buffer> {
+interface EdgeWordBoundary {
+  word: string;
+  start: number;
+  end: number;
+}
+
+async function synthesizeEdgeTtsSingleChunk(
+  text: string,
+  voice: string,
+  rate = 1.0,
+): Promise<{ buffer: Buffer; wordBoundaries: EdgeWordBoundary[] }> {
   const safeXmlText = escapeXmlForSsml(sanitizeTtsSegmentText(text));
   if (!safeXmlText) {
     throw new Error('Edge TTS: Nội dung sau khi làm sạch bị rỗng.');
   }
   const tts = new MsEdgeTTS({ connectionTimeoutMs: 9000, synthesisTimeoutMs: 20000 });
   try {
-    await tts.setMetadata(voice, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
+    await tts.setMetadata(voice, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3, {
+      wordBoundaryEnabled: true,
+    });
     const prosody = new ProsodyOptions();
     const pct = Math.round((Math.max(0.6, Math.min(1.6, rate)) - 1) * 100);
     prosody.rate = `${pct >= 0 ? '+' : ''}${pct}%`;
-    const { audioStream } = tts.toStream(safeXmlText, prosody);
+    const { audioStream, metadataStream } = tts.toStream(safeXmlText, prosody);
+    const wordBoundaries: EdgeWordBoundary[] = [];
+
+    if (metadataStream) {
+      metadataStream.on('data', (chunk: Buffer | string) => {
+        try {
+          const parsed = JSON.parse(chunk.toString()) as {
+            Metadata?: Array<{
+              Type?: string;
+              Data?: { Offset?: number; Duration?: number; text?: { Text?: string } };
+            }>;
+          };
+          for (const item of parsed.Metadata || []) {
+            if (item?.Type === 'WordBoundary' && item.Data?.text?.Text) {
+              const startSec = Number(item.Data.Offset || 0) / 10_000_000;
+              const durSec = Math.max(0.05, Number(item.Data.Duration || 0) / 10_000_000);
+              const w = String(item.Data.text.Text).trim();
+              if (w && Number.isFinite(startSec)) {
+                wordBoundaries.push({
+                  word: w,
+                  start: Number(startSec.toFixed(3)),
+                  end: Number((startSec + durSec).toFixed(3)),
+                });
+              }
+            }
+          }
+        } catch {
+          // ignore non-JSON metadata chunk
+        }
+      });
+    }
+
     const buf = await new Promise<Buffer>((resolve, reject) => {
       const chunks: Buffer[] = [];
       audioStream.on('data', (d: Buffer) => chunks.push(Buffer.isBuffer(d) ? d : Buffer.from(d)));
@@ -572,7 +616,7 @@ async function synthesizeEdgeTtsSingleChunk(text: string, voice: string, rate = 
     if (buf.length < 128) {
       throw new Error('Edge TTS không trả về dữ liệu âm thanh.');
     }
-    return buf;
+    return { buffer: buf, wordBoundaries };
   } finally {
     try {
       tts.close();
@@ -588,7 +632,7 @@ async function synthesizeEdgeTtsBuffer(
   rate = 1.0,
   tmpDir?: string,
   prefix = 'edge',
-): Promise<Buffer> {
+): Promise<{ buffer: Buffer; wordBoundaries: EdgeWordBoundary[] }> {
   const cleaned = sanitizeTtsSegmentText(text);
   const chunks = splitTextForTtsChunks(cleaned, 290);
   if (chunks.length === 0) {
@@ -598,11 +642,21 @@ async function synthesizeEdgeTtsBuffer(
     return synthesizeEdgeTtsSingleChunk(chunks.join(' '), voice, rate);
   }
   const partFiles: string[] = [];
+  const combinedBoundaries: EdgeWordBoundary[] = [];
+  let chunkCursor = 0;
   for (let i = 0; i < chunks.length; i++) {
-    const partBuf = await synthesizeEdgeTtsSingleChunk(chunks[i], voice, rate);
+    const part = await synthesizeEdgeTtsSingleChunk(chunks[i], voice, rate);
     const partPath = path.join(tmpDir, `${prefix}_e_${i}.mp3`);
-    await fs.promises.writeFile(partPath, partBuf);
+    await fs.promises.writeFile(partPath, part.buffer);
     partFiles.push(partPath);
+    for (const wb of part.wordBoundaries) {
+      combinedBoundaries.push({
+        word: wb.word,
+        start: Number((chunkCursor + wb.start).toFixed(3)),
+        end: Number((chunkCursor + wb.end).toFixed(3)),
+      });
+    }
+    chunkCursor += await getAudioDurationSec(partPath);
   }
   const concatTxt = path.join(tmpDir, `${prefix}_e_concat.txt`);
   await fs.promises.writeFile(
@@ -629,7 +683,10 @@ async function synthesizeEdgeTtsBuffer(
     '64k',
     merged,
   ]);
-  return fs.promises.readFile(merged);
+  return {
+    buffer: await fs.promises.readFile(merged),
+    wordBoundaries: combinedBoundaries,
+  };
 }
 
 async function synthesizeGoogleTranslateTtsChunked(
@@ -849,14 +906,18 @@ async function startServer(): Promise<void> {
         const rawName =
           typeof req.headers['x-file-name'] === 'string'
             ? decodeURIComponent(req.headers['x-file-name'])
-            : 'kineticsub-video';
-        const stem = sanitizeOutputStem(rawName.replace(/\.mp4$/i, ''), 'kineticsub-video');
+            : 'KineticSub Video';
+        const stem = cleanOutputTitleStem(rawName.replace(/\.mp4$/i, ''), 'KineticSub Video');
         const fileName = `${stem}.mp4`;
         const savePath =
           typeof req.headers['x-save-path'] === 'string'
             ? decodeURIComponent(req.headers['x-save-path'])
             : '';
-        const { baseDir, targetDir } = resolveSafeOutputDir(savePath);
+        const sourceTabHeader =
+          typeof req.headers['x-source-tab'] === 'string'
+            ? decodeURIComponent(req.headers['x-source-tab']).trim()
+            : '';
+        const { baseDir, targetDir } = resolveSafeOutputDir(savePath, sourceTabHeader);
         await fs.promises.mkdir(targetDir, { recursive: true });
         const diskPath = path.join(targetDir, fileName);
         if (req.query.append === '1') {
@@ -866,10 +927,6 @@ async function startServer(): Promise<void> {
         }
         const stat = await fs.promises.stat(diskPath);
         const relPath = path.relative(baseDir, diskPath).replace(/\\/g, '/');
-        const sourceTabHeader =
-          typeof req.headers['x-source-tab'] === 'string'
-            ? decodeURIComponent(req.headers['x-source-tab']).trim()
-            : '';
         if (sourceTabHeader && req.query.append !== '1') {
           await recordOutputMeta(relPath, sourceTabHeader);
         }
@@ -909,7 +966,7 @@ async function startServer(): Promise<void> {
           const full = path.join(dir, entry.name);
           if (entry.isDirectory() && depth < 2) {
             await scan(full, depth + 1);
-          } else if (entry.isFile() && /\.(mp4|webm|srt|vtt|mp3)$/i.test(entry.name)) {
+          } else if (entry.isFile() && /\.(mp4|webm|srt|vtt|mp3|wav|zip)$/i.test(entry.name)) {
             const st = await fs.promises.stat(full).catch(() => null);
             if (st) {
               const relPath = path.relative(baseDir, full).replace(/\\/g, '/');
@@ -1326,6 +1383,7 @@ async function startServer(): Promise<void> {
       }> = [];
       let providerUsed = providerReq;
       let cursor = 0;
+      let anyWordBoundaries = false;
 
       for (let i = 0; i < rawSegments.length; i++) {
         const segText = sanitizeTtsSegmentText(String(rawSegments[i]?.text || ''));
@@ -1338,6 +1396,7 @@ async function startServer(): Promise<void> {
         );
 
         let buf: Buffer | null = null;
+        let segWordBoundaries: EdgeWordBoundary[] = [];
         const attemptOrder = Array.from(
           new Set(
             providerReq === 'auto'
@@ -1356,7 +1415,9 @@ async function startServer(): Promise<void> {
               break;
             } else if (p === 'edge') {
               const edgeVoice = pickEdgeVoiceForLang(lang, voice);
-              buf = await synthesizeEdgeTtsBuffer(segText, edgeVoice, rate, tmpDir, `s${i}`);
+              const edgeOut = await synthesizeEdgeTtsBuffer(segText, edgeVoice, rate, tmpDir, `s${i}`);
+              buf = edgeOut.buffer;
+              segWordBoundaries = edgeOut.wordBoundaries;
               providerUsed = 'edge';
               break;
             } else if (p === 'google') {
@@ -1442,12 +1503,33 @@ async function startServer(): Promise<void> {
 
         const start = Number(cursor.toFixed(3));
         const spokenEnd = Number((cursor + spokenDur).toFixed(3));
+        let cueWords = interpolateWordTimings(segText, start, spokenEnd);
+        if (segWordBoundaries.length > 0) {
+          const segTokens = segText.split(/\s+/).filter(Boolean);
+          if (segTokens.length > 0 && segWordBoundaries.length === segTokens.length) {
+            cueWords = segTokens.map((tok, wIdx) => {
+              const wb = segWordBoundaries[wIdx];
+              const ws = Number(Math.max(start, Math.min(spokenEnd - 0.04, cursor + wb.start)).toFixed(3));
+              const we = Number(Math.max(ws + 0.04, Math.min(spokenEnd, cursor + wb.end)).toFixed(3));
+              return { word: tok, start: ws, end: we };
+            });
+            anyWordBoundaries = true;
+          } else if (segWordBoundaries.length >= 2) {
+            const firstStart = Math.max(start, cursor + segWordBoundaries[0].start);
+            const lastEnd = Math.min(
+              spokenEnd,
+              Math.max(firstStart + 0.25, cursor + segWordBoundaries[segWordBoundaries.length - 1].end),
+            );
+            cueWords = interpolateWordTimings(segText, firstStart, lastEnd);
+            anyWordBoundaries = true;
+          }
+        }
         cues.push({
           id: String(rawSegments[i]?.id || `tts-cue-${i + 1}`),
           start,
           end: spokenEnd,
           text: segText,
-          words: interpolateWordTimings(segText, start, spokenEnd),
+          words: cueWords,
         });
         cursor = Number((cursor + totalSegDur).toFixed(3));
         onProgress?.(
@@ -1487,6 +1569,7 @@ async function startServer(): Promise<void> {
         segmentDurations: segDurations,
         spokenDurations,
         pauseDurations,
+        hasWordBoundaries: anyWordBoundaries,
         cues,
         srt: cuesToSrt(cues),
         vtt: cuesToVtt(cues),
@@ -2694,17 +2777,17 @@ Return ONLY valid JSON with keys:
       });
 
       const outStat = await fs.promises.stat(outputPath);
-      const rawName = typeof req.body?.fileName === 'string' ? req.body.fileName : 'kineticsub-video';
-      const safeBaseName = sanitizeOutputStem(rawName, 'kineticsub-video');
+      const rawName = typeof req.body?.fileName === 'string' ? req.body.fileName : 'KineticSub Video';
+      const safeBaseName = cleanOutputTitleStem(rawName, 'KineticSub Video');
+      const sourceTab = typeof req.body?.sourceTab === 'string' ? req.body.sourceTab.trim() : '';
 
       if (req.body?.saveToDisk === true) {
         const rawSavePath = typeof req.body?.savePath === 'string' ? req.body.savePath.trim() : '';
-        const { baseDir, targetDir } = resolveSafeOutputDir(rawSavePath);
+        const { baseDir, targetDir } = resolveSafeOutputDir(rawSavePath, sourceTab || 'Studio 9:16');
         await fs.promises.mkdir(targetDir, { recursive: true });
         const diskPath = path.join(targetDir, `${safeBaseName}.mp4`);
         await fs.promises.copyFile(outputPath, diskPath);
         const relPath = path.relative(baseDir, diskPath).replace(/\\/g, '/');
-        const sourceTab = typeof req.body?.sourceTab === 'string' ? req.body.sourceTab.trim() : '';
         if (sourceTab) {
           await recordOutputMeta(relPath, sourceTab);
         }
@@ -2721,7 +2804,7 @@ Return ONLY valid JSON with keys:
 
       res.setHeader('Content-Type', 'video/mp4');
       res.setHeader('Content-Length', String(outStat.size));
-      const asciiFallback = safeBaseName.replace(/[^a-zA-Z0-9_-]/g, '_') || 'kineticsub-video';
+      const asciiFallback = safeBaseName.replace(/[^a-zA-Z0-9 -]/g, '').trim() || 'KineticSub Video';
       res.setHeader(
         'Content-Disposition',
         `attachment; filename*=UTF-8''${encodeURIComponent(safeBaseName)}.mp4; filename="${asciiFallback}.mp4"`,
@@ -2981,10 +3064,10 @@ Return ONLY valid JSON with keys:
 
       const rawOutName = typeof req.body?.outputName === 'string' ? req.body.outputName : '';
       const origBase = path.basename(videoPath, path.extname(videoPath)).replace(/^video_/, '');
-      const stem = sanitizeOutputStem(rawOutName.replace(/\.mp4$/i, ''), origBase || 'video_merged');
+      const stem = cleanOutputTitleStem(rawOutName, cleanOutputTitleStem(origBase, 'Edu Merge Video'));
       const fileName = `${stem}.mp4`;
       const saveSubPath = typeof req.body?.savePath === 'string' ? req.body.savePath : '';
-      const { baseDir, targetDir } = resolveSafeOutputDir(saveSubPath);
+      const { baseDir, targetDir } = resolveSafeOutputDir(saveSubPath, 'Edu Merge');
       await fs.promises.mkdir(targetDir, { recursive: true });
       const diskPath = path.join(targetDir, fileName);
       await fs.promises.copyFile(outLocal, diskPath);
@@ -3270,10 +3353,10 @@ Return ONLY valid JSON with keys:
 
       const rawOutName = typeof req.body?.outputName === 'string' ? req.body.outputName : '';
       const origBase = path.basename(videoPath, path.extname(videoPath)).replace(/^video_/, '');
-      const stem = sanitizeOutputStem(rawOutName.replace(/\.mp4$/i, ''), origBase || 'karaoke_mix');
+      const stem = cleanOutputTitleStem(rawOutName, cleanOutputTitleStem(origBase, 'Edu Karaoke Video'));
       const fileName = `${stem}.mp4`;
       const saveSubPath = typeof req.body?.savePath === 'string' ? req.body.savePath : '';
-      const { baseDir, targetDir } = resolveSafeOutputDir(saveSubPath);
+      const { baseDir, targetDir } = resolveSafeOutputDir(saveSubPath, 'Edu Karaoke');
       await fs.promises.mkdir(targetDir, { recursive: true });
       const diskPath = path.join(targetDir, fileName);
       await fs.promises.copyFile(outLocal, diskPath);

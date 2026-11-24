@@ -1,4 +1,11 @@
-import { computeElementFrameState, easeInOutCubic, clamp01 } from './animationMath';
+import {
+  computeElementFrameState,
+  computeStaggerItemState,
+  easeInOutCubic,
+  easeOutCubic,
+  easeOutQuint,
+  clamp01,
+} from './animationMath';
 import { getCustomComponentByVariant } from './customComponentStore';
 import { VectorPrimitive } from './customComponentTypes';
 import {
@@ -91,6 +98,25 @@ export function computeBackgroundImageDrawRect(
   return { dx, dy, dw, dh };
 }
 
+const bgLoadListeners = new Set<() => void>();
+
+export function subscribeBgImageLoaded(listener: () => void): () => void {
+  bgLoadListeners.add(listener);
+  return () => {
+    bgLoadListeners.delete(listener);
+  };
+}
+
+function notifyBgImageLoaded() {
+  bgLoadListeners.forEach((fn) => {
+    try {
+      fn();
+    } catch {
+      // ignore listener errors
+    }
+  });
+}
+
 export async function ensureProjectAssetsLoaded(project: LessonProject): Promise<void> {
   const dataUrl = project.backgroundImage?.dataUrl;
   if (!dataUrl || typeof Image === 'undefined') return;
@@ -108,6 +134,7 @@ export async function ensureProjectAssetsLoaded(project: LessonProject): Promise
     img.onload = () => {
       bgImageCache.set(dataUrl, img);
       bgImageLoading.delete(dataUrl);
+      notifyBgImageLoaded();
       resolve(img);
     };
     img.onerror = () => {
@@ -129,6 +156,7 @@ function getCachedBgImage(dataUrl: string): HTMLImageElement | null {
       img.onload = () => {
         bgImageCache.set(dataUrl, img);
         bgImageLoading.delete(dataUrl);
+        notifyBgImageLoaded();
         resolve(img);
       };
       img.onerror = () => {
@@ -252,13 +280,19 @@ function drawVectorPrimitives(
         ctx.fill();
       }
     } else if (prim.shape === 'text') {
-      const size = prim.fontSize ?? 28;
+      const size = Math.max(24, prim.fontSize ?? 32);
       const weight = prim.fontWeight ?? 700;
       ctx.font = `${weight} ${size}px ${FONT_DISPLAY}`;
       ctx.fillStyle = prim.fill || '#0F172A';
       ctx.textAlign = prim.align ?? 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText(prim.text || '', px, py, prim.w ? Math.max(80, prim.w) : undefined);
+      const maxW = prim.w ? Math.max(140, prim.w) : 740;
+      const lines = wrapTextLines(ctx, prim.text || '', maxW).slice(0, 3);
+      const lh = Math.round(size * 1.24);
+      const startY = py - ((lines.length - 1) * lh) / 2;
+      lines.forEach((ln, li) => {
+        ctx.fillText(ln, px, startY + li * lh);
+      });
     } else if (prim.shape === 'icon' && extraCustomDraw) {
       const bounce = Math.sin(time * 2.5) * 3;
       ctx.translate(px, py + bounce);
@@ -810,13 +844,10 @@ function drawComparisonStrip(
   props: ComparisonStripProps,
   width: number,
   time: number,
+  elStartTime = 0,
 ) {
   const count = Math.max(1, props.items.length);
-  const gap = 22;
-  const itemW = (width - gap * (count - 1)) / count;
-  const itemH = 112;
-  const startX = -width / 2;
-  const startY = -itemH / 2;
+  const elElapsed = Math.max(0, time - elStartTime);
 
   // Determine active index: latest item whose activateAt <= time
   let activeIdx = -1;
@@ -826,84 +857,334 @@ function drawComparisonStrip(
     }
   });
 
+  const isLongStack = props.items.some((item) => item.label.trim().length > 16) || count > 4;
+
+  if (isLongStack) {
+    const rowW = Math.min(860, Math.max(640, width));
+    const rowGap = 12;
+    const layouts = props.items.map((item, idx) => {
+      const isActive = idx === activeIdx;
+      const showSub = Boolean(
+        item.sublabel &&
+          !(
+            !isActive &&
+            item.activateAt !== undefined &&
+            time < item.activateAt &&
+            /đáp\s*án|correct\s*answer|正解/i.test(item.sublabel)
+          ),
+      );
+      const fSize = item.label.length > 78 ? 25 : 28;
+      ctx.font = `700 ${fSize}px ${FONT_DISPLAY}`;
+      const textMaxW = rowW - (showSub ? 230 : 68);
+      const lines = wrapTextLines(ctx, item.label, textMaxW).slice(0, 3);
+      const rowH = Math.max(76, lines.length * Math.round(fSize * 1.26) + 28);
+      return { item, idx, isActive, showSub, fSize, lines, rowH };
+    });
+
+    const totalH =
+      layouts.reduce((acc, l) => acc + l.rowH, 0) + rowGap * Math.max(0, layouts.length - 1);
+    let cursorY = -totalH / 2;
+
+    layouts.forEach(({ item, idx, isActive, showSub, fSize, lines, rowH }) => {
+      const stag = computeStaggerItemState(elElapsed, idx, 0.075, 0.34);
+      if (!stag.visible) {
+        cursorY += rowH + rowGap;
+        return;
+      }
+      const accent = item.accentColor || '#16A34A';
+      const activeBoost = isActive ? 1.018 : 1;
+      const centerY = cursorY + rowH / 2;
+
+      ctx.save();
+      ctx.globalAlpha *= stag.opacity;
+      ctx.translate(0, centerY + stag.translateY);
+      ctx.scale(stag.scale * activeBoost, stag.scale * activeBoost);
+
+      fillCardWithShadow(
+        ctx,
+        -rowW / 2,
+        -rowH / 2,
+        rowW,
+        rowH,
+        24,
+        isActive ? '#FFFFFF' : 'rgba(255,255,255,0.92)',
+        isActive ? 0.14 : 0.06,
+      );
+
+      if (isActive) {
+        ctx.save();
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 4.5;
+        drawRoundedRectPath(ctx, -rowW / 2, -rowH / 2, rowW, rowH, 24);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      const lh = Math.round(fSize * 1.26);
+      const textStartY = -((lines.length - 1) * lh) / 2;
+      ctx.font = `700 ${fSize}px ${FONT_DISPLAY}`;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = isActive ? '#0F172A' : '#334155';
+      lines.forEach((ln, li) => {
+        ctx.fillText(ln, -rowW / 2 + 32, textStartY + li * lh);
+      });
+
+      if (showSub && item.sublabel) {
+        ctx.font = `700 22px ${FONT_SANS}`;
+        const pillW = Math.min(186, Math.max(120, ctx.measureText(item.sublabel).width + 30));
+        ctx.fillStyle = isActive ? accent : '#E2E8F0';
+        drawRoundedRectPath(ctx, rowW / 2 - pillW - 18, -20, pillW, 40, 20);
+        ctx.fill();
+        ctx.fillStyle = isActive ? '#FFFFFF' : '#475569';
+        ctx.textAlign = 'center';
+        ctx.fillText(item.sublabel, rowW / 2 - pillW / 2 - 18, 1);
+      }
+
+      ctx.restore();
+      cursorY += rowH + rowGap;
+    });
+    return;
+  }
+
+  const gap = 20;
+  const itemW = (width - gap * (count - 1)) / count;
+  const itemH = 112;
+  const startX = -width / 2;
+  const startY = -itemH / 2;
+
   props.items.forEach((item, idx) => {
+    const stag = computeStaggerItemState(elElapsed, idx, 0.075, 0.34);
+    if (!stag.visible) return;
     const x = startX + idx * (itemW + gap);
     const isActive = idx === activeIdx;
     const accent = item.accentColor || '#2563EB';
+    const activeScale = isActive ? 1.03 : 1;
+
+    ctx.save();
+    ctx.globalAlpha *= stag.opacity;
+    ctx.translate(x + itemW / 2, stag.translateY);
+    ctx.scale(stag.scale * activeScale, stag.scale * activeScale);
 
     fillCardWithShadow(
       ctx,
-      x,
+      -itemW / 2,
       startY,
       itemW,
       itemH,
       30,
-      isActive ? '#FFFFFF' : 'rgba(255,255,255,0.86)',
-      isActive ? 0.12 : 0.05,
+      isActive ? '#FFFFFF' : 'rgba(255,255,255,0.88)',
+      isActive ? 0.14 : 0.05,
     );
 
     if (isActive) {
       ctx.save();
       ctx.strokeStyle = accent;
       ctx.lineWidth = 5;
-      drawRoundedRectPath(ctx, x, startY, itemW, itemH, 30);
+      drawRoundedRectPath(ctx, -itemW / 2, startY, itemW, itemH, 30);
       ctx.stroke();
       ctx.restore();
     }
 
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    let fontSize = 40;
-    const maxLabelW = itemW - 28;
-    ctx.font = `700 ${fontSize}px ${FONT_DISPLAY}`;
-    while (fontSize > 22 && ctx.measureText(item.label).width > maxLabelW) {
-      fontSize -= 2;
-      ctx.font = `700 ${fontSize}px ${FONT_DISPLAY}`;
-    }
     const showSublabel = Boolean(
       item.sublabel &&
         !(
           !isActive &&
           item.activateAt !== undefined &&
           time < item.activateAt &&
-          /đáp\s*án/i.test(item.sublabel)
+          /đáp\s*án|correct\s*answer|正解/i.test(item.sublabel)
         ),
     );
-    ctx.fillStyle = isActive ? accent : '#475569';
-    ctx.fillText(item.label, x + itemW / 2, showSublabel ? startY + 42 : startY + itemH / 2);
+
+    const maxLabelW = itemW - 24;
+    let fontSize = 32;
+    let lines: string[] = [];
+    while (fontSize >= 24) {
+      ctx.font = `700 ${fontSize}px ${FONT_DISPLAY}`;
+      lines = wrapTextLines(ctx, item.label, maxLabelW);
+      if (lines.length <= 2) break;
+      fontSize -= 2;
+    }
+    const displayLines = lines.slice(0, 2);
+    const lh = Math.round(fontSize * 1.2);
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = isActive ? accent : '#334155';
+    ctx.font = `700 ${fontSize}px ${FONT_DISPLAY}`;
+
+    const labelCenterY = showSublabel ? startY + 42 : startY + itemH / 2;
+    const firstY = labelCenterY - ((displayLines.length - 1) * lh) / 2;
+    displayLines.forEach((ln, li) => {
+      ctx.fillText(ln, 0, firstY + li * lh);
+    });
 
     if (showSublabel && item.sublabel) {
       ctx.font = `600 22px ${FONT_SANS}`;
-      ctx.fillStyle = isActive ? '#334155' : '#94A3B8';
-      ctx.fillText(item.sublabel, x + itemW / 2, startY + 84);
+      ctx.fillStyle = isActive ? '#334155' : '#64748B';
+      ctx.fillText(item.sublabel, 0, startY + 88);
     }
+    ctx.restore();
   });
 }
 
 function drawTopicPill(ctx: CanvasRenderingContext2D, props: TopicPillProps) {
+  const maxTextW = 796;
   let fontSize = 34;
-  ctx.font = `700 ${fontSize}px ${FONT_SANS}`;
-  while (fontSize > 22 && ctx.measureText(props.text).width > 720) {
-    fontSize -= 2;
+  let lines: string[] = [];
+  while (fontSize >= 28) {
     ctx.font = `700 ${fontSize}px ${FONT_SANS}`;
+    lines = wrapTextLines(ctx, props.text, maxTextW);
+    if (lines.length <= 2) break;
+    fontSize -= 2;
   }
-  const textW = ctx.measureText(props.text).width;
-  const pillW = Math.min(820, Math.max(240, textW + 76));
-  const pillH = 74;
+  const displayLines = lines.slice(0, 3);
+  const maxLineW = Math.max(180, ...displayLines.map((ln) => ctx.measureText(ln).width));
+  const pillW = Math.min(880, Math.max(260, maxLineW + 76));
+  const lh = Math.round(fontSize * 1.24);
+  const pillH = displayLines.length === 1 ? 74 : displayLines.length * lh + 32;
 
-  fillCardWithShadow(ctx, -pillW / 2, -pillH / 2, pillW, pillH, 37, props.bgColor, 0.05);
+  fillCardWithShadow(
+    ctx,
+    -pillW / 2,
+    -pillH / 2,
+    pillW,
+    pillH,
+    Math.min(37, Math.round(pillH / 2)),
+    props.bgColor,
+    0.06,
+  );
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = props.textColor;
-  ctx.fillText(props.text, 0, 2, pillW - 44);
+  ctx.font = `700 ${fontSize}px ${FONT_SANS}`;
+  const startY = -((displayLines.length - 1) * lh) / 2 + 1;
+  displayLines.forEach((ln, li) => {
+    ctx.fillText(ln, 0, startY + li * lh);
+  });
+}
+
+const VARIANTS_WITH_NATIVE_LABELS = new Set<string>([
+  'flow-diagram',
+  'timeline-track',
+  'tense-timeline',
+  'degree-scale',
+  'phrasal-split',
+  'syllable-stress',
+  'bs-list-group',
+  'bs-pricing-tier',
+  'bs-breadcrumb-path',
+  'css-bento-stats',
+  'css-chat-thread',
+  'css-roadmap-steps',
+  'css-grammar-equation',
+  'bs-badge-cluster',
+  'bs-modal-quiz',
+  'dynamic-scene',
+  'custom-vector',
+]);
+
+function drawProminentLabelsStrip(
+  ctx: CanvasRenderingContext2D,
+  labels: string[],
+  topY: number,
+  stripW = 840,
+): number {
+  const clean = labels.map((l) => l.trim()).filter(Boolean).slice(0, 3);
+  if (clean.length === 0) return 0;
+
+  const palette = [
+    { bg: '#EEF2FF', border: '#C7D2FE', fg: '#312E81', badge: '#4F46E5' },
+    { bg: '#ECFDF5', border: '#A7F3D0', fg: '#065F46', badge: '#10B981' },
+    { bg: '#FFF7ED', border: '#FED7AA', fg: '#9A3412', badge: '#EA580C' },
+  ];
+
+  // If 2–3 labels are all concise (<= 13 chars), lay them out in 2–3 distinct wide columns
+  const allShort = clean.every((l) => l.length <= 13);
+  if (allShort && clean.length >= 2) {
+    const gap = 16;
+    const colW = (stripW - gap * (clean.length - 1)) / clean.length;
+    const colH = 74;
+    const startX = -stripW / 2;
+    clean.forEach((lbl, i) => {
+      const col = palette[i % palette.length];
+      const cx = startX + i * (colW + gap);
+      fillCardWithShadow(ctx, cx, topY, colW, colH, 20, col.bg, 0.08);
+      ctx.strokeStyle = col.border;
+      ctx.lineWidth = 2.5;
+      drawRoundedRectPath(ctx, cx, topY, colW, colH, 20);
+      ctx.stroke();
+
+      ctx.font = `800 30px ${FONT_DISPLAY}`;
+      ctx.fillStyle = col.fg;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      const lines = wrapTextLines(ctx, lbl, colW - 24).slice(0, 2);
+      const lh = 34;
+      const ly = topY + colH / 2 - ((lines.length - 1) * lh) / 2;
+      lines.forEach((ln, li) => ctx.fillText(ln, cx + colW / 2, ly + li * lh));
+    });
+    return colH;
+  }
+
+  // Longer callouts: stack vertically in 2 or 3 distinct spacious rows (never cramped!)
+  const gap = 10;
+  let cursorY = topY;
+  clean.forEach((lbl, i) => {
+    const col = palette[i % palette.length];
+    ctx.font = `800 30px ${FONT_DISPLAY}`;
+    const lines = wrapTextLines(ctx, lbl, stripW - 108).slice(0, 2);
+    const rowH = Math.max(66, lines.length * 36 + 26);
+
+    fillCardWithShadow(ctx, -stripW / 2, cursorY, stripW, rowH, 20, col.bg, 0.08);
+    ctx.strokeStyle = col.border;
+    ctx.lineWidth = 2.5;
+    drawRoundedRectPath(ctx, -stripW / 2, cursorY, stripW, rowH, 20);
+    ctx.stroke();
+
+    // Numbered pill on left
+    ctx.fillStyle = col.badge;
+    ctx.beginPath();
+    ctx.arc(-stripW / 2 + 38, cursorY + rowH / 2, 18, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.font = `800 22px ${FONT_DISPLAY}`;
+    ctx.fillStyle = '#FFFFFF';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(`${i + 1}`, -stripW / 2 + 38, cursorY + rowH / 2 + 1);
+
+    ctx.font = `800 30px ${FONT_DISPLAY}`;
+    ctx.fillStyle = col.fg;
+    ctx.textAlign = 'left';
+    const lh = 36;
+    const textStartY = cursorY + rowH / 2 - ((lines.length - 1) * lh) / 2;
+    lines.forEach((ln, li) => {
+      ctx.fillText(ln, -stripW / 2 + 72, textStartY + li * lh);
+    });
+    cursorY += rowH + gap;
+  });
+  return cursorY - topY - gap;
+}
+
+function measureProminentLabelsHeight(labels?: string[]): number {
+  const clean = (labels || []).map((l) => l.trim()).filter(Boolean).slice(0, 3);
+  if (clean.length === 0) return 0;
+  if (clean.length >= 2 && clean.every((l) => l.length <= 13)) return 74;
+  return clean.reduce((sum, l, idx) => {
+    const rowH = l.length > 36 ? 98 : 66;
+    return sum + rowH + (idx > 0 ? 10 : 0);
+  }, 0);
 }
 
 function drawIllustrationProp(
   ctx: CanvasRenderingContext2D,
   props: IllustrationPropProps,
   time: number,
+  elStartTime = 0,
 ) {
-  const floatOffset = Math.sin(time * 2.2) * 8;
+  const elElapsed = Math.max(0, time - elStartTime);
+  const floatRamp = easeOutCubic(clamp01(elElapsed / 0.5));
+  const floatOffset = Math.sin(elElapsed * 2.1) * 6 * floatRamp;
   ctx.save();
   ctx.translate(0, floatOffset);
 
@@ -918,6 +1199,16 @@ function drawIllustrationProp(
     drawVectorPrimitives(ctx, customDef.primitives, time, (icon) => drawSceneIcon(ctx, icon));
     ctx.restore();
     return;
+  }
+
+  const attachExtraLabels =
+    !VARIANTS_WITH_NATIVE_LABELS.has(props.variant) &&
+    Boolean(props.data?.labels && props.data.labels.length > 0);
+  const extraLabelsH = attachExtraLabels
+    ? measureProminentLabelsHeight(props.data?.labels)
+    : 0;
+  if (extraLabelsH > 0) {
+    ctx.translate(0, -(extraLabelsH + 16) / 2);
   }
 
   if (props.variant === 'cafe-water') {
@@ -1397,17 +1688,21 @@ function drawIllustrationProp(
 
     // Milestone labels
     const lxs = labels.length === 2 ? [-200, 200] : [-270, 0, 270];
+    const pillW = labels.length === 2 ? 320 : 236;
     labels.forEach((lbl, i) => {
       const lx = lxs[i];
       const isCurrent = Math.abs(progress - i / Math.max(1, labels.length - 1)) < 0.35;
-      ctx.fillStyle = isCurrent ? '#DCFCE7' : '#F1F5F9';
-      drawRoundedRectPath(ctx, lx - 108, 28, 216, 46, 23);
-      ctx.fill();
       ctx.font = `700 24px ${FONT_SANS}`;
-      ctx.fillStyle = isCurrent ? '#15803D' : '#475569';
+      const lines = wrapTextLines(ctx, lbl, pillW - 24).slice(0, 2);
+      const pillH = lines.length > 1 ? 66 : 50;
+      ctx.fillStyle = isCurrent ? '#DCFCE7' : '#F1F5F9';
+      drawRoundedRectPath(ctx, lx - pillW / 2, 24, pillW, pillH, 20);
+      ctx.fill();
+      ctx.fillStyle = isCurrent ? '#15803D' : '#334155';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText(lbl, lx, 51, 190);
+      const ly = 24 + pillH / 2 - ((lines.length - 1) * 26) / 2;
+      lines.forEach((ln, li) => ctx.fillText(ln, lx, ly + li * 26));
     });
   } else if (props.variant === 'checklist-card') {
     const items =
@@ -1969,36 +2264,62 @@ function drawIllustrationProp(
     });
   } else if (props.variant === 'degree-scale') {
     const steps = props.data?.labels?.slice(0, 3) ?? ['Basic', 'Stronger', 'Native!'];
-    const cols = ['#94A3B8', '#38BDF8', '#FACC15'];
-    fillCardWithShadow(ctx, -430, -118, 860, 236, 34, '#FFFFFF', 0.09);
-    ctx.font = `800 24px ${FONT_SANS}`;
-    ctx.fillStyle = '#475569';
-    ctx.textAlign = 'center';
-    ctx.fillText(props.data?.title || 'Intensity Scale', 0, -82);
-    steps.forEach((st, i) => {
-      const bx = -255 + i * 255;
-      const barH = 44 + i * 28;
-      ctx.fillStyle = cols[i % cols.length];
-      drawRoundedRectPath(ctx, bx - 95, 58 - barH, 190, barH, 16);
-      ctx.fill();
-      ctx.font = `800 26px ${FONT_DISPLAY}`;
-      ctx.fillStyle = i === 2 ? '#0F172A' : '#FFFFFF';
-      ctx.fillText(st, bx, 58 - barH / 2 + 2, 170);
-    });
+    const cols = ['#64748B', '#0284C7', '#EAB308'];
+    const useStacked = steps.some((s) => s.length > 14);
+    if (useStacked) {
+      fillCardWithShadow(ctx, -430, -138, 860, 276, 30, '#FFFFFF', 0.09);
+      ctx.font = `800 26px ${FONT_SANS}`;
+      ctx.fillStyle = '#334155';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(props.data?.title || 'Key Points', 0, -104);
+      steps.forEach((st, i) => {
+        const ry = -62 + i * 64;
+        const w = 360 + i * 210;
+        ctx.fillStyle = cols[i % cols.length];
+        drawRoundedRectPath(ctx, -w / 2, ry, w, 52, 16);
+        ctx.fill();
+        ctx.font = `800 26px ${FONT_DISPLAY}`;
+        ctx.fillStyle = i === 2 ? '#0F172A' : '#FFFFFF';
+        ctx.fillText(st, 0, ry + 27);
+      });
+    } else {
+      fillCardWithShadow(ctx, -430, -124, 860, 248, 34, '#FFFFFF', 0.09);
+      ctx.font = `800 26px ${FONT_SANS}`;
+      ctx.fillStyle = '#334155';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(props.data?.title || 'Intensity Scale', 0, -88);
+      steps.forEach((st, i) => {
+        const bx = -265 + i * 265;
+        const barH = 56 + i * 28;
+        ctx.fillStyle = cols[i % cols.length];
+        drawRoundedRectPath(ctx, bx - 112, 74 - barH, 224, barH, 16);
+        ctx.fill();
+        ctx.font = `800 26px ${FONT_DISPLAY}`;
+        ctx.fillStyle = i === 2 ? '#0F172A' : '#FFFFFF';
+        const lines = wrapTextLines(ctx, st, 200).slice(0, 2);
+        const lh = 28;
+        const ly = 74 - barH / 2 - ((lines.length - 1) * lh) / 2;
+        lines.forEach((ln, li) => ctx.fillText(ln, bx, ly + li * lh));
+      });
+    }
   } else if (props.variant === 'phrasal-split') {
     const parts = props.data?.labels?.slice(0, 2) ?? ['Verb', 'Particle'];
     fillCardWithShadow(ctx, -430, -116, 860, 232, 34, '#FFFFFF', 0.09);
     fillCardWithShadow(ctx, -370, -54, 240, 86, 24, '#DBEAFE', 0.05);
-    ctx.font = `800 36px ${FONT_DISPLAY}`;
+    ctx.font = `800 32px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#1D4ED8';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(parts[0], -250, -11, 210);
+    const p0Lines = wrapTextLines(ctx, parts[0], 210).slice(0, 2);
+    p0Lines.forEach((ln, li) => ctx.fillText(ln, -250, -11 - ((p0Lines.length - 1) * 32) / 2 + li * 32));
     ctx.fillStyle = '#64748B';
     ctx.fillText('+', -90, -11);
     fillCardWithShadow(ctx, -50, -54, 240, 86, 24, '#DCFCE7', 0.05);
     ctx.fillStyle = '#15803D';
-    ctx.fillText(parts[1], 70, -11, 210);
+    const p1Lines = wrapTextLines(ctx, parts[1], 210).slice(0, 2);
+    p1Lines.forEach((ln, li) => ctx.fillText(ln, 70, -11 - ((p1Lines.length - 1) * 32) / 2 + li * 32));
     ctx.fillStyle = '#4F46E5';
     ctx.fillText('=', 228, -11);
     ctx.save();
@@ -2006,21 +2327,22 @@ function drawIllustrationProp(
     ctx.scale(0.65, 0.65);
     drawSceneIcon(ctx, props.data?.sceneIcon || 'lightning');
     ctx.restore();
-    ctx.font = `700 24px ${FONT_SANS}`;
+    ctx.font = `700 26px ${FONT_SANS}`;
     ctx.fillStyle = '#475569';
-    ctx.fillText(props.data?.formula || 'New idiomatic meaning!', 0, 74, 780);
+    ctx.fillText(props.data?.formula || 'New meaning!', 0, 74, 780);
   } else if (props.variant === 'idiom-split') {
     fillCardWithShadow(ctx, -430, -116, 860, 232, 34, '#FFFFFF', 0.09);
     ctx.fillStyle = '#FEF2F2';
     drawRoundedRectPath(ctx, -395, -72, 340, 144, 24);
     ctx.fill();
-    ctx.font = `700 22px ${FONT_SANS}`;
+    ctx.font = `700 24px ${FONT_SANS}`;
     ctx.fillStyle = '#DC2626';
     ctx.textAlign = 'center';
-    ctx.fillText('LITERAL (KHÔNG PHẢI)', -225, -36);
+    ctx.fillText('LITERAL', -225, -38);
     ctx.font = `800 28px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#7F1D1D';
-    ctx.fillText(props.data?.speechText || 'Word for word', -225, 22, 300);
+    const litLines = wrapTextLines(ctx, props.data?.speechText || 'Word for word', 300).slice(0, 2);
+    litLines.forEach((ln, li) => ctx.fillText(ln, -225, 16 - ((litLines.length - 1) * 30) / 2 + li * 30));
 
     ctx.fillStyle = '#64748B';
     ctx.font = `800 34px ${FONT_DISPLAY}`;
@@ -2029,37 +2351,38 @@ function drawIllustrationProp(
     ctx.fillStyle = '#F0FDF4';
     drawRoundedRectPath(ctx, 55, -72, 340, 144, 24);
     ctx.fill();
-    ctx.font = `700 22px ${FONT_SANS}`;
+    ctx.font = `700 24px ${FONT_SANS}`;
     ctx.fillStyle = '#16A34A';
-    ctx.fillText('REAL MEANING', 225, -36);
+    ctx.fillText('MEANING', 225, -38);
     ctx.font = `800 28px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#14532D';
-    ctx.fillText(props.data?.subtitle || 'Natural idiom sense', 225, 22, 300);
+    const meanLines = wrapTextLines(ctx, props.data?.subtitle || 'Natural sense', 300).slice(0, 2);
+    meanLines.forEach((ln, li) => ctx.fillText(ln, 225, 16 - ((meanLines.length - 1) * 30) / 2 + li * 30));
   } else if (props.variant === 'syllable-stress') {
     const syllables = props.data?.labels?.length ? props.data.labels.slice(0, 4) : ['re', 'CORD'];
     const stressedIdx = Math.min(syllables.length - 1, Math.max(0, Math.round(props.data?.value ?? 1)));
     fillCardWithShadow(ctx, -410, -116, 820, 232, 34, '#FFFFFF', 0.09);
-    ctx.font = `700 22px ${FONT_SANS}`;
+    ctx.font = `700 24px ${FONT_SANS}`;
     ctx.fillStyle = '#64748B';
     ctx.textAlign = 'center';
     ctx.fillText(props.data?.title || 'SYLLABLE STRESS', 0, -76);
-    const gap = 150;
+    const gap = 170;
     const startX = -((syllables.length - 1) * gap) / 2;
     syllables.forEach((syl, idx) => {
       const sx = startX + idx * gap;
       const isStressed = idx === stressedIdx;
       ctx.fillStyle = isStressed ? '#4F46E5' : '#E2E8F0';
       ctx.beginPath();
-      ctx.arc(sx, -10, isStressed ? 42 : 24, 0, Math.PI * 2);
+      ctx.arc(sx, -12, isStressed ? 42 : 24, 0, Math.PI * 2);
       ctx.fill();
-      ctx.font = `${isStressed ? 800 : 700} ${isStressed ? 28 : 22}px ${FONT_DISPLAY}`;
-      ctx.fillStyle = isStressed ? '#FFFFFF' : '#475569';
-      ctx.fillText(syl, sx, 60, 130);
+      ctx.font = `${isStressed ? 800 : 700} ${isStressed ? 28 : 24}px ${FONT_DISPLAY}`;
+      ctx.fillStyle = isStressed ? '#312E81' : '#475569';
+      ctx.fillText(syl, sx, 62);
     });
   } else if (props.variant === 'intonation-curve') {
     const rising = (props.data?.value ?? 0.8) >= 0.5;
     fillCardWithShadow(ctx, -410, -112, 820, 224, 34, '#FFFFFF', 0.09);
-    ctx.font = `700 22px ${FONT_SANS}`;
+    ctx.font = `700 24px ${FONT_SANS}`;
     ctx.fillStyle = '#64748B';
     ctx.textAlign = 'center';
     ctx.fillText(rising ? 'RISING INTONATION ↗' : 'FALLING INTONATION ↘', 0, -74);
@@ -2068,115 +2391,159 @@ function drawIllustrationProp(
     ctx.lineCap = 'round';
     ctx.beginPath();
     if (rising) {
-      ctx.moveTo(-260, 44);
-      ctx.bezierCurveTo(-60, 40, 80, -34, 260, -40);
+      ctx.moveTo(-260, 40);
+      ctx.bezierCurveTo(-60, 36, 80, -34, 260, -40);
     } else {
       ctx.moveTo(-260, -34);
-      ctx.bezierCurveTo(-60, -30, 80, 38, 260, 44);
+      ctx.bezierCurveTo(-60, -30, 80, 34, 260, 40);
     }
     ctx.stroke();
     ctx.font = `700 28px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#0F172A';
-    ctx.fillText(props.data?.speechText || 'Watch the pitch flow!', 0, 76, 760);
+    ctx.fillText(props.data?.speechText || 'Watch the pitch flow!', 0, 74, 760);
   } else if (props.variant === 'bs-alert-tip') {
-    // Bootstrap Callout / Alert Banner with left accent stripe, pill badge & icon
-    fillCardWithShadow(ctx, -420, -112, 840, 224, 24, '#EFF6FF', 0.08);
+    // Callout / Alert Banner with left accent stripe, crisp dynamic tag pill & multi-line body
+    const titleStr = props.data?.title || 'Key Note';
+    const bodyStr = props.data?.speechText || props.data?.subtitle || '';
+    const tagStr = (props.data?.highlightWord || props.data?.formula || '').trim();
+
+    ctx.font = `800 34px ${FONT_DISPLAY}`;
+    const titleLines = wrapTextLines(ctx, titleStr, 590).slice(0, 2);
+    ctx.font = `600 30px ${FONT_DISPLAY}`;
+    const bodyLines = bodyStr ? wrapTextLines(ctx, bodyStr, 590).slice(0, 3) : [];
+
+    const tagH = tagStr ? 48 : 0;
+    const contentH = tagH + titleLines.length * 42 + bodyLines.length * 38 + 52;
+    const cardH = Math.max(224, contentH);
+    const topY = -cardH / 2;
+
+    fillCardWithShadow(ctx, -430, topY, 860, cardH, 24, '#EFF6FF', 0.08);
     ctx.strokeStyle = '#BFDBFE';
     ctx.lineWidth = 3;
-    drawRoundedRectPath(ctx, -420, -112, 840, 224, 24);
+    drawRoundedRectPath(ctx, -430, topY, 860, cardH, 24);
     ctx.stroke();
-    // Left Bootstrap border-start accent bar
+    // Left accent bar
     ctx.fillStyle = '#2563EB';
-    drawRoundedRectPath(ctx, -420, -112, 18, 224, 9);
+    drawRoundedRectPath(ctx, -430, topY, 18, cardH, 9);
     ctx.fill();
     // Icon circle
     ctx.fillStyle = '#DBEAFE';
     ctx.beginPath();
-    ctx.arc(-326, 0, 52, 0, Math.PI * 2);
+    ctx.arc(-336, 0, 52, 0, Math.PI * 2);
     ctx.fill();
     ctx.save();
-    ctx.translate(-326, 0);
+    ctx.translate(-336, 0);
     ctx.scale(0.62, 0.62);
-    drawSceneIcon(ctx, props.data?.sceneIcon || 'lightning');
+    drawSceneIcon(ctx, props.data?.sceneIcon || 'sparkles');
     ctx.restore();
-    // Badge pill
-    ctx.fillStyle = '#2563EB';
-    drawRoundedRectPath(ctx, -245, -72, 168, 36, 18);
-    ctx.fill();
-    ctx.font = `800 17px ${FONT_SANS}`;
-    ctx.fillStyle = '#FFFFFF';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('HEADS UP!', -161, -54, 150);
-    // Title & Body
+
+    let cursorY = topY + 30;
+    if (tagStr) {
+      ctx.font = `800 24px ${FONT_DISPLAY}`;
+      const pillW = Math.min(380, Math.max(150, ctx.measureText(tagStr).width + 44));
+      ctx.fillStyle = '#2563EB';
+      drawRoundedRectPath(ctx, -252, cursorY, pillW, 42, 21);
+      ctx.fill();
+      ctx.fillStyle = '#FFFFFF';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(tagStr, -252 + pillW / 2, cursorY + 21);
+      cursorY += 60;
+    } else {
+      cursorY += 12;
+    }
+
     ctx.textAlign = 'left';
-    ctx.font = `800 33px ${FONT_DISPLAY}`;
+    ctx.textBaseline = 'middle';
+    ctx.font = `800 34px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#1E3A8A';
-    ctx.fillText(props.data?.title || 'Quick Grammar Alert', -245, 0, 610);
-    ctx.font = `600 24px ${FONT_SANS}`;
-    ctx.fillStyle = '#334155';
-    ctx.fillText(
-      props.data?.speechText || props.data?.subtitle || 'Remember this polite pattern in daily English!',
-      -245,
-      54,
-      610,
-    );
+    titleLines.forEach((ln) => {
+      ctx.fillText(ln, -252, cursorY + 14);
+      cursorY += 42;
+    });
+
+    if (bodyLines.length > 0) {
+      cursorY += 6;
+      ctx.font = `600 30px ${FONT_DISPLAY}`;
+      ctx.fillStyle = '#334155';
+      bodyLines.forEach((ln) => {
+        ctx.fillText(ln, -252, cursorY + 14);
+        cursorY += 38;
+      });
+    }
   } else if (props.variant === 'bs-card-header') {
-    // Bootstrap Card with Colored Header Bar + Body + Footer Pill
-    fillCardWithShadow(ctx, -415, -132, 830, 264, 26, '#FFFFFF', 0.1);
+    // Card with Colored Header Bar + Multi-line Body (zero hardcoded English boilerplate)
+    const headerStr = props.data?.formula || 'LESSON FOCUS';
+    const titleStr = props.data?.title || 'Key Lesson';
+    const subStr = props.data?.subtitle || props.data?.speechText || '';
+
+    ctx.font = `800 38px ${FONT_DISPLAY}`;
+    const titleLines = wrapTextLines(ctx, titleStr, 600).slice(0, 2);
+    ctx.font = `600 30px ${FONT_DISPLAY}`;
+    const subLines = subStr ? wrapTextLines(ctx, subStr, 600).slice(0, 3) : [];
+    const textBlockH = titleLines.length * 46 + (subLines.length > 0 ? 8 + subLines.length * 38 : 0);
+    const bodyH = textBlockH + 64;
+    const cardH = Math.max(264, 72 + bodyH);
+    const topY = -cardH / 2;
+
+    fillCardWithShadow(ctx, -430, topY, 860, cardH, 26, '#FFFFFF', 0.1);
     ctx.strokeStyle = '#E2E8F0';
     ctx.lineWidth = 2.5;
-    drawRoundedRectPath(ctx, -415, -132, 830, 264, 26);
+    drawRoundedRectPath(ctx, -430, topY, 860, cardH, 26);
     ctx.stroke();
+
     // Top Header
     ctx.fillStyle = '#4F46E5';
-    drawRoundedRectPath(ctx, -415, -132, 830, 68, 24);
+    drawRoundedRectPath(ctx, -430, topY, 860, 72, 24);
     ctx.fill();
-    ctx.fillRect(-415, -88, 830, 24);
-    ctx.font = `800 24px ${FONT_DISPLAY}`;
+    ctx.fillRect(-430, topY + 46, 860, 26);
+    ctx.font = `800 28px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#FFFFFF';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
-    ctx.fillText(props.data?.formula || 'FEATURED LESSON CARD', -382, -98, 560);
-    ctx.fillStyle = 'rgba(255,255,255,0.22)';
-    drawRoundedRectPath(ctx, 245, -114, 144, 34, 17);
-    ctx.fill();
-    ctx.font = `700 17px ${FONT_SANS}`;
-    ctx.fillStyle = '#FFFFFF';
-    ctx.textAlign = 'center';
-    ctx.fillText('BS5 CARD', 317, -97);
-    // Body
+    ctx.fillText(headerStr, -396, topY + 36, 540);
+
+    if (props.data?.highlightWord) {
+      ctx.font = `700 24px ${FONT_DISPLAY}`;
+      const pillW = Math.min(250, Math.max(115, ctx.measureText(props.data.highlightWord).width + 36));
+      ctx.fillStyle = 'rgba(255,255,255,0.22)';
+      drawRoundedRectPath(ctx, 396 - pillW, topY + 17, pillW, 38, 19);
+      ctx.fill();
+      ctx.fillStyle = '#FFFFFF';
+      ctx.textAlign = 'center';
+      ctx.fillText(props.data.highlightWord, 396 - pillW / 2, topY + 36);
+    }
+
+    // Body icon
+    const bodyCenterY = topY + 72 + (cardH - 72) / 2;
     ctx.save();
-    ctx.translate(-328, 32);
-    ctx.scale(0.66, 0.66);
+    ctx.translate(-338, bodyCenterY);
+    ctx.scale(0.68, 0.68);
     drawSceneIcon(ctx, props.data?.sceneIcon || 'book');
     ctx.restore();
+
     ctx.textAlign = 'left';
-    ctx.font = `800 34px ${FONT_DISPLAY}`;
+    let by = bodyCenterY - textBlockH / 2 + 22;
+    ctx.font = `800 38px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#0F172A';
-    ctx.fillText(props.data?.title || 'Key Sentence Structure', -240, 2, 620);
-    ctx.font = `600 24px ${FONT_SANS}`;
-    ctx.fillStyle = '#475569';
-    ctx.fillText(
-      props.data?.subtitle || props.data?.speechText || 'Clear, structured explanation for fast recall',
-      -240,
-      54,
-      620,
-    );
-    // Subtle footer divider & chip
-    ctx.strokeStyle = '#F1F5F9';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(-382, 92);
-    ctx.lineTo(382, 92);
-    ctx.stroke();
-    ctx.font = `700 18px ${FONT_SANS}`;
-    ctx.fillStyle = '#6366F1';
-    ctx.fillText('✓ Save this template for speaking', -382, 114, 720);
+    titleLines.forEach((ln) => {
+      ctx.fillText(ln, -246, by);
+      by += 46;
+    });
+    if (subLines.length > 0) {
+      by += 4;
+      ctx.font = `600 30px ${FONT_DISPLAY}`;
+      ctx.fillStyle = '#475569';
+      subLines.forEach((ln) => {
+        ctx.fillText(ln, -246, by);
+        by += 38;
+      });
+    }
   } else if (props.variant === 'bs-progress-meter') {
-    // Bootstrap Progress Bar with Milestone Badge & Striped Fill
-    const pct = clamp01(props.data?.value ?? 0.78);
-    const pctLabel = `${Math.round(pct * 100)}%`;
+    const targetPct = clamp01(props.data?.value ?? 0.78);
+    const fillEase = easeOutQuint(clamp01((time - 0.08) / 0.65));
+    const pct = targetPct * fillEase;
+    const pctLabel = `${Math.round(targetPct * fillEase * 100)}%`;
     fillCardWithShadow(ctx, -420, -112, 840, 224, 28, '#FFFFFF', 0.09);
     ctx.strokeStyle = '#E2E8F0';
     ctx.lineWidth = 2;
@@ -2185,15 +2552,15 @@ function drawIllustrationProp(
 
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
-    ctx.font = `800 30px ${FONT_DISPLAY}`;
+    ctx.font = `800 32px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#0F172A';
-    ctx.fillText(props.data?.title || 'Fluency Progress', -376, -54, 540);
+    ctx.fillText(props.data?.title || 'Progress', -376, -54, 580);
 
     // % Badge pill on right
     ctx.fillStyle = '#DCFCE7';
     drawRoundedRectPath(ctx, 250, -76, 126, 44, 22);
     ctx.fill();
-    ctx.font = `800 24px ${FONT_DISPLAY}`;
+    ctx.font = `800 26px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#15803D';
     ctx.textAlign = 'center';
     ctx.fillText(pctLabel, 313, -54);
@@ -2207,7 +2574,6 @@ function drawIllustrationProp(
     drawRoundedRectPath(ctx, barX, barY, barW, barH, 21);
     ctx.fill();
 
-    // Active Gradient Fill + Bootstrap stripes
     const fillW = Math.max(48, barW * pct);
     const grad = ctx.createLinearGradient(barX, 0, barX + fillW, 0);
     grad.addColorStop(0, '#0D6EFD');
@@ -2231,48 +2597,40 @@ function drawIllustrationProp(
     ctx.restore();
 
     ctx.textAlign = 'left';
-    ctx.font = `600 22px ${FONT_SANS}`;
-    ctx.fillStyle = '#64748B';
-    ctx.fillText(
-      props.data?.subtitle || 'Step-by-step mastery · Keep practicing every day!',
-      -376,
-      68,
-      740,
-    );
+    ctx.font = `600 24px ${FONT_SANS}`;
+    ctx.fillStyle = '#475569';
+    ctx.fillText(props.data?.subtitle || '', -376, 68, 740);
   } else if (props.variant === 'bs-toast-notify') {
-    // Bootstrap Floating Toast Notification
-    fillCardWithShadow(ctx, -400, -116, 800, 232, 26, '#FFFFFF', 0.12);
+    // Floating Toast Notification with dynamic header & multi-line body
+    fillCardWithShadow(ctx, -400, -120, 800, 240, 26, '#FFFFFF', 0.12);
     ctx.strokeStyle = '#CBD5E1';
     ctx.lineWidth = 2;
-    drawRoundedRectPath(ctx, -400, -116, 800, 232, 26);
+    drawRoundedRectPath(ctx, -400, -120, 800, 240, 26);
     ctx.stroke();
 
-    // Header row inside Toast
     ctx.fillStyle = '#F8FAFC';
-    drawRoundedRectPath(ctx, -400, -116, 800, 62, 24);
+    drawRoundedRectPath(ctx, -400, -120, 800, 62, 24);
     ctx.fill();
-    ctx.fillRect(-400, -76, 800, 22);
+    ctx.fillRect(-400, -80, 800, 22);
     ctx.fillStyle = '#10B981';
-    drawRoundedRectPath(ctx, -366, -98, 28, 28, 8);
+    drawRoundedRectPath(ctx, -366, -102, 28, 28, 8);
     ctx.fill();
-    ctx.font = `800 22px ${FONT_DISPLAY}`;
+    ctx.font = `800 24px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#0F172A';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
-    ctx.fillText('Native Coach', -324, -84);
-    ctx.font = `600 18px ${FONT_SANS}`;
-    ctx.fillStyle = '#64748B';
+    ctx.fillText(props.data?.formula || 'KEY TAKEAWAY', -324, -88, 520);
+    ctx.font = `700 22px ${FONT_SANS}`;
+    ctx.fillStyle = '#059669';
     ctx.textAlign = 'right';
-    ctx.fillText('just now · ✓ verified', 366, -84);
+    ctx.fillText(props.data?.highlightWord || '✓', 366, -88);
 
-    // Divider
     ctx.strokeStyle = '#E2E8F0';
     ctx.beginPath();
-    ctx.moveTo(-400, -54);
-    ctx.lineTo(400, -54);
+    ctx.moveTo(-400, -58);
+    ctx.lineTo(400, -58);
     ctx.stroke();
 
-    // Body
     ctx.save();
     ctx.translate(-310, 30);
     ctx.scale(0.6, 0.6);
@@ -2281,121 +2639,116 @@ function drawIllustrationProp(
     ctx.textAlign = 'left';
     ctx.font = `800 32px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#0F172A';
-    ctx.fillText(props.data?.title || 'New Phrase Unlocked!', -225, 4, 590);
-    ctx.font = `600 24px ${FONT_SANS}`;
+    ctx.fillText(props.data?.title || 'Key Phrase', -225, -4, 590);
+    ctx.font = `600 26px ${FONT_SANS}`;
     ctx.fillStyle = '#334155';
-    ctx.fillText(
-      props.data?.speechText || '"Sounds natural & friendly!"',
-      -225,
-      54,
+    const bodyLines = wrapTextLines(
+      ctx,
+      props.data?.speechText || props.data?.subtitle || '',
       590,
-    );
+    ).slice(0, 2);
+    bodyLines.forEach((ln, li) => ctx.fillText(ln, -225, 42 + li * 34));
   } else if (props.variant === 'bs-list-group') {
-    // Bootstrap Flush List Group with Numbered Badges
     const items = props.data?.labels?.slice(0, 3) ?? [
-      '1. Listen to native rhythm',
-      '2. Repeat out loud 3 times',
-      '3. Use in a real sentence',
+      'Listen to rhythm',
+      'Repeat out loud',
+      'Use in context',
     ];
-    fillCardWithShadow(ctx, -415, -132, 830, 264, 26, '#FFFFFF', 0.09);
+    fillCardWithShadow(ctx, -415, -138, 830, 276, 26, '#FFFFFF', 0.09);
     ctx.strokeStyle = '#E2E8F0';
     ctx.lineWidth = 2;
-    drawRoundedRectPath(ctx, -415, -132, 830, 264, 26);
+    drawRoundedRectPath(ctx, -415, -138, 830, 276, 26);
     ctx.stroke();
 
     items.forEach((row, i) => {
-      const ry = -84 + i * 84;
+      const stag = computeStaggerItemState(elElapsed, i, 0.09, 0.34);
+      if (!stag.visible) return;
+      const ry = -88 + i * 88;
+      ctx.save();
+      ctx.globalAlpha *= stag.opacity;
+      ctx.translate(0, stag.translateY);
       if (i === 1) {
         ctx.fillStyle = '#EFF6FF';
-        drawRoundedRectPath(ctx, -400, ry - 34, 800, 68, 16);
+        drawRoundedRectPath(ctx, -400, ry - 36, 800, 72, 16);
         ctx.fill();
       }
       if (i > 0) {
         ctx.strokeStyle = '#F1F5F9';
         ctx.lineWidth = 2;
         ctx.beginPath();
-        ctx.moveTo(-395, ry - 42);
-        ctx.lineTo(395, ry - 42);
+        ctx.moveTo(-395, ry - 44);
+        ctx.lineTo(395, ry - 44);
         ctx.stroke();
       }
-      // Circle badge
       ctx.fillStyle = i === 1 ? '#2563EB' : '#64748B';
       ctx.beginPath();
-      ctx.arc(-352, ry, 20, 0, Math.PI * 2);
+      ctx.arc(-352, ry, 22, 0, Math.PI * 2);
       ctx.fill();
-      ctx.font = `800 20px ${FONT_DISPLAY}`;
+      ctx.font = `800 24px ${FONT_DISPLAY}`;
       ctx.fillStyle = '#FFFFFF';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText(`${i + 1}`, -352, ry + 1);
 
       ctx.textAlign = 'left';
-      ctx.font = `${i === 1 ? 800 : 700} 26px ${FONT_DISPLAY}`;
+      ctx.font = `${i === 1 ? 800 : 700} 28px ${FONT_DISPLAY}`;
       ctx.fillStyle = i === 1 ? '#1D4ED8' : '#1E293B';
-      ctx.fillText(row, -310, ry + 1, 610);
-
-      // Right pill
-      ctx.fillStyle = i === 1 ? '#2563EB' : '#F1F5F9';
-      drawRoundedRectPath(ctx, 314, ry - 16, 74, 32, 16);
-      ctx.fill();
-      ctx.font = `700 16px ${FONT_SANS}`;
-      ctx.fillStyle = i === 1 ? '#FFFFFF' : '#64748B';
-      ctx.textAlign = 'center';
-      ctx.fillText(i === 1 ? 'ACTIVE' : 'KEY', 351, ry + 1);
+      const lines = wrapTextLines(ctx, row, 670).slice(0, 2);
+      const lh = 30;
+      const ly = ry - ((lines.length - 1) * lh) / 2;
+      lines.forEach((ln, li) => ctx.fillText(ln, -308, ly + li * lh));
+      ctx.restore();
     });
   } else if (props.variant === 'bs-pricing-tier') {
-    // Two-column Bootstrap Compare Tier Cards (Basic vs Recommended Pro)
-    const leftTxt = props.data?.labels?.[0] || 'Textbook Style';
-    const rightTxt = props.data?.labels?.[1] || 'Native Fluency';
+    const leftTxt = props.data?.labels?.[0] || 'Literal Style';
+    const rightTxt = props.data?.labels?.[1] || 'Natural Fluency';
 
-    // Left Basic Card
     fillCardWithShadow(ctx, -420, -118, 392, 236, 26, '#FFFFFF', 0.07);
     ctx.strokeStyle = '#E2E8F0';
     ctx.lineWidth = 2;
     drawRoundedRectPath(ctx, -420, -118, 392, 236, 26);
     ctx.stroke();
     ctx.fillStyle = '#F1F5F9';
-    drawRoundedRectPath(ctx, -386, -88, 120, 34, 17);
+    drawRoundedRectPath(ctx, -386, -88, 128, 36, 18);
     ctx.fill();
-    ctx.font = `700 17px ${FONT_SANS}`;
+    ctx.font = `700 20px ${FONT_SANS}`;
     ctx.fillStyle = '#64748B';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText('BASIC', -326, -71);
+    ctx.fillText('BASIC', -322, -70);
     ctx.font = `800 30px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#334155';
-    ctx.fillText(leftTxt, -224, -4, 340);
-    ctx.font = `600 21px ${FONT_SANS}`;
-    ctx.fillStyle = '#94A3B8';
-    ctx.fillText('✗ Stiff / Word-for-word', -224, 58, 340);
+    const lLines = wrapTextLines(ctx, leftTxt, 340).slice(0, 2);
+    lLines.forEach((ln, li) => ctx.fillText(ln, -224, -4 - ((lLines.length - 1) * 34) / 2 + li * 34));
+    ctx.font = `600 24px ${FONT_SANS}`;
+    ctx.fillStyle = '#64748B';
+    ctx.fillText('✗ Literal', -224, 64);
 
-    // Right Recommended Highlighted Card
     fillCardWithShadow(ctx, 28, -126, 392, 252, 26, '#EEF2FF', 0.14);
     ctx.strokeStyle = '#4F46E5';
     ctx.lineWidth = 4;
     drawRoundedRectPath(ctx, 28, -126, 392, 252, 26);
     ctx.stroke();
     ctx.fillStyle = '#4F46E5';
-    drawRoundedRectPath(ctx, 62, -98, 196, 36, 18);
+    drawRoundedRectPath(ctx, 62, -98, 214, 38, 19);
     ctx.fill();
-    ctx.font = `800 17px ${FONT_SANS}`;
+    ctx.font = `800 20px ${FONT_SANS}`;
     ctx.fillStyle = '#FFFFFF';
-    ctx.fillText('★ RECOMMENDED', 160, -80);
-    ctx.font = `800 31px ${FONT_DISPLAY}`;
+    ctx.fillText('★ RECOMMENDED', 169, -79);
+    ctx.font = `800 30px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#312E81';
-    ctx.fillText(rightTxt, 224, -6, 340);
-    ctx.font = `700 22px ${FONT_SANS}`;
+    const rLines = wrapTextLines(ctx, rightTxt, 340).slice(0, 2);
+    rLines.forEach((ln, li) => ctx.fillText(ln, 224, -6 - ((rLines.length - 1) * 34) / 2 + li * 34));
+    ctx.font = `700 24px ${FONT_SANS}`;
     ctx.fillStyle = '#15803D';
-    ctx.fillText('✓ Sounds 100% Natural', 224, 60, 340);
+    ctx.fillText('✓ 100% Natural', 224, 66);
   } else if (props.variant === 'bs-accordion-faq') {
-    // Bootstrap Accordion Q&A Drawer
     fillCardWithShadow(ctx, -420, -128, 840, 256, 26, '#FFFFFF', 0.09);
     ctx.strokeStyle = '#CBD5E1';
     ctx.lineWidth = 2;
     drawRoundedRectPath(ctx, -420, -128, 840, 256, 26);
     ctx.stroke();
 
-    // Expanded Question header
     ctx.fillStyle = '#E0E7FF';
     drawRoundedRectPath(ctx, -420, -128, 840, 74, 24);
     ctx.fill();
@@ -2404,90 +2757,101 @@ function drawIllustrationProp(
     ctx.fillStyle = '#3730A3';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
-    ctx.fillText(`Q: ${props.data?.title || 'Why do natives say this?'}`, -386, -90, 700);
+    ctx.fillText(`Q: ${props.data?.title || 'Quick Question'}`, -386, -90, 700);
     ctx.textAlign = 'right';
     ctx.fillText('▲', 386, -90);
 
-    // Answer body
     ctx.textAlign = 'left';
-    ctx.font = `600 25px ${FONT_SANS}`;
+    ctx.font = `600 26px ${FONT_SANS}`;
     ctx.fillStyle = '#1E293B';
-    ctx.fillText(
-      props.data?.speechText || props.data?.subtitle || 'A: It softens requests and builds instant rapport.',
-      -386,
-      0,
-      768,
-    );
-
-    // Collapsed second drawer hint
-    ctx.strokeStyle = '#E2E8F0';
-    ctx.beginPath();
-    ctx.moveTo(-420, 56);
-    ctx.lineTo(420, 56);
-    ctx.stroke();
-    ctx.font = `700 22px ${FONT_SANS}`;
-    ctx.fillStyle = '#64748B';
-    ctx.fillText('Q: Common mistake to avoid?', -386, 92, 660);
-    ctx.textAlign = 'right';
-    ctx.fillText('▼', 386, 92);
+    const ansText = props.data?.speechText || props.data?.subtitle || 'Clear explanation';
+    const ansLines = wrapTextLines(ctx, ansText, 768).slice(0, 3);
+    ansLines.forEach((ln, li) => ctx.fillText(ln, -386, -24 + li * 34));
   } else if (props.variant === 'bs-breadcrumb-path') {
-    // Bootstrap Breadcrumb / Pill Nav Step Card
     const crumbs = props.data?.labels?.slice(0, 3) ?? ['Context', 'Pattern', 'Fluent!'];
-    fillCardWithShadow(ctx, -425, -104, 850, 208, 28, '#FFFFFF', 0.09);
-    ctx.font = `700 20px ${FONT_SANS}`;
-    ctx.fillStyle = '#64748B';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(props.data?.title || 'LEARNING PATHWAY', 0, -64, 720);
+    const useVertical = crumbs.some((c) => c.length > 12);
+    if (useVertical) {
+      fillCardWithShadow(ctx, -425, -138, 850, 276, 28, '#FFFFFF', 0.09);
+      ctx.font = `800 24px ${FONT_SANS}`;
+      ctx.fillStyle = '#475569';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(props.data?.title || 'KEY STEPS', 0, -106);
+      crumbs.forEach((c, i) => {
+        const ry = -66 + i * 64;
+        const active = i === crumbs.length - 1;
+        ctx.fillStyle = active ? '#0D6EFD' : '#F1F5F9';
+        drawRoundedRectPath(ctx, -385, ry, 770, 52, 18);
+        ctx.fill();
+        ctx.font = `800 28px ${FONT_DISPLAY}`;
+        ctx.fillStyle = active ? '#FFFFFF' : '#1E293B';
+        ctx.fillText(`${i + 1}. ${c}`, 0, ry + 27);
+      });
+    } else {
+      fillCardWithShadow(ctx, -425, -104, 850, 208, 28, '#FFFFFF', 0.09);
+      ctx.font = `700 24px ${FONT_SANS}`;
+      ctx.fillStyle = '#64748B';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(props.data?.title || 'LEARNING PATHWAY', 0, -64, 720);
 
-    const xs = [-260, 0, 260];
-    crumbs.forEach((c, i) => {
-      const cx = xs[i];
-      const active = i === crumbs.length - 1;
-      ctx.fillStyle = active ? '#0D6EFD' : '#F1F5F9';
-      drawRoundedRectPath(ctx, cx - 106, -24, 212, 66, 33);
-      ctx.fill();
-      ctx.font = `800 25px ${FONT_DISPLAY}`;
-      ctx.fillStyle = active ? '#FFFFFF' : '#334155';
-      ctx.fillText(c, cx, 10, 184);
-      if (i < crumbs.length - 1) {
-        ctx.font = `800 28px ${FONT_SANS}`;
-        ctx.fillStyle = '#94A3B8';
-        ctx.fillText('›', cx + 130, 10);
-      }
-    });
+      const xs = [-260, 0, 260];
+      crumbs.forEach((c, i) => {
+        const cx = xs[i];
+        const active = i === crumbs.length - 1;
+        ctx.fillStyle = active ? '#0D6EFD' : '#F1F5F9';
+        drawRoundedRectPath(ctx, cx - 108, -24, 216, 68, 34);
+        ctx.fill();
+        ctx.font = `800 26px ${FONT_DISPLAY}`;
+        ctx.fillStyle = active ? '#FFFFFF' : '#334155';
+        ctx.fillText(c, cx, 10);
+        if (i < crumbs.length - 1) {
+          ctx.font = `800 28px ${FONT_SANS}`;
+          ctx.fillStyle = '#94A3B8';
+          ctx.fillText('›', cx + 130, 10);
+        }
+      });
+    }
   } else if (props.variant === 'css-bento-stats') {
-    // Modern 2x2 CSS Bento Grid
     const tiles = [
       { bg: '#EEF2FF', fg: '#4338CA', num: '01', lbl: props.data?.labels?.[0] || 'Core Word' },
       { bg: '#ECFDF5', fg: '#047857', num: '02', lbl: props.data?.labels?.[1] || 'Tone Check' },
-      { bg: '#FFF7ED', fg: '#C2410C', num: '03', lbl: props.data?.labels?.[2] || 'Pronunciation' },
-      { bg: '#FDF2F8', fg: '#BE185D', num: '★', lbl: props.data?.title || 'Real Example' },
+      { bg: '#FFF7ED', fg: '#C2410C', num: '03', lbl: props.data?.labels?.[2] || 'Practice' },
+      { bg: '#FDF2F8', fg: '#BE185D', num: '★', lbl: props.data?.title || 'Example' },
     ];
     const coords = [
-      [-420, -126],
-      [12, -126],
-      [-420, 8],
-      [12, 8],
+      [-420, -132],
+      [12, -132],
+      [-420, 10],
+      [12, 10],
     ];
     tiles.forEach((tile, i) => {
+      const stag = computeStaggerItemState(elElapsed, i, 0.075, 0.34);
+      if (!stag.visible) return;
       const [tx, ty] = coords[i];
-      fillCardWithShadow(ctx, tx, ty, 408, 118, 22, tile.bg, 0.06);
+      ctx.save();
+      ctx.globalAlpha *= stag.opacity;
+      ctx.translate(tx + 204, ty + 61 + stag.translateY);
+      ctx.scale(stag.scale, stag.scale);
+      fillCardWithShadow(ctx, -204, -61, 408, 122, 22, tile.bg, 0.06);
       ctx.fillStyle = tile.fg;
-      drawRoundedRectPath(ctx, tx + 18, ty + 31, 56, 56, 16);
+      drawRoundedRectPath(ctx, -204 + 16, -61 + 33, 56, 56, 16);
       ctx.fill();
       ctx.font = `800 24px ${FONT_DISPLAY}`;
       ctx.fillStyle = '#FFFFFF';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText(tile.num, tx + 46, ty + 60);
+      ctx.fillText(tile.num, -204 + 44, -61 + 62);
       ctx.textAlign = 'left';
       ctx.fillStyle = '#0F172A';
       ctx.font = `800 26px ${FONT_DISPLAY}`;
-      ctx.fillText(tile.lbl, tx + 92, ty + 60, 294);
+      const lines = wrapTextLines(ctx, tile.lbl, 298).slice(0, 2);
+      const lh = 30;
+      const ly = -61 + 62 - ((lines.length - 1) * lh) / 2;
+      lines.forEach((ln, li) => ctx.fillText(ln, -204 + 88, ly + li * lh));
+      ctx.restore();
     });
   } else if (props.variant === 'css-glass-quote') {
-    // Modern Glassmorphism Quote Callout
     const grad = ctx.createLinearGradient(-420, -124, 420, 124);
     grad.addColorStop(0, 'rgba(99, 102, 241, 0.16)');
     grad.addColorStop(1, 'rgba(236, 72, 153, 0.14)');
@@ -2499,7 +2863,6 @@ function drawIllustrationProp(
     ctx.lineWidth = 4;
     ctx.stroke();
 
-    // Big Quote Mark
     ctx.font = `800 84px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#6366F1';
     ctx.textAlign = 'left';
@@ -2509,165 +2872,223 @@ function drawIllustrationProp(
     ctx.textAlign = 'center';
     ctx.font = `800 34px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#0F172A';
-    ctx.fillText(
+    const qLines = wrapTextLines(
+      ctx,
       props.data?.speechText || props.data?.title || 'Speak clearly, connect naturally.',
-      0,
-      -8,
       680,
-    );
+    ).slice(0, 2);
+    qLines.forEach((ln, li) => ctx.fillText(ln, 0, -24 + li * 40));
 
-    // Author / Tag Pill
-    ctx.fillStyle = '#FFFFFF';
-    drawRoundedRectPath(ctx, -155, 48, 310, 44, 22);
-    ctx.fill();
-    ctx.font = `700 20px ${FONT_SANS}`;
-    ctx.fillStyle = '#4F46E5';
-    ctx.fillText(props.data?.subtitle || '✨ Native Takeaway', 0, 70, 280);
+    if (props.data?.subtitle) {
+      ctx.font = `700 24px ${FONT_SANS}`;
+      const subW = Math.min(640, Math.max(240, ctx.measureText(props.data.subtitle).width + 44));
+      ctx.fillStyle = '#FFFFFF';
+      drawRoundedRectPath(ctx, -subW / 2, 50, subW, 46, 23);
+      ctx.fill();
+      ctx.fillStyle = '#4F46E5';
+      ctx.fillText(props.data.subtitle, 0, 74);
+    }
   } else if (props.variant === 'css-chat-thread') {
-    // Modern 2-Bubble Dialogue Chat Thread
     fillCardWithShadow(ctx, -420, -132, 840, 264, 30, '#F8FAFC', 0.08);
-    // Incoming left bubble
-    fillCardWithShadow(ctx, -382, -100, 540, 82, 24, '#FFFFFF', 0.06);
-    ctx.font = `600 25px ${FONT_SANS}`;
-    ctx.fillStyle = '#334155';
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(props.data?.labels?.[0] || 'A: "Excuse me, is this seat taken?"', -352, -58, 480);
+    const s0 = computeStaggerItemState(elElapsed, 0, 0.0, 0.34);
+    if (s0.visible) {
+      ctx.save();
+      ctx.globalAlpha *= s0.opacity;
+      ctx.translate(0, s0.translateY);
+      fillCardWithShadow(ctx, -382, -104, 620, 88, 24, '#FFFFFF', 0.06);
+      ctx.font = `600 26px ${FONT_SANS}`;
+      ctx.fillStyle = '#334155';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      const l0 = wrapTextLines(ctx, props.data?.labels?.[0] || 'A: "Excuse me?"', 560).slice(0, 2);
+      l0.forEach((ln, li) => ctx.fillText(ln, -352, -60 - ((l0.length - 1) * 30) / 2 + li * 30));
+      ctx.restore();
+    }
 
-    // Outgoing right indigo bubble
-    fillCardWithShadow(ctx, -160, 12, 542, 86, 24, '#4F46E5', 0.14);
-    ctx.font = `700 25px ${FONT_DISPLAY}`;
-    ctx.fillStyle = '#FFFFFF';
-    ctx.fillText(props.data?.labels?.[1] || 'B: "Not at all! Go right ahead."', -130, 56, 480);
+    const s1 = computeStaggerItemState(elElapsed, 1, 0.22, 0.36);
+    if (s1.visible) {
+      ctx.save();
+      ctx.globalAlpha *= s1.opacity;
+      ctx.translate(0, s1.translateY);
+      fillCardWithShadow(ctx, -238, 12, 620, 90, 24, '#4F46E5', 0.14);
+      ctx.font = `700 26px ${FONT_DISPLAY}`;
+      ctx.fillStyle = '#FFFFFF';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      const l1 = wrapTextLines(ctx, props.data?.labels?.[1] || 'B: "Go right ahead!"', 560).slice(0, 2);
+      l1.forEach((ln, li) => ctx.fillText(ln, -208, 57 - ((l1.length - 1) * 30) / 2 + li * 30));
+      ctx.restore();
+    }
   } else if (props.variant === 'css-roadmap-steps') {
-    // Modern CSS 3-Step Horizontal Stepper
     const steps = props.data?.labels?.slice(0, 3) ?? ['Spot It', 'Practice', 'Master'];
     const cols = ['#2563EB', '#7C3AED', '#10B981'];
-    fillCardWithShadow(ctx, -425, -112, 850, 224, 30, '#FFFFFF', 0.09);
-    // Connector line
-    ctx.strokeStyle = '#E2E8F0';
-    ctx.lineWidth = 8;
-    ctx.beginPath();
-    ctx.moveTo(-260, -24);
-    ctx.lineTo(260, -24);
-    ctx.stroke();
-
-    const xs = [-260, 0, 260];
-    steps.forEach((lbl, i) => {
-      const sx = xs[i];
-      ctx.fillStyle = cols[i];
+    const isLong = steps.some((s) => s.length > 13);
+    if (isLong) {
+      fillCardWithShadow(ctx, -425, -138, 850, 276, 28, '#FFFFFF', 0.09);
+      steps.forEach((lbl, i) => {
+        const stag = computeStaggerItemState(elElapsed, i, 0.10, 0.34);
+        if (!stag.visible) return;
+        const ry = -84 + i * 84;
+        ctx.save();
+        ctx.globalAlpha *= stag.opacity;
+        ctx.translate(0, stag.translateY);
+        ctx.fillStyle = cols[i % cols.length];
+        ctx.beginPath();
+        ctx.arc(-350, ry, 24, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.font = `800 24px ${FONT_DISPLAY}`;
+        ctx.fillStyle = '#FFFFFF';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(`0${i + 1}`, -350, ry + 1);
+        ctx.font = `800 30px ${FONT_DISPLAY}`;
+        ctx.fillStyle = '#0F172A';
+        ctx.textAlign = 'left';
+        const lines = wrapTextLines(ctx, lbl, 680).slice(0, 2);
+        const lh = 32;
+        const ly = ry - ((lines.length - 1) * lh) / 2;
+        lines.forEach((ln, li) => ctx.fillText(ln, -304, ly + li * lh));
+        ctx.restore();
+      });
+    } else {
+      fillCardWithShadow(ctx, -425, -116, 850, 232, 30, '#FFFFFF', 0.09);
+      const lineGrow = easeOutQuint(clamp01(elElapsed / 0.55));
+      ctx.strokeStyle = '#E2E8F0';
+      ctx.lineWidth = 8;
       ctx.beginPath();
-      ctx.arc(sx, -24, 32, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.font = `800 26px ${FONT_DISPLAY}`;
-      ctx.fillStyle = '#FFFFFF';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(`0${i + 1}`, sx, -23);
+      ctx.moveTo(-260, -34);
+      ctx.lineTo(-260 + 520 * lineGrow, -34);
+      ctx.stroke();
 
-      ctx.font = `800 26px ${FONT_DISPLAY}`;
-      ctx.fillStyle = '#0F172A';
-      ctx.fillText(lbl, sx, 48, 220);
-    });
+      const xs = [-260, 0, 260];
+      steps.forEach((lbl, i) => {
+        const stag = computeStaggerItemState(elElapsed, i, 0.10, 0.36);
+        if (!stag.visible) return;
+        const sx = xs[i];
+        ctx.save();
+        ctx.globalAlpha *= stag.opacity;
+        ctx.translate(sx, stag.translateY);
+        ctx.scale(stag.scale, stag.scale);
+        ctx.fillStyle = cols[i];
+        ctx.beginPath();
+        ctx.arc(0, -34, 32, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.font = `800 26px ${FONT_DISPLAY}`;
+        ctx.fillStyle = '#FFFFFF';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(`0${i + 1}`, 0, -33);
+
+        ctx.font = `800 28px ${FONT_DISPLAY}`;
+        ctx.fillStyle = '#0F172A';
+        const lines = wrapTextLines(ctx, lbl, 224).slice(0, 2);
+        lines.forEach((ln, li) => ctx.fillText(ln, 0, 38 + li * 32));
+        ctx.restore();
+      });
+    }
   } else if (props.variant === 'css-toggle-switch') {
-    // Modern CSS Toggle Switch Comparison Card
     const isOn = (props.data?.value ?? 1) >= 0.5;
+    const toggleSlide = isOn ? easeOutQuint(clamp01((elElapsed - 0.12) / 0.42)) : 0;
     fillCardWithShadow(ctx, -415, -112, 830, 224, 30, '#FFFFFF', 0.09);
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
-    ctx.font = `700 22px ${FONT_SANS}`;
-    ctx.fillStyle = '#94A3B8';
-    ctx.fillText(props.data?.labels?.[0] || 'OFF · Basic / Literal', -370, -48, 430);
+    ctx.font = `700 24px ${FONT_SANS}`;
+    ctx.fillStyle = '#64748B';
+    ctx.fillText(props.data?.labels?.[0] || 'OFF', -370, -48, 460);
     ctx.font = `800 34px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#0F172A';
     ctx.fillText(props.data?.title || 'ON · Native Mode', -370, 22, 460);
 
-    // Toggle track
     const tx = 140;
     const ty = -46;
-    ctx.fillStyle = isOn ? '#10B981' : '#CBD5E1';
+    ctx.fillStyle = toggleSlide > 0.5 ? '#10B981' : '#CBD5E1';
     drawRoundedRectPath(ctx, tx, ty, 224, 92, 46);
     ctx.fill();
-    // Knob
+    const knobX = tx + 48 + (176 - 48) * toggleSlide;
     ctx.save();
     ctx.shadowColor = 'rgba(15, 23, 42, 0.25)';
     ctx.shadowBlur = 12;
     ctx.fillStyle = '#FFFFFF';
     ctx.beginPath();
-    ctx.arc(isOn ? tx + 176 : tx + 48, ty + 46, 36, 0, Math.PI * 2);
+    ctx.arc(knobX, ty + 46, 36, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
     ctx.font = `800 24px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#FFFFFF';
     ctx.textAlign = 'center';
-    ctx.fillText(isOn ? 'ON' : 'OFF', isOn ? tx + 86 : tx + 140, ty + 48);
+    ctx.fillText(toggleSlide > 0.5 ? 'ON' : 'OFF', toggleSlide > 0.5 ? tx + 86 : tx + 140, ty + 48);
   } else if (props.variant === 'css-browser-mockup') {
-    // Modern Browser Window Card with macOS Dots + URL bar + Multi-line Passage Context support
+    // Modern Browser Window Card with macOS Dots + URL bar + Clear Multi-line Reading Context
     const bodyText =
       props.data?.speechText ||
       props.data?.subtitle ||
-      'Search · Learn · Speak with confidence';
-    ctx.font = `600 23px ${FONT_SANS}`;
-    const wrappedBody = wrapTextLines(ctx, bodyText, 750);
-    const displayLines = wrappedBody.slice(0, 5);
-    const extraH = Math.max(0, (displayLines.length - 2) * 32);
-    const cardTop = -128 - Math.round(extraH / 2);
-    const cardH = 256 + extraH;
+      'Reading context';
+    const bodyFontPx = bodyText.length > 145 ? 30 : 32;
+    const bodyLineH = Math.round(bodyFontPx * 1.28);
+    ctx.font = `600 ${bodyFontPx}px ${FONT_DISPLAY}`;
+    const wrappedBody = wrapTextLines(ctx, bodyText, 760);
+    const displayLines = wrappedBody.slice(0, 7);
+    const titleStr = props.data?.title || 'Reading Context';
+    ctx.font = `800 34px ${FONT_DISPLAY}`;
+    const titleLines = wrapTextLines(ctx, titleStr, 760).slice(0, 2);
+    const cardH = Math.max(250, 90 + titleLines.length * 42 + displayLines.length * bodyLineH + 38);
+    const cardTop = -Math.round(cardH / 2);
 
-    fillCardWithShadow(ctx, -415, cardTop, 830, cardH, 24, '#FFFFFF', 0.11);
+    fillCardWithShadow(ctx, -430, cardTop, 860, cardH, 24, '#FFFFFF', 0.11);
     ctx.strokeStyle = '#E2E8F0';
     ctx.lineWidth = 2;
-    drawRoundedRectPath(ctx, -415, cardTop, 830, cardH, 24);
+    drawRoundedRectPath(ctx, -430, cardTop, 860, cardH, 24);
     ctx.stroke();
 
     // Top chrome bar
     ctx.fillStyle = '#F1F5F9';
-    drawRoundedRectPath(ctx, -415, cardTop, 830, 56, 22);
+    drawRoundedRectPath(ctx, -430, cardTop, 860, 58, 22);
     ctx.fill();
-    ctx.fillRect(-415, cardTop + 34, 830, 22);
+    ctx.fillRect(-430, cardTop + 34, 860, 24);
 
-    // Traffic lights
     const dots = ['#EF4444', '#F59E0B', '#10B981'];
     dots.forEach((col, i) => {
       ctx.fillStyle = col;
       ctx.beginPath();
-      ctx.arc(-374 + i * 26, cardTop + 28, 8, 0, Math.PI * 2);
+      ctx.arc(-388 + i * 26, cardTop + 29, 8, 0, Math.PI * 2);
       ctx.fill();
     });
 
-    // URL pill
     ctx.fillStyle = '#FFFFFF';
-    drawRoundedRectPath(ctx, -260, cardTop + 11, 560, 34, 17);
+    drawRoundedRectPath(ctx, -270, cardTop + 11, 580, 36, 18);
     ctx.fill();
-    ctx.font = `600 17px ${FONT_SANS}`;
-    ctx.fillStyle = '#64748B';
+    ctx.font = `700 22px ${FONT_DISPLAY}`;
+    ctx.fillStyle = '#475569';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(props.data?.formula || 'https://english.practice/reading-context', 20, cardTop + 28, 520);
+    ctx.fillText(props.data?.formula || 'Reading Context', 20, cardTop + 29);
 
-    // Content area
-    ctx.font = `800 29px ${FONT_DISPLAY}`;
+    let cy = cardTop + 92;
+    ctx.font = `800 34px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#0F172A';
-    ctx.fillText(props.data?.title || 'Real-World English Context', 0, cardTop + 86, 750);
+    titleLines.forEach((tln) => {
+      ctx.fillText(tln, 0, cy);
+      cy += 42;
+    });
 
-    ctx.font = `600 23px ${FONT_SANS}`;
-    ctx.fillStyle = '#334155';
+    cy += 8;
+    ctx.font = `600 ${bodyFontPx}px ${FONT_DISPLAY}`;
+    ctx.fillStyle = '#1E293B';
     displayLines.forEach((ln, idx) => {
       const lineTxt =
         idx === displayLines.length - 1 && wrappedBody.length > displayLines.length
           ? `${ln.slice(0, Math.max(8, ln.length - 3))}...`
           : ln;
-      ctx.fillText(lineTxt, 0, cardTop + 128 + idx * 31, 750);
+      ctx.fillText(lineTxt, 0, cy + idx * bodyLineH);
     });
   } else if (props.variant === 'css-grammar-equation') {
-    // Grammar Token Pill Equation: [Part A] + [Part B] = [Result]
     const parts = props.data?.labels?.slice(0, 3) ?? ['Could you', 'V-inf', 'Polite!'];
-    fillCardWithShadow(ctx, -430, -112, 860, 224, 30, '#FFFFFF', 0.09);
-    ctx.font = `700 20px ${FONT_SANS}`;
-    ctx.fillStyle = '#64748B';
+    fillCardWithShadow(ctx, -430, -118, 860, 236, 30, '#FFFFFF', 0.09);
+    ctx.font = `700 24px ${FONT_SANS}`;
+    ctx.fillStyle = '#475569';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(props.data?.title || 'GRAMMAR FORMULA', 0, -72, 720);
+    ctx.fillText(props.data?.title || 'PATTERN', 0, -78, 760);
 
     const boxes = [
       { x: -395, w: 220, bg: '#DBEAFE', fg: '#1D4ED8', txt: parts[0] },
@@ -2676,18 +3097,20 @@ function drawIllustrationProp(
     ];
     boxes.forEach((b) => {
       ctx.fillStyle = b.bg;
-      drawRoundedRectPath(ctx, b.x, -26, b.w, 86, 22);
+      drawRoundedRectPath(ctx, b.x, -30, b.w, 96, 22);
       ctx.fill();
       ctx.font = `800 26px ${FONT_DISPLAY}`;
       ctx.fillStyle = b.fg;
-      ctx.fillText(b.txt, b.x + b.w / 2, 17, b.w - 22);
+      const bLines = wrapTextLines(ctx, b.txt, b.w - 20).slice(0, 2);
+      const lh = 28;
+      const ly = 18 - ((bLines.length - 1) * lh) / 2;
+      bLines.forEach((ln, li) => ctx.fillText(ln, b.x + b.w / 2, ly + li * lh));
     });
     ctx.font = `800 32px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#64748B';
-    ctx.fillText('+', -145, 17);
-    ctx.fillText('=', 135, 17);
+    ctx.fillText('+', -145, 18);
+    ctx.fillText('=', 135, 18);
   } else if (props.variant === 'css-flashcard-flip') {
-    // Layered Stacked Flip Flashcard
     fillCardWithShadow(ctx, -340, -124, 680, 224, 28, '#E0E7FF', 0.06);
     fillCardWithShadow(ctx, -370, -104, 740, 224, 28, '#FFFFFF', 0.12);
     ctx.strokeStyle = '#C7D2FE';
@@ -2696,27 +3119,26 @@ function drawIllustrationProp(
     ctx.stroke();
 
     ctx.fillStyle = '#EEF2FF';
-    drawRoundedRectPath(ctx, -115, -82, 230, 34, 17);
+    drawRoundedRectPath(ctx, -115, -82, 230, 36, 18);
     ctx.fill();
-    ctx.font = `800 17px ${FONT_SANS}`;
+    ctx.font = `800 20px ${FONT_SANS}`;
     ctx.fillStyle = '#4338CA';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText('FLASHCARD · FLIP', 0, -65);
+    ctx.fillText(props.data?.formula || 'FLASHCARD', 0, -64);
 
-    ctx.font = `800 40px ${FONT_DISPLAY}`;
+    ctx.font = `800 42px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#0F172A';
     ctx.fillText(props.data?.title || 'commute', 0, -4, 660);
-    ctx.font = `600 25px ${FONT_SANS}`;
+    ctx.font = `600 26px ${FONT_SANS}`;
     ctx.fillStyle = '#475569';
-    ctx.fillText(
-      props.data?.subtitle || props.data?.speechText || '/kəˈmjuːt/ · Đi làm hằng ngày',
-      0,
-      58,
+    const subLines = wrapTextLines(
+      ctx,
+      props.data?.subtitle || props.data?.speechText || '',
       660,
-    );
+    ).slice(0, 2);
+    subLines.forEach((ln, li) => ctx.fillText(ln, 0, 52 + li * 32));
   } else if (props.variant === 'css-sticky-note') {
-    // Sticky Note Card with Red Pushpin & Corner Fold
     ctx.save();
     ctx.rotate(-0.018);
     fillCardWithShadow(ctx, -375, -124, 750, 248, 22, '#FEF9C3', 0.12);
@@ -2725,7 +3147,6 @@ function drawIllustrationProp(
     drawRoundedRectPath(ctx, -375, -124, 750, 248, 22);
     ctx.stroke();
 
-    // Folded bottom-right corner
     ctx.fillStyle = '#FDE047';
     ctx.beginPath();
     ctx.moveTo(315, 124);
@@ -2734,7 +3155,6 @@ function drawIllustrationProp(
     ctx.closePath();
     ctx.fill();
 
-    // Red pushpin top center
     ctx.fillStyle = '#EF4444';
     ctx.beginPath();
     ctx.arc(0, -112, 16, 0, Math.PI * 2);
@@ -2746,72 +3166,93 @@ function drawIllustrationProp(
 
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.font = `800 18px ${FONT_SANS}`;
+    ctx.font = `800 22px ${FONT_SANS}`;
     ctx.fillStyle = '#B45309';
-    ctx.fillText(props.data?.formula || 'QUICK NOTE · REMEMBER', 0, -68, 620);
+    ctx.fillText(props.data?.formula || 'QUICK NOTE', 0, -68, 620);
 
-    ctx.font = `800 35px ${FONT_DISPLAY}`;
+    ctx.font = `800 36px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#1E293B';
-    ctx.fillText(props.data?.title || 'Soften requests with Could / Would', 0, -4, 670);
+    ctx.fillText(props.data?.title || 'Remember', 0, -6, 670);
 
-    ctx.font = `600 22px ${FONT_SANS}`;
-    ctx.fillStyle = '#475569';
-    const rawSub =
-      props.data?.subtitle || props.data?.speechText || 'Never use bare imperatives in polite settings!';
-    const wrappedSub = wrapTextLines(ctx, rawSub, 630);
-    const displaySub =
-      wrappedSub.length > 2
-        ? [wrappedSub[0], `${wrappedSub[1].slice(0, Math.max(4, wrappedSub[1].length - 1))}…`]
-        : wrappedSub.slice(0, 2);
-    const subStartY = displaySub.length === 2 ? 44 : 58;
-    displaySub.forEach((line, idx) => {
-      ctx.fillText(line, 0, subStartY + idx * 29, 640);
+    ctx.font = `600 26px ${FONT_SANS}`;
+    ctx.fillStyle = '#334155';
+    const rawSub = props.data?.subtitle || props.data?.speechText || '';
+    const wrappedSub = wrapTextLines(ctx, rawSub, 630).slice(0, 2);
+    const subStartY = wrappedSub.length === 2 ? 44 : 58;
+    wrappedSub.forEach((line, idx) => {
+      ctx.fillText(line, 0, subStartY + idx * 32);
     });
     ctx.restore();
   } else if (props.variant === 'bs-badge-cluster') {
-    // Bootstrap Pill Badge Cluster Card
-    fillCardWithShadow(ctx, -420, -124, 840, 248, 28, '#FFFFFF', 0.1);
-    ctx.strokeStyle = '#E2E8F0';
-    ctx.lineWidth = 2;
-    drawRoundedRectPath(ctx, -420, -124, 840, 248, 28);
-    ctx.stroke();
-
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.font = `800 26px ${FONT_DISPLAY}`;
-    ctx.fillStyle = '#0F172A';
-    ctx.fillText(props.data?.title || 'OTHER NATURAL WAYS TO SAY IT', 0, -72, 740);
-
-    const pills = props.data?.labels?.slice(0, 3) ?? ['Could you...', 'Would you mind...', 'I was wondering...'];
+    const pills = props.data?.labels?.slice(0, 3) ?? ['Phrase 1', 'Phrase 2', 'Phrase 3'];
+    const useStacked = pills.some((p) => p.length > 14);
     const palette = [
       { bg: '#DBEAFE', fg: '#1D4ED8' },
       { bg: '#DCFCE7', fg: '#15803D' },
       { bg: '#EDE9FE', fg: '#6D28D9' },
     ];
-    const xs = pills.length === 2 ? [-195, 195] : [-258, 0, 258];
-    const pw = pills.length === 2 ? 330 : 236;
-    pills.forEach((txt, i) => {
-      const col = palette[i % palette.length];
-      ctx.fillStyle = col.bg;
-      drawRoundedRectPath(ctx, xs[i] - pw / 2, -16, pw, 72, 36);
-      ctx.fill();
-      ctx.font = `800 24px ${FONT_DISPLAY}`;
-      ctx.fillStyle = col.fg;
-      ctx.fillText(txt, xs[i], 20, pw - 24);
-    });
+    if (useStacked) {
+      fillCardWithShadow(ctx, -420, -142, 840, 284, 28, '#FFFFFF', 0.1);
+      ctx.strokeStyle = '#E2E8F0';
+      ctx.lineWidth = 2;
+      drawRoundedRectPath(ctx, -420, -142, 840, 284, 28);
+      ctx.stroke();
 
-    ctx.font = `600 21px ${FONT_SANS}`;
-    ctx.fillStyle = '#64748B';
-    ctx.fillText(props.data?.subtitle || 'Tap to level up vocabulary variety', 0, 86, 740);
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font = `800 28px ${FONT_DISPLAY}`;
+      ctx.fillStyle = '#0F172A';
+      ctx.fillText(props.data?.title || 'KEY HIGHLIGHTS', 0, -104, 760);
+
+      pills.forEach((txt, i) => {
+        const col = palette[i % palette.length];
+        const py = -68 + i * 64;
+        ctx.fillStyle = col.bg;
+        drawRoundedRectPath(ctx, -380, py, 760, 52, 22);
+        ctx.fill();
+        ctx.font = `800 28px ${FONT_DISPLAY}`;
+        ctx.fillStyle = col.fg;
+        ctx.fillText(txt, 0, py + 27);
+      });
+    } else {
+      fillCardWithShadow(ctx, -420, -124, 840, 248, 28, '#FFFFFF', 0.1);
+      ctx.strokeStyle = '#E2E8F0';
+      ctx.lineWidth = 2;
+      drawRoundedRectPath(ctx, -420, -124, 840, 248, 28);
+      ctx.stroke();
+
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font = `800 28px ${FONT_DISPLAY}`;
+      ctx.fillStyle = '#0F172A';
+      ctx.fillText(props.data?.title || 'KEY HIGHLIGHTS', 0, -72, 740);
+
+      const xs = pills.length === 2 ? [-195, 195] : [-258, 0, 258];
+      const pw = pills.length === 2 ? 330 : 236;
+      pills.forEach((txt, i) => {
+        const col = palette[i % palette.length];
+        ctx.fillStyle = col.bg;
+        drawRoundedRectPath(ctx, xs[i] - pw / 2, -20, pw, 80, 36);
+        ctx.fill();
+        ctx.font = `800 26px ${FONT_DISPLAY}`;
+        ctx.fillStyle = col.fg;
+        const lines = wrapTextLines(ctx, txt, pw - 22).slice(0, 2);
+        lines.forEach((ln, li) => ctx.fillText(ln, xs[i], 20 - ((lines.length - 1) * 28) / 2 + li * 28));
+      });
+
+      if (props.data?.subtitle) {
+        ctx.font = `600 24px ${FONT_SANS}`;
+        ctx.fillStyle = '#475569';
+        ctx.fillText(props.data.subtitle, 0, 90, 740);
+      }
+    }
   } else if (props.variant === 'css-magnifying-word') {
-    // Spotlight Card + Magnifying Glass Icon
     fillCardWithShadow(ctx, -420, -122, 840, 244, 28, '#FFFFFF', 0.1);
     ctx.strokeStyle = '#CBD5E1';
     ctx.lineWidth = 2;
     drawRoundedRectPath(ctx, -420, -122, 840, 244, 28);
     ctx.stroke();
 
-    // Spotlight lens circle on left
     ctx.fillStyle = '#EEF2FF';
     ctx.beginPath();
     ctx.arc(-270, -6, 66, 0, Math.PI * 2);
@@ -2819,7 +3260,6 @@ function drawIllustrationProp(
     ctx.strokeStyle = '#4F46E5';
     ctx.lineWidth = 8;
     ctx.stroke();
-    // Handle
     ctx.lineCap = 'round';
     ctx.beginPath();
     ctx.moveTo(-222, 42);
@@ -2834,51 +3274,49 @@ function drawIllustrationProp(
 
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
-    ctx.font = `800 18px ${FONT_SANS}`;
+    ctx.font = `800 22px ${FONT_SANS}`;
     ctx.fillStyle = '#4F46E5';
-    ctx.fillText(props.data?.formula || 'CLOSER LOOK · NUANCE', -160, -64, 520);
+    ctx.fillText(props.data?.formula || 'KEY FOCUS', -160, -64, 520);
 
     ctx.font = `800 36px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#0F172A';
-    ctx.fillText(props.data?.highlightWord || props.data?.title || 'Keyword Spotlight', -160, -4, 540);
+    ctx.fillText(props.data?.highlightWord || props.data?.title || 'Spotlight', -160, -4, 540);
 
-    ctx.font = `600 24px ${FONT_SANS}`;
+    ctx.font = `600 26px ${FONT_SANS}`;
     ctx.fillStyle = '#475569';
-    ctx.fillText(
-      props.data?.subtitle || props.data?.speechText || 'Zoom in on native phrasing & usage',
-      -160,
-      56,
+    const subLines = wrapTextLines(
+      ctx,
+      props.data?.subtitle || props.data?.speechText || '',
       540,
-    );
+    ).slice(0, 2);
+    subLines.forEach((ln, li) => ctx.fillText(ln, -160, 48 + li * 32));
   } else if (props.variant === 'bs-modal-quiz') {
-    // Bootstrap Modal Dialog Quiz Card
     fillCardWithShadow(ctx, -415, -130, 830, 260, 26, '#FFFFFF', 0.13);
     ctx.strokeStyle = '#CBD5E1';
     ctx.lineWidth = 2;
     drawRoundedRectPath(ctx, -415, -130, 830, 260, 26);
     ctx.stroke();
 
-    // Dark Indigo Modal Header
     ctx.fillStyle = '#1E1B4B';
     drawRoundedRectPath(ctx, -415, -130, 830, 62, 24);
     ctx.fill();
     ctx.fillRect(-415, -90, 830, 22);
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
-    ctx.font = `800 22px ${FONT_DISPLAY}`;
+    ctx.font = `800 24px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#FFFFFF';
-    ctx.fillText(props.data?.formula || '⚡ QUICK CHECK MODAL', -380, -98, 560);
+    ctx.fillText(props.data?.formula || 'QUICK CHECK', -380, -98, 560);
     ctx.textAlign = 'right';
     ctx.fillStyle = '#A5B4FC';
     ctx.fillText('✕', 380, -98);
 
     ctx.textAlign = 'center';
-    ctx.font = `800 30px ${FONT_DISPLAY}`;
+    ctx.font = `800 32px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#0F172A';
-    ctx.fillText(props.data?.title || props.data?.speechText || 'Which phrase sounds natural?', 0, -18, 760);
+    ctx.fillText(props.data?.title || props.data?.speechText || 'Quick Question', 0, -18, 760);
 
-    const optA = props.data?.labels?.[0] || 'A. Option 1';
-    const optB = props.data?.labels?.[1] || 'B. Option 2';
+    const optA = props.data?.labels?.[0] || 'A';
+    const optB = props.data?.labels?.[1] || 'B';
     ctx.fillStyle = '#EEF2FF';
     drawRoundedRectPath(ctx, -370, 38, 350, 62, 18);
     ctx.fill();
@@ -2886,7 +3324,7 @@ function drawIllustrationProp(
     drawRoundedRectPath(ctx, 20, 38, 350, 62, 18);
     ctx.fill();
 
-    ctx.font = `800 23px ${FONT_DISPLAY}`;
+    ctx.font = `800 26px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#4338CA';
     ctx.fillText(optA, -195, 70, 320);
     ctx.fillStyle = '#15803D';
@@ -2903,6 +3341,10 @@ function drawIllustrationProp(
       drawRoundedRectPath(ctx, -160 + i * 38, -bh / 2, 22, bh, 11);
       ctx.fill();
     }
+  }
+
+  if (attachExtraLabels && props.data?.labels) {
+    drawProminentLabelsStrip(ctx, props.data.labels, 128, 840);
   }
 
   ctx.restore();
@@ -3025,21 +3467,23 @@ function drawSentenceCard(
   props: SentenceCardProps,
   width: number,
 ) {
-  ctx.font = `700 46px ${FONT_DISPLAY}`;
-  const innerMaxW = width - 104;
+  const textLen = props.text.trim().length;
+  const headFontSize = textLen > 95 ? 36 : textLen > 52 ? 40 : 46;
+  const lineH = Math.round(headFontSize * 1.28);
+  ctx.font = `700 ${headFontSize}px ${FONT_DISPLAY}`;
+  const innerMaxW = width - 96;
   const lines = wrapTextLines(ctx, props.text, innerMaxW);
-  const lineH = 60;
 
-  ctx.font = `600 26px ${FONT_SANS}`;
+  ctx.font = `600 30px ${FONT_DISPLAY}`;
   const subLines = props.subtext
     ? props.subtext
         .split(/\r?\n/)
         .flatMap((part) => wrapTextLines(ctx, part, innerMaxW))
-        .slice(0, 3)
+        .slice(0, 5)
     : [];
-  const subLineH = 34;
-  const subH = subLines.length > 0 ? subLines.length * subLineH + 14 : 0;
-  const cardH = Math.max(148, lines.length * lineH + subH + 74);
+  const subLineH = 38;
+  const subH = subLines.length > 0 ? subLines.length * subLineH + 18 : 0;
+  const cardH = Math.max(156, lines.length * lineH + subH + 74);
   const x = -width / 2;
   const y = -cardH / 2;
 
@@ -3056,7 +3500,7 @@ function drawSentenceCard(
   fillCardWithShadow(ctx, x, y, width, cardH, 38, cardBg, isDarkBg ? 0.3 : 0.1);
 
   // Render lines with optional emphasis word coloring
-  ctx.font = `700 46px ${FONT_DISPLAY}`;
+  ctx.font = `700 ${headFontSize}px ${FONT_DISPLAY}`;
   ctx.textBaseline = 'middle';
   const totalContentH = (lines.length - 1) * lineH + subH;
   const startTextY = y + cardH / 2 - totalContentH / 2;
@@ -3095,12 +3539,12 @@ function drawSentenceCard(
   });
 
   if (subLines.length > 0) {
-    ctx.font = `600 26px ${FONT_SANS}`;
+    ctx.font = `600 30px ${FONT_DISPLAY}`;
     ctx.textAlign = 'center';
     ctx.fillStyle = isDarkBg ? '#94A3B8' : '#475569';
-    const subStartY = startTextY + (lines.length - 1) * lineH + 46;
+    const subStartY = startTextY + (lines.length - 1) * lineH + Math.round(lineH * 0.88);
     subLines.forEach((sLn, sIdx) => {
-      ctx.fillText(sLn, 0, subStartY + sIdx * subLineH, innerMaxW);
+      ctx.fillText(sLn, 0, subStartY + sIdx * subLineH);
     });
   }
 
@@ -3226,12 +3670,14 @@ function drawWordStack(
 
   props.rows.forEach((row, idx) => {
     if (time < row.appearAt) return;
-    const elapsed = Math.min(1, (time - row.appearAt) / 0.25);
-    const scale = 0.88 + 0.12 * elapsed;
+    const p = clamp01((time - row.appearAt) / 0.34);
+    const eased = easeOutQuint(p);
+    const scale = 0.9 + 0.1 * eased;
+    const slideY = (1 - eased) * 24;
 
     ctx.save();
-    ctx.globalAlpha *= elapsed;
-    ctx.translate(0, startY + idx * (rowH + gap) + rowH / 2);
+    ctx.globalAlpha *= easeOutCubic(p);
+    ctx.translate(0, startY + idx * (rowH + gap) + rowH / 2 + slideY);
     ctx.scale(scale, scale);
 
     fillCardWithShadow(ctx, -width / 2, -rowH / 2, width, rowH, 34, '#FFFFFF', 0.09);
@@ -3278,6 +3724,7 @@ function drawShape3D(
   props: Shape3DProps,
   width: number,
   height: number,
+  elElapsed = 1,
 ) {
   const x = -width / 2;
   const y = -height / 2;
@@ -3341,10 +3788,15 @@ function drawShape3D(
     const labels = props.stepLabels ?? ['Step 1', 'Step 2', 'Step 3'];
 
     for (let i = 0; i < steps; i++) {
+      const stag = computeStaggerItemState(elElapsed, i, 0.1, 0.38);
+      if (!stag.visible) continue;
       const ratio = 0.45 + i * 0.27;
-      const sh = height * ratio;
+      const sh = Math.max(40, height * ratio * (0.28 + 0.72 * stag.progress));
       const sx = x + i * (stepW + gap);
       const sy = y + height - sh;
+
+      ctx.save();
+      ctx.globalAlpha *= stag.opacity;
 
       // Extruded depth
       if (depth > 0) {
@@ -3364,11 +3816,15 @@ function drawShape3D(
       const label = labels[i];
       if (label) {
         ctx.fillStyle = props.textColor || '#FFFFFF';
-        ctx.font = `800 32px ${FONT_DISPLAY}`;
+        ctx.font = `800 30px ${FONT_DISPLAY}`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText(label, sx + stepW / 2, sy + sh / 2);
+        const stepLines = wrapTextLines(ctx, label, stepW - 24).slice(0, 2);
+        const lh = 34;
+        const ly = sy + sh / 2 - ((stepLines.length - 1) * lh) / 2;
+        stepLines.forEach((ln, li) => ctx.fillText(ln, sx + stepW / 2, ly + li * lh));
       }
+      ctx.restore();
     }
     return;
   } else {
@@ -3640,13 +4096,13 @@ export function renderProjectFrame(
 
     switch (el.props.kind) {
       case 'comparison-strip':
-        drawComparisonStrip(ctx, el.props, el.layout.width, time);
+        drawComparisonStrip(ctx, el.props, el.layout.width, time, el.startTime);
         break;
       case 'topic-pill':
         drawTopicPill(ctx, el.props);
         break;
       case 'illustration-prop':
-        drawIllustrationProp(ctx, el.props, time);
+        drawIllustrationProp(ctx, el.props, time, el.startTime);
         break;
       case 'sentence-card':
         drawSentenceCard(ctx, el.props, el.layout.width);
@@ -3658,7 +4114,7 @@ export function renderProjectFrame(
         drawWordStack(ctx, el.props, el.layout.width, time);
         break;
       case 'shape-3d':
-        drawShape3D(ctx, el.props, el.layout.width, el.layout.height ?? 200);
+        drawShape3D(ctx, el.props, el.layout.width, el.layout.height ?? 200, Math.max(0, time - el.startTime));
         break;
       case 'karaoke-card':
         drawKaraokeCard(ctx, el.props, el.layout.width, time);
