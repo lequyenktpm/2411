@@ -2732,14 +2732,19 @@ function drawIllustrationProp(
     ctx.fillStyle = '#1E293B';
     ctx.fillText(props.data?.title || 'Soften requests with Could / Would', 0, -4, 670);
 
-    ctx.font = `600 24px ${FONT_SANS}`;
+    ctx.font = `600 22px ${FONT_SANS}`;
     ctx.fillStyle = '#475569';
-    ctx.fillText(
-      props.data?.subtitle || props.data?.speechText || 'Never use bare imperatives in polite settings!',
-      0,
-      58,
-      650,
-    );
+    const rawSub =
+      props.data?.subtitle || props.data?.speechText || 'Never use bare imperatives in polite settings!';
+    const wrappedSub = wrapTextLines(ctx, rawSub, 630);
+    const displaySub =
+      wrappedSub.length > 2
+        ? [wrappedSub[0], `${wrappedSub[1].slice(0, Math.max(4, wrappedSub[1].length - 1))}…`]
+        : wrappedSub.slice(0, 2);
+    const subStartY = displaySub.length === 2 ? 44 : 58;
+    displaySub.forEach((line, idx) => {
+      ctx.fillText(line, 0, subStartY + idx * 29, 640);
+    });
     ctx.restore();
   } else if (props.variant === 'bs-badge-cluster') {
     // Bootstrap Pill Badge Cluster Card

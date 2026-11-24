@@ -1,6 +1,11 @@
 import { LAYOUT_COMPOSITIONS } from './illustrationLayouts';
 import { formatTimeToken } from './transcriptParser';
-import { CanvasThemeId, LayoutCompositionId, TranscriptCue } from './types';
+import {
+  CanvasThemeId,
+  CustomComponentPresetConfig,
+  LayoutCompositionId,
+  TranscriptCue,
+} from './types';
 import { getCatalogSummaryForPrompt } from './vectorComponentDb';
 
 export type PromptVideoStyle = 'tiktok-cards' | '3d-shapes' | 'word-reveal-dark';
@@ -12,6 +17,7 @@ export function buildSceneGenerationPrompt(
     style?: PromptVideoStyle;
     compositionId?: LayoutCompositionId | 'ai-decide';
     theme?: CanvasThemeId;
+    customConfig?: CustomComponentPresetConfig;
   },
 ): string {
   const style = options?.style ?? 'tiktok-cards';
@@ -33,7 +39,18 @@ export function buildSceneGenerationPrompt(
   // ── Style guide block ──────────────────────────────────────────────────────
   let styleGuide: string;
 
-  if (isWordReveal || options?.compositionId === 'word-reveal') {
+  if (options?.compositionId === 'custom' && options?.customConfig) {
+    const cc = options.customConfig;
+    styleGuide = `CHẾ ĐỘ TỰ SÁNG TẠO & TÙY BIẾN COMPONENT TỪ KHO:
+- Người dùng đã chọn component chủ đạo từ Kho Component: \`variant: "${cc.variant}"\`${cc.sceneIcon ? `, \`sceneIcon: "${cc.sceneIcon}"\`` : ''}.
+- Tham số tùy biến yêu cầu áp dụng vào các thẻ minh họa trọng tâm:
+  + Tiêu đề (\`title\`): "${cc.title || options?.title || 'Key Rule'}"
+  + Phụ đề (\`subtitle\`): "${cc.subtitle || 'Điền ghi chú ngắn sát câu thoại'}"
+  + Nhãn (\`labels\`): ${JSON.stringify(cc.labels && cc.labels.length > 0 ? cc.labels : ['Step 1', 'Step 2', 'Step 3'])}
+  + Từ nhấn (\`highlightWord\`): "${cc.highlightWord || ''}"
+  + Màu nhấn (\`accentColor\`): "${cc.accentColor || '#4F46E5'}"
+- Hãy giữ đúng \`variant: "${cc.variant}"\` hoặc biến tấu sáng tạo thêm bằng \`customPrimitives\` dựa theo phong cách này, đồng bộ với từng câu thoại.`;
+  } else if (isWordReveal || options?.compositionId === 'word-reveal') {
     styleGuide = `PHONG CÁCH WORD-REVEAL (@xun52000 — Kinetic Typography tập trung chữ lớn):
 - Đặt "theme": "${options?.theme ?? 'studio-slate'}" (hoặc "pastel-sunrise" / "soft-lavender" / "mint-breeze" / "warm-paper").
 - Mỗi câu thoại → 1 "sentence_card" to, căn giữa (y ≈ 780), làm nổi từ khóa bằng "emphasisWord" + "emphasisColor": "#FACC15" (nền tối) hoặc "#4F46E5" (nền sáng).
@@ -46,7 +63,7 @@ export function buildSceneGenerationPrompt(
 - Ưu tiên dùng "card_3d", "pill_3d", "cube_3d", "staircase_3d" làm điểm nhấn chính ở Vùng C & Vùng D.`;
   } else if (aiDecideComposition) {
     // AI tự quyết định phong cách phối tối ưu dựa trên nội dung
-    const compositionList = LAYOUT_COMPOSITIONS.map(
+    const compositionList = LAYOUT_COMPOSITIONS.filter((c) => c.id !== 'custom').map(
       (c) => `  - "${c.id}" → ${c.name}: ${c.description} (theme: ${c.recommendedTheme}, signature: ${c.signatureVariant})`,
     ).join('\n');
 

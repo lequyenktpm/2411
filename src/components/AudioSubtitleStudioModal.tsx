@@ -12,6 +12,7 @@ import {
   Upload,
   X,
 } from 'lucide-react';
+import { ApiKeyInlineControl } from './ApiKeyInlineControl';
 import {
   cuesToBlockTranscript,
   cuesToSrt,
@@ -24,6 +25,7 @@ import {
   synthesizeAudioWithProgressJob,
 } from '../engine/ttsSyncHelper';
 import { TranscriptCue } from '../engine/types';
+import { buildApiKeyHeaders, useClientApiKeys } from '../utils/apiKeysStore';
 
 export interface TtsVoiceOption {
   id: string;
@@ -124,9 +126,11 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
     return cleaned || SAMPLE_TTS_SCRIPT;
   });
   const [autoAlignWhisper, setAutoAlignWhisper] = useState<boolean>(true);
+  const [ttsAlignMode, setTtsAlignMode] = useState<'fast-forced' | 'whisper'>('fast-forced');
   const [ttsWhisperModel, setTtsWhisperModel] = useState<string>('Xenova/whisper-small');
   const [ttsAlignNote, setTtsAlignNote] = useState<string | null>(null);
   const [ttsCleanedNotice, setTtsCleanedNotice] = useState<string | null>(null);
+  const { keys: clientKeys } = useClientApiKeys();
   const [ttsPreviewMode, setTtsPreviewMode] = useState<'block' | 'srt'>('block');
   const [isSynthesizing, setIsSynthesizing] = useState(false);
   const [isAligningTts, setIsAligningTts] = useState(false);
@@ -207,13 +211,8 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
       .catch(() => undefined);
   };
 
-  useEffect(() => {
-    if (!isOpen) return;
-    if (initialTranscriptText?.trim()) {
-      const cleaned = stripTimestampsFromScript(initialTranscriptText);
-      if (cleaned) setTtsText(cleaned);
-    }
-    fetch('/api/tts/voices')
+  const refreshVoices = () => {
+    fetch('/api/tts/voices', { headers: buildApiKeyHeaders() })
       .then((r) => parseApiJson<{
         providers?: TtsProviderInfo[];
         hasGeminiKey?: boolean;
@@ -233,6 +232,15 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
         }
       })
       .catch(() => undefined);
+  };
+
+  useEffect(() => {
+    if (!isOpen) return;
+    if (initialTranscriptText?.trim()) {
+      const cleaned = stripTimestampsFromScript(initialTranscriptText);
+      if (cleaned) setTtsText(cleaned);
+    }
+    refreshVoices();
     refreshWhisperStatus();
   }, [isOpen, initialTranscriptText]);
 
@@ -242,16 +250,19 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
     };
   }, [ttsResult]);
 
+  const effectiveHasGeminiKey = hasGeminiKey || Boolean(clientKeys.geminiApiKey);
+  const effectiveHasElevenLabsKey = hasElevenLabsKey || Boolean(clientKeys.elevenlabsApiKey);
+
   const availableVoices = useMemo(() => {
     if (provider === 'auto') {
       return providers.flatMap((p) => {
-        if (p.id === 'gemini' && !hasGeminiKey) return [];
-        if (p.id === 'elevenlabs' && !hasElevenLabsKey) return [];
+        if (p.id === 'gemini' && !effectiveHasGeminiKey) return [];
+        if (p.id === 'elevenlabs' && !effectiveHasElevenLabsKey) return [];
         return p.voices;
       });
     }
     return providers.find((p) => p.id === provider)?.voices ?? [];
-  }, [providers, provider, hasGeminiKey, hasElevenLabsKey]);
+  }, [providers, provider, effectiveHasGeminiKey, effectiveHasElevenLabsKey]);
 
   useEffect(() => {
     if (availableVoices.length > 0 && !availableVoices.some((v) => v.id === voice)) {
@@ -263,13 +274,19 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
 
   const selectedVoiceObj = availableVoices.find((v) => v.id === voice);
 
-  const alignAudioWithWhisperAuto = async (audioBase64: string, modelId: string) => {
+  const alignAudioWithWhisperAuto = async (
+    audioBase64: string,
+    modelId: string,
+    referenceText?: string,
+  ) => {
     return alignAudioWithProgressJob(
       {
         audioBase64,
         ext: '.mp3',
         lang: 'auto',
         model: modelId,
+        referenceText,
+        alignMode: ttsAlignMode,
       },
       (pct, lbl) => {
         setTtsProgress(Math.min(99, Math.round(74 + pct * 0.25)));
@@ -322,9 +339,13 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
       if (autoAlignWhisper && finalCues.length > 0) {
         setIsAligningTts(true);
         setTtsProgress(74);
-        setTtsStageLabel(`Đang đồng bộ từng từ qua Whisper (${ttsWhisperModel})...`);
+        setTtsStageLabel(
+          ttsAlignMode === 'fast-forced'
+            ? 'Đang căn nhịp từng từ theo kịch bản (Fast Forced Align)...'
+            : `Đang đồng bộ từng từ qua Whisper (${ttsWhisperModel})...`,
+        );
         try {
-          const aligned = await alignAudioWithWhisperAuto(data.audioBase64, ttsWhisperModel);
+          const aligned = await alignAudioWithWhisperAuto(data.audioBase64, ttsWhisperModel, clean);
           const whisperWords = Array.isArray(aligned?.words) ? aligned.words : [];
           if (whisperWords.length > 0) {
             finalCues = refineCuesWithWhisperWords(finalCues, whisperWords);
@@ -481,7 +502,7 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
       const buf = await mediaFile.arrayBuffer();
       const startRes = await fetch('/api/subtitles/transcribe/start', {
         method: 'POST',
-        headers: {
+        headers: buildApiKeyHeaders({
           'Content-Type': 'application/octet-stream',
           'x-file-ext': ext,
           'x-engine': sttService,
@@ -489,7 +510,7 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
           'x-output-format': outputFormat,
           'x-source-lang': sourceLang,
           'x-translate-lang': translateLang,
-        },
+        }),
         body: buf,
       });
       const startData = await parseApiJson<{ jobId?: string; error?: string }>(
@@ -595,7 +616,7 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
     try {
       const res = await fetch('/api/subtitles/translate', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: buildApiKeyHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           srt: sourceSrt,
           targetLang: standaloneTargetLang,
@@ -778,13 +799,12 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
                 </div>
               </div>
 
-              {((provider === 'elevenlabs' && !hasElevenLabsKey) ||
-                (provider === 'gemini' && !hasGeminiKey)) && (
-                <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-                  {provider === 'elevenlabs'
-                    ? 'Để dùng ElevenLabs AI Voice, hãy cấu hình biến ELEVENLABS_API_KEY trong Environment Secrets / .env trên server (hoặc dùng Edge Neural / Google / Polly miễn phí ngay).'
-                    : 'Để dùng Gemini Flash TTS, hãy cấu hình biến GEMINI_API_KEY trong Environment Secrets / .env trên server.'}
-                </p>
+              {(provider === 'elevenlabs' || provider === 'gemini') && (
+                <ApiKeyInlineControl
+                  provider={provider === 'elevenlabs' ? 'elevenlabs' : 'gemini'}
+                  hasServerKey={provider === 'elevenlabs' ? hasElevenLabsKey : hasGeminiKey}
+                  onSaved={refreshVoices}
+                />
               )}
 
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
@@ -861,7 +881,7 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
                 )}
               </div>
 
-              {/* Integrated Whisper auto-sync toggle right inside Tab 1 */}
+              {/* Integrated alignment mode toggle right inside Tab 1 */}
               <div className="px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 flex flex-wrap items-center justify-between gap-2">
                 <label className="inline-flex items-center gap-2 text-xs text-slate-800 font-medium cursor-pointer">
                   <input
@@ -871,21 +891,35 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
                     className="rounded border-slate-300 text-indigo-600"
                   />
                   <span>
-                    Tự đồng bộ word-level qua Whisper Local ngay khi tạo Audio (nhận diện ngôn ngữ <code className="font-mono text-indigo-700">auto</code>)
+                    Tự đồng bộ từng từ ngay khi tạo Audio ({ttsAlignMode === 'fast-forced' ? 'Fast Forced Align <0.2s, không 429' : 'Whisper Local'})
                   </span>
                 </label>
-                <select
-                  aria-label="Model Whisper đồng bộ TTS"
-                  value={ttsWhisperModel}
-                  disabled={!autoAlignWhisper}
-                  onChange={(e) => setTtsWhisperModel(e.target.value)}
-                  className="px-2.5 py-1 text-[11px] font-mono bg-white border border-slate-200 rounded-lg disabled:opacity-50"
-                >
-                  <option value="Xenova/whisper-small">whisper-small (Word-level nhanh)</option>
-                  <option value="Xenova/whisper-base">whisper-base</option>
-                  <option value="Xenova/whisper-tiny">whisper-tiny (Siêu nhẹ)</option>
-                  <option value="large-v3-turbo">large-v3-turbo (Python faster-whisper)</option>
-                </select>
+                <div className="flex items-center gap-1.5">
+                  <select
+                    aria-label="Chế độ căn chỉnh từ TTS"
+                    value={ttsAlignMode}
+                    disabled={!autoAlignWhisper}
+                    onChange={(e) => setTtsAlignMode(e.target.value as 'fast-forced' | 'whisper')}
+                    className="px-2 py-1 text-[11px] bg-white border border-slate-200 rounded-lg disabled:opacity-50"
+                  >
+                    <option value="fast-forced">⚡ Fast Forced Align (Siêu nhanh)</option>
+                    <option value="whisper">Whisper ONNX (Chậm hơn)</option>
+                  </select>
+                  {ttsAlignMode === 'whisper' && (
+                    <select
+                      aria-label="Model Whisper đồng bộ TTS"
+                      value={ttsWhisperModel}
+                      disabled={!autoAlignWhisper}
+                      onChange={(e) => setTtsWhisperModel(e.target.value)}
+                      className="px-2.5 py-1 text-[11px] font-mono bg-white border border-slate-200 rounded-lg disabled:opacity-50"
+                    >
+                      <option value="Xenova/whisper-small">whisper-small (Word-level nhanh)</option>
+                      <option value="Xenova/whisper-base">whisper-base</option>
+                      <option value="Xenova/whisper-tiny">whisper-tiny (Siêu nhẹ)</option>
+                      <option value="large-v3-turbo">large-v3-turbo (Python faster-whisper)</option>
+                    </select>
+                  )}
+                </div>
               </div>
 
               {ttsError && (
@@ -1071,9 +1105,9 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
                     <option value="faster-whisper">faster-whisper (Built-in)</option>
                     <option value="whisper">Local Whisper (ONNX Built-in)</option>
                     <option value="gemini">
-                      {hasGeminiKey
-                        ? 'Gemini AI (Đã kết nối Secrets)'
-                        : 'Gemini AI (Cần GEMINI_API_KEY trong Secrets)'}
+                      {effectiveHasGeminiKey
+                        ? 'Gemini AI (Đã có API Key)'
+                        : 'Gemini AI (Nhập Key bên dưới)'}
                     </option>
                   </select>
                 </div>
@@ -1160,6 +1194,15 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
                 )}
               </div>
 
+              {sttService === 'gemini' && (
+                <ApiKeyInlineControl
+                  provider="gemini"
+                  hasServerKey={hasGeminiKey}
+                  onSaved={refreshVoices}
+                  compact
+                />
+              )}
+
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
@@ -1183,7 +1226,7 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
 
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Dịch song ngữ thêm vào phụ đề ({hasGeminiKey ? 'Dùng Gemini LLM' : 'Dùng Google Translate miễn phí'})
+                    Dịch song ngữ thêm vào phụ đề ({effectiveHasGeminiKey ? 'Dùng Gemini LLM' : 'Dùng Google Translate miễn phí'})
                   </label>
                   <select
                     value={translateLang}
@@ -1248,7 +1291,7 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
                       <span>Dịch file gốc (.SRT / .VTT / Script) sang ngôn ngữ đích</span>
                     </div>
                     <p className="text-[11px] text-slate-500 mt-0.5">
-                      Cơ chế dịch: {hasGeminiKey ? 'Ưu tiên Gemini LLM (đã có Secret trên server) & tự dự phòng Google Translate' : 'Dùng Google Translate miễn phí tự động (hoặc Gemini LLM khi cấu hình GEMINI_API_KEY)'}. Nạp file <code className="font-mono">.srt</code>/<code className="font-mono">.vtt</code>/<code className="font-mono">.txt</code> hoặc dán nội dung để dịch ngay.
+                      Cơ chế dịch: {effectiveHasGeminiKey ? 'Ưu tiên Gemini LLM (đã kết nối Key) & tự dự phòng Google Translate' : 'Dùng Google Translate miễn phí tự động (hoặc nhập Gemini API Key ngay trên app)'}. Nạp file <code className="font-mono">.srt</code>/<code className="font-mono">.vtt</code>/<code className="font-mono">.txt</code> hoặc dán nội dung để dịch ngay.
                     </p>
                   </div>
                   <div>

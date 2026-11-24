@@ -12,6 +12,7 @@ import { TimelineAndInspector } from './components/TimelineAndInspector';
 import { choreographFromTranscript } from './engine/autoChoreographer';
 import { syncCustomComponentsFromServer } from './engine/customComponentStore';
 import {
+  applyCustomComponentComposition,
   pickRandomComposition,
   recomposeProjectWithStyle,
 } from './engine/illustrationLayouts';
@@ -37,6 +38,7 @@ import { cuesToBlockTranscript } from './engine/transcriptParser';
 import {
   BackgroundImageConfig,
   CanvasThemeId,
+  CustomComponentPresetConfig,
   isDarkCanvasTheme,
   LayoutCompositionId,
   LessonProject,
@@ -74,6 +76,19 @@ export default function App() {
   } | null>(null);
   const [mp4Settings, setMp4Settings] = useState<Mp4ExportSettings>(DEFAULT_MP4_EXPORT_SETTINGS);
   const resolvedExport = resolveMp4EncodingParams(mp4Settings);
+  const [customCompositionConfig, setCustomCompositionConfig] = useState<CustomComponentPresetConfig>({
+    variant: 'css-sticky-note',
+    sceneIcon: 'sparkles',
+    title: '',
+    subtitle: '',
+    speechText: '',
+    labels: ['Step 1', 'Step 2', 'Step 3'],
+    highlightWord: '',
+    accentColor: '#4F46E5',
+    showStrip: true,
+    showToneMeter: false,
+    showSentenceCard: true,
+  });
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const rafRef = useRef<number | null>(null);
@@ -274,11 +289,38 @@ export default function App() {
     [project.duration, audioUrl],
   );
 
-  const handleChangeComposition = useCallback((compositionId: LayoutCompositionId) => {
-    setIsPlaying(false);
-    setSelectedElementId(null);
-    setProject((prev) => recomposeProjectWithStyle(prev, compositionId));
-  }, []);
+  const handleChangeComposition = useCallback(
+    (compositionId: LayoutCompositionId) => {
+      setIsPlaying(false);
+      setSelectedElementId(null);
+      if (compositionId === 'custom') {
+        setProject((prev) =>
+          applyCustomComponentComposition(prev, customCompositionConfig, {
+            scope: 'all',
+            activeTimeSec: currentTime,
+          }),
+        );
+        return;
+      }
+      setProject((prev) => recomposeProjectWithStyle(prev, compositionId));
+    },
+    [customCompositionConfig, currentTime],
+  );
+
+  const handleApplyCustomComposition = useCallback(
+    (config: CustomComponentPresetConfig, scope: 'all' | 'active-cue' = 'all') => {
+      setIsPlaying(false);
+      setSelectedElementId(null);
+      setCustomCompositionConfig(config);
+      setProject((prev) =>
+        applyCustomComponentComposition(prev, config, {
+          scope,
+          activeTimeSec: currentTime,
+        }),
+      );
+    },
+    [currentTime],
+  );
 
   const handleApplyGeneratedAudioAndCues = useCallback(
     (nextAudioFile: File | null, cues: TranscriptCue[], title?: string) => {
@@ -745,6 +787,7 @@ export default function App() {
                 audioFileName={audioFileName}
                 currentTime={currentTime}
                 mp4Settings={mp4Settings}
+                customCompositionConfig={customCompositionConfig}
                 isExportingVideo={isExportingVideo}
                 exportProgress={exportProgress}
                 exportStageLabel={exportStageLabel}
@@ -752,6 +795,8 @@ export default function App() {
                 onChangeMp4Settings={setMp4Settings}
                 onChangeComposition={handleChangeComposition}
                 onRandomizeComposition={handleRandomizeComposition}
+                onChangeCustomComposition={setCustomCompositionConfig}
+                onApplyCustomComposition={handleApplyCustomComposition}
                 onSelectPreset={handleSelectPreset}
                 onUploadAudio={handleUploadAudio}
                 onClearAudio={handleClearAudio}
@@ -772,6 +817,7 @@ export default function App() {
                 currentTime={currentTime}
                 isPlaying={isPlaying}
                 mp4Settings={mp4Settings}
+                customCompositionConfig={customCompositionConfig}
                 isExportingVideo={isExportingVideo}
                 exportProgress={exportProgress}
                 exportStageLabel={exportStageLabel}
@@ -780,6 +826,8 @@ export default function App() {
                 onChangeMp4Settings={setMp4Settings}
                 onChangeComposition={handleChangeComposition}
                 onRandomizeComposition={handleRandomizeComposition}
+                onChangeCustomComposition={setCustomCompositionConfig}
+                onApplyCustomComposition={handleApplyCustomComposition}
                 onTogglePlay={() => setIsPlaying((p) => !p)}
                 onRestart={() => {
                   handleSeek(0);

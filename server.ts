@@ -10,6 +10,7 @@ import express from 'express';
 import { load as loadHtml } from 'cheerio';
 import { MsEdgeTTS, OUTPUT_FORMAT, ProsodyOptions } from 'msedge-tts';
 import { buildFfmpegArgs } from './src/engine/ffmpegArgs.ts';
+import { alignKnownTextToPcmFloat, parseWavBufferToMonoFloat32 } from './src/engine/forcedAligner.ts';
 import { detectReelMode, splitMultipleExercisesFromText } from './src/engine/englishReelsEngine.ts';
 import {
   formatTimeToken,
@@ -21,6 +22,7 @@ import {
   ELEVENLABS_DEFAULT_VOICES,
   ensureDefaultStudioAudio,
   getWhisperCacheStatus,
+  inferSpokenLanguageFromText,
   probeMediaMeta,
   resolveSafeOutputDir,
   resolveSafeOutputFile,
@@ -31,6 +33,33 @@ import {
   synthesizeElevenLabsTtsBuffer,
   translateLinesWithGeminiOrFree,
 } from './src/server/mediaHelpers.ts';
+
+function resolveClientAndEnvKeys(
+  req: express.Request,
+  body?: Record<string, any> | null,
+): { elevenLabsApiKey: string; geminiApiKey: string } {
+  const headerEleven =
+    typeof req.headers['x-elevenlabs-api-key'] === 'string'
+      ? req.headers['x-elevenlabs-api-key'].trim()
+      : '';
+  const bodyEleven =
+    typeof body?.elevenLabsApiKey === 'string'
+      ? body.elevenLabsApiKey.trim()
+      : typeof body?.elevenlabsApiKey === 'string'
+        ? body.elevenlabsApiKey.trim()
+        : '';
+  const headerGemini =
+    typeof req.headers['x-gemini-api-key'] === 'string'
+      ? req.headers['x-gemini-api-key'].trim()
+      : '';
+  const bodyGemini =
+    typeof body?.geminiApiKey === 'string' ? body.geminiApiKey.trim() : '';
+
+  return {
+    elevenLabsApiKey: headerEleven || bodyEleven || (process.env.ELEVENLABS_API_KEY || '').trim(),
+    geminiApiKey: headerGemini || bodyGemini || (process.env.GEMINI_API_KEY || '').trim(),
+  };
+}
 
 interface RenderJob {
   id: string;
@@ -1037,8 +1066,10 @@ async function startServer(): Promise<void> {
   });
 
   // ── Free & Key-based Multi-Provider TTS Catalog & Synthesizer ───────────────
-  app.get('/api/tts/voices', async (_req, res) => {
-    const elevenLabsKey = process.env.ELEVENLABS_API_KEY || '';
+  app.get('/api/tts/voices', async (req, res) => {
+    const resolvedKeys = resolveClientAndEnvKeys(req);
+    const elevenLabsKey = resolvedKeys.elevenLabsApiKey;
+    const geminiKey = resolvedKeys.geminiApiKey;
     let elevenLabsVoices = ELEVENLABS_DEFAULT_VOICES;
     if (elevenLabsKey) {
       try {
@@ -1071,7 +1102,7 @@ async function startServer(): Promise<void> {
 
     res.json({
       ok: true,
-      hasGeminiKey: Boolean(process.env.GEMINI_API_KEY),
+      hasGeminiKey: Boolean(geminiKey),
       hasElevenLabsKey: Boolean(elevenLabsKey),
       hasWhisperLocal: true,
       fasterWhisperAvailable: whisperStatus.fasterWhisperAvailable,
@@ -1098,8 +1129,8 @@ async function startServer(): Promise<void> {
         {
           id: 'elevenlabs',
           name: elevenLabsKey
-            ? 'ElevenLabs AI Voice (Đã kết nối Secrets)'
-            : 'ElevenLabs AI Voice (Cần ELEVENLABS_API_KEY trong Secrets)',
+            ? 'ElevenLabs AI Voice (Đã nhập API Key)'
+            : 'ElevenLabs AI Voice (Nhập Key trực tiếp trong App)',
           voices: elevenLabsVoices,
         },
         {
@@ -1129,9 +1160,9 @@ async function startServer(): Promise<void> {
         },
         {
           id: 'gemini',
-          name: process.env.GEMINI_API_KEY
-            ? 'Gemini Flash TTS (Đã kết nối Secrets)'
-            : 'Gemini Flash TTS (Cần GEMINI_API_KEY trong Secrets)',
+          name: geminiKey
+            ? 'Gemini Flash TTS (Đã nhập API Key)'
+            : 'Gemini Flash TTS (Nhập Key trực tiếp trong App)',
           voices: [
             { id: 'Kore', label: 'Kore (Tự nhiên · Rõ nét)', lang: 'multi' },
             { id: 'Puck', label: 'Puck (Năng động)', lang: 'multi' },
@@ -1146,6 +1177,7 @@ async function startServer(): Promise<void> {
   async function executeTtsSynthesis(
     body: Record<string, any>,
     onProgress?: (progress: number, stageLabel: string) => void,
+    keyOverrides?: { elevenLabsApiKey?: string; geminiApiKey?: string },
   ) {
     const tmpDir = path.join(os.tmpdir(), `ks-tts-${crypto.randomUUID()}`);
     await fs.promises.mkdir(tmpDir, { recursive: true });
@@ -1175,18 +1207,26 @@ async function startServer(): Promise<void> {
         throw err;
       }
 
-      const geminiKey = process.env.GEMINI_API_KEY || '';
-      const elevenLabsKey = process.env.ELEVENLABS_API_KEY || '';
+      const geminiKey =
+        (keyOverrides?.geminiApiKey || body?.geminiApiKey || process.env.GEMINI_API_KEY || '').trim();
+      const elevenLabsKey =
+        (
+          keyOverrides?.elevenLabsApiKey ||
+          body?.elevenLabsApiKey ||
+          body?.elevenlabsApiKey ||
+          process.env.ELEVENLABS_API_KEY ||
+          ''
+        ).trim();
       if (providerReq === 'elevenlabs' && !elevenLabsKey) {
         const err = new Error(
-          'ELEVENLABS_API_KEY chưa được cấu hình trong Environment Secrets / .env trên server. Hãy thêm key vào Secrets hoặc chọn giọng miễn phí (Edge Neural / Google / Polly).',
+          'Chưa có ELEVENLABS_API_KEY. Hãy dán trực tiếp API Key vào ô nhập ngay trong App (hoặc chọn giọng miễn phí Edge Neural / Google / Polly).',
         );
         (err as any).statusCode = 400;
         throw err;
       }
       if (providerReq === 'gemini' && !geminiKey) {
         const err = new Error(
-          'GEMINI_API_KEY chưa được cấu hình trong Environment Secrets / .env trên server. Hãy thêm key vào Secrets hoặc chọn giọng miễn phí (Edge Neural / Google / Polly).',
+          'Chưa có GEMINI_API_KEY. Hãy dán trực tiếp API Key vào ô nhập ngay trong App (hoặc chọn giọng miễn phí Edge Neural / Google / Polly).',
         );
         (err as any).statusCode = 400;
         throw err;
@@ -1377,7 +1417,8 @@ async function startServer(): Promise<void> {
 
   app.post('/api/tts/synthesize', express.json({ limit: '10mb' }), async (req, res) => {
     try {
-      const result = await executeTtsSynthesis(req.body || {});
+      const resolvedKeys = resolveClientAndEnvKeys(req, req.body || {});
+      const result = await executeTtsSynthesis(req.body || {}, undefined, resolvedKeys);
       res.json(result);
     } catch (err: any) {
       const status = Number(err?.statusCode) || 500;
@@ -1387,16 +1428,17 @@ async function startServer(): Promise<void> {
 
   app.post('/api/tts/synthesize/start', express.json({ limit: '10mb' }), (req, res) => {
     const body = req.body || {};
+    const resolvedKeys = resolveClientAndEnvKeys(req, body);
     const providerReq = typeof body?.provider === 'string' ? body.provider : 'auto';
-    if (providerReq === 'elevenlabs' && !process.env.ELEVENLABS_API_KEY) {
+    if (providerReq === 'elevenlabs' && !resolvedKeys.elevenLabsApiKey) {
       res.status(400).json({
-        error: 'ELEVENLABS_API_KEY chưa được cấu hình trong Environment Secrets / .env trên server.',
+        error: 'Chưa có ELEVENLABS_API_KEY. Hãy dán trực tiếp Key vào ô nhập trong App (hoặc chọn Edge Neural / Google / Polly).',
       });
       return;
     }
-    if (providerReq === 'gemini' && !process.env.GEMINI_API_KEY) {
+    if (providerReq === 'gemini' && !resolvedKeys.geminiApiKey) {
       res.status(400).json({
-        error: 'GEMINI_API_KEY chưa được cấu hình trong Environment Secrets / .env trên server.',
+        error: 'Chưa có GEMINI_API_KEY. Hãy dán trực tiếp Key vào ô nhập trong App (hoặc chọn Edge Neural / Google / Polly).',
       });
       return;
     }
@@ -1414,10 +1456,14 @@ async function startServer(): Promise<void> {
 
     void (async () => {
       try {
-        const result = await executeTtsSynthesis(body, (pct, label) => {
-          jobState.progress = pct;
-          jobState.stageLabel = label;
-        });
+        const result = await executeTtsSynthesis(
+          body,
+          (pct, label) => {
+            jobState.progress = pct;
+            jobState.stageLabel = label;
+          },
+          resolvedKeys,
+        );
         jobState.status = 'done';
         jobState.progress = 100;
         jobState.stageLabel = 'Tổng hợp Audio hoàn tất!';
@@ -1509,7 +1555,7 @@ async function startServer(): Promise<void> {
 
         const mp3Buf = await fs.promises.readFile(mp3Path);
         const totalDur = await getAudioDurationSec(wavPath);
-        const apiKey = process.env.GEMINI_API_KEY || '';
+        const apiKey = resolveClientAndEnvKeys(req).geminiApiKey;
 
         let rawSegs: Array<{ start: number; end: number; text: string; translation?: string }> = [];
         let detectedLang = sourceLang;
@@ -1519,7 +1565,7 @@ async function startServer(): Promise<void> {
 
         const tryGeminiTranscribe = async () => {
           if (!apiKey) {
-            throw new Error('Chưa cấu hình GEMINI_API_KEY trong Settings > Secrets hoặc .env.');
+            throw new Error('Chưa nhập GEMINI_API_KEY. Hãy dán Key trực tiếp trong App hoặc .env.');
           }
           const langHint =
             sourceLang && sourceLang !== 'auto'
@@ -1619,6 +1665,7 @@ async function startServer(): Promise<void> {
               const tr = await translateLinesWithGeminiOrFree(
                 rawSegs.map((s) => s.text),
                 translateLang,
+                apiKey,
               );
               translationEngineUsed = tr.engineUsed;
               rawSegs = rawSegs.map((s, idx) => ({
@@ -1676,13 +1723,17 @@ async function startServer(): Promise<void> {
     },
   );
 
-  // ── Whisper Local Word-Level Alignment (for Reading Along Studio 1.19) ───
+  // ── Fast Forced Alignment & Whisper Local Word-Level Alignment (Reading Along Studio 1.19) ──
   async function executeWhisperAlign(
     audioBuf: Buffer,
     ext: string,
     sourceLang: string,
     whisperModel: string,
     onProgress?: (progress: number, label: string) => void,
+    options?: {
+      referenceText?: string;
+      alignMode?: 'fast-forced' | 'whisper';
+    },
   ) {
     const tmpDir = path.join(os.tmpdir(), `ks-align-${crypto.randomUUID()}`);
     await fs.promises.mkdir(tmpDir, { recursive: true });
@@ -1690,7 +1741,7 @@ async function startServer(): Promise<void> {
       const inPath = path.join(tmpDir, `audio${ext}`);
       const wavPath = path.join(tmpDir, 'align_16k.wav');
       await fs.promises.writeFile(inPath, audioBuf);
-      onProgress?.(6, 'Đang chuyển đổi audio sang WAV 16kHz...');
+      onProgress?.(10, 'Đang chuyển đổi audio sang WAV 16kHz...');
       await runProcess('ffmpeg', [
         '-y',
         '-i',
@@ -1705,38 +1756,80 @@ async function startServer(): Promise<void> {
         wavPath,
       ]);
       const durationSec = await getAudioDurationSec(wavPath);
-      const aligned = await runLocalWhisperOnWav(wavPath, {
-        sourceLang,
-        modelId: whisperModel,
-        wordLevel: true,
-        preferFasterWhisper: true,
-        onProgress: (pct, lbl) => onProgress?.(pct, lbl),
-      });
-      const mappedWords = aligned.words.map((w) => ({
-        word: w.text,
-        start: w.start,
-        end: w.end,
-      }));
-      const cues = aligned.segments.map((seg, idx) => ({
-        id: `align-cue-${idx + 1}`,
-        start: seg.start,
-        end: seg.end,
-        text: seg.text,
-        words: mappedWords.filter((w) => w.start >= seg.start - 0.06 && w.end <= seg.end + 0.08),
-      }));
-      onProgress?.(100, 'Căn chỉnh Whisper hoàn tất!');
-      return {
-        ok: true,
-        language: aligned.language || sourceLang,
-        modelUsed: aligned.modelUsed || whisperModel,
-        backendUsed: aligned.backendUsed || 'faster-whisper-built-in',
-        durationSec,
-        text: aligned.text,
-        segments: aligned.segments,
-        words: mappedWords,
-        cues,
-        srt: cuesToSrt(cues),
+      const refText = (options?.referenceText || '').trim();
+      const alignMode = options?.alignMode || (refText ? 'fast-forced' : 'whisper');
+
+      const runFastForcedAlign = async (backendLabel: string) => {
+        onProgress?.(45, 'Đang dò âm tiết & căn nhịp siêu tốc theo kịch bản...');
+        const wavBuf = await fs.promises.readFile(wavPath);
+        const { samples, sampleRate } = parseWavBufferToMonoFloat32(wavBuf);
+        const forced = alignKnownTextToPcmFloat(refText, samples, sampleRate);
+        const cues = forced.segments.map((seg, idx) => ({
+          id: `align-cue-${idx + 1}`,
+          start: seg.start,
+          end: seg.end,
+          text: seg.text,
+          words: forced.words.filter((w) => w.start >= seg.start - 0.06 && w.end <= seg.end + 0.08),
+        }));
+        onProgress?.(100, 'Căn chỉnh từng từ hoàn tất!');
+        return {
+          ok: true,
+          language: sourceLang && sourceLang !== 'auto' ? sourceLang : inferSpokenLanguageFromText(refText, 'English'),
+          modelUsed: 'pcm-energy-vad-v1',
+          backendUsed: backendLabel,
+          durationSec: forced.durationSec || durationSec,
+          text: refText,
+          segments: forced.segments,
+          words: forced.words,
+          cues,
+          srt: cuesToSrt(cues),
+        };
       };
+
+      if (alignMode === 'fast-forced' && refText) {
+        return await runFastForcedAlign('fast-forced-pcm');
+      }
+
+      try {
+        const aligned = await runLocalWhisperOnWav(wavPath, {
+          sourceLang,
+          modelId: whisperModel,
+          wordLevel: true,
+          preferFasterWhisper: true,
+          onProgress: (pct, lbl) => onProgress?.(pct, lbl),
+        });
+        const mappedWords = aligned.words.map((w) => ({
+          word: w.text,
+          start: w.start,
+          end: w.end,
+        }));
+        const cues = aligned.segments.map((seg, idx) => ({
+          id: `align-cue-${idx + 1}`,
+          start: seg.start,
+          end: seg.end,
+          text: seg.text,
+          words: mappedWords.filter((w) => w.start >= seg.start - 0.06 && w.end <= seg.end + 0.08),
+        }));
+        onProgress?.(100, 'Căn chỉnh Whisper hoàn tất!');
+        return {
+          ok: true,
+          language: aligned.language || sourceLang,
+          modelUsed: aligned.modelUsed || whisperModel,
+          backendUsed: aligned.backendUsed || 'faster-whisper-built-in',
+          durationSec,
+          text: aligned.text,
+          segments: aligned.segments,
+          words: mappedWords,
+          cues,
+          srt: cuesToSrt(cues),
+        };
+      } catch (whisperErr) {
+        if (refText) {
+          onProgress?.(80, 'Whisper bận (HTTP 429) — tự chuyển sang Fast Forced Align theo kịch bản...');
+          return await runFastForcedAlign('fast-forced-fallback (Whisper 429)');
+        }
+        throw whisperErr;
+      }
     } finally {
       await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
     }
@@ -1747,6 +1840,8 @@ async function startServer(): Promise<void> {
     ext: string;
     sourceLang: string;
     whisperModel: string;
+    referenceText: string;
+    alignMode: 'fast-forced' | 'whisper';
   } {
     const isJson =
       typeof req.headers['content-type'] === 'string' &&
@@ -1755,6 +1850,8 @@ async function startServer(): Promise<void> {
     let ext = '.mp3';
     let sourceLang = 'auto';
     let whisperModel = 'Xenova/whisper-small';
+    let referenceText = '';
+    let alignMode: 'fast-forced' | 'whisper' = 'whisper';
 
     if (isJson && audioBuf) {
       const parsed = JSON.parse(audioBuf.toString('utf8')) as {
@@ -1762,11 +1859,15 @@ async function startServer(): Promise<void> {
         ext?: string;
         lang?: string;
         model?: string;
+        referenceText?: string;
+        alignMode?: string;
       };
       audioBuf = parsed.audioBase64 ? Buffer.from(parsed.audioBase64, 'base64') : null;
       ext = sanitizeAudioExt(parsed.ext || '.mp3');
       sourceLang = parsed.lang?.trim() || 'auto';
       whisperModel = parsed.model?.trim() || 'Xenova/whisper-small';
+      referenceText = typeof parsed.referenceText === 'string' ? parsed.referenceText.trim() : '';
+      alignMode = parsed.alignMode === 'fast-forced' ? 'fast-forced' : parsed.alignMode === 'whisper' ? 'whisper' : referenceText ? 'fast-forced' : 'whisper';
     } else {
       ext = sanitizeAudioExt(
         typeof req.headers['x-file-ext'] === 'string' ? req.headers['x-file-ext'] : '.mp3',
@@ -1777,9 +1878,18 @@ async function startServer(): Promise<void> {
         typeof req.headers['x-whisper-model'] === 'string' && req.headers['x-whisper-model'].trim()
           ? req.headers['x-whisper-model'].trim()
           : 'Xenova/whisper-small';
+      if (typeof req.headers['x-reference-text-b64'] === 'string' && req.headers['x-reference-text-b64'].trim()) {
+        try {
+          referenceText = Buffer.from(req.headers['x-reference-text-b64'].trim(), 'base64').toString('utf8').trim();
+        } catch {
+          referenceText = '';
+        }
+      }
+      const modeHeader = typeof req.headers['x-align-mode'] === 'string' ? req.headers['x-align-mode'].trim() : '';
+      alignMode = modeHeader === 'fast-forced' ? 'fast-forced' : modeHeader === 'whisper' ? 'whisper' : referenceText ? 'fast-forced' : 'whisper';
     }
 
-    return { audioBuf, ext, sourceLang, whisperModel };
+    return { audioBuf, ext, sourceLang, whisperModel, referenceText, alignMode };
   }
 
   app.post(
@@ -1789,12 +1899,15 @@ async function startServer(): Promise<void> {
       req.setTimeout(600_000);
       res.setTimeout(600_000);
       try {
-        const { audioBuf, ext, sourceLang, whisperModel } = parseAlignRequest(req);
+        const { audioBuf, ext, sourceLang, whisperModel, referenceText, alignMode } = parseAlignRequest(req);
         if (!audioBuf || audioBuf.length === 0) {
           res.status(400).json({ error: 'Thiếu file audio để căn chỉnh word-level.' });
           return;
         }
-        const out = await executeWhisperAlign(audioBuf, ext, sourceLang, whisperModel);
+        const out = await executeWhisperAlign(audioBuf, ext, sourceLang, whisperModel, undefined, {
+          referenceText,
+          alignMode,
+        });
         res.json(out);
       } catch (err) {
         res.status(500).json({ error: err instanceof Error ? err.message : 'Lỗi căn chỉnh Whisper Local.' });
@@ -1807,7 +1920,7 @@ async function startServer(): Promise<void> {
     express.raw({ type: () => true, limit: '250mb' }),
     (req, res) => {
       try {
-        const { audioBuf, ext, sourceLang, whisperModel } = parseAlignRequest(req);
+        const { audioBuf, ext, sourceLang, whisperModel, referenceText, alignMode } = parseAlignRequest(req);
         if (!audioBuf || audioBuf.length === 0) {
           res.status(400).json({ error: 'Thiếu file audio để căn chỉnh word-level.' });
           return;
@@ -1817,7 +1930,10 @@ async function startServer(): Promise<void> {
           id: jobId,
           status: 'running',
           progress: 4,
-          stageLabel: `Đang chuẩn bị model ${whisperModel}...`,
+          stageLabel:
+            alignMode === 'fast-forced' && referenceText
+              ? 'Đang căn nhịp siêu tốc theo kịch bản (Fast Forced Align)...'
+              : `Đang chuẩn bị model ${whisperModel}...`,
           createdAt: Date.now(),
         };
         alignJobs.set(jobId, jobState);
@@ -1825,17 +1941,24 @@ async function startServer(): Promise<void> {
 
         void (async () => {
           try {
-            const out = await executeWhisperAlign(audioBuf, ext, sourceLang, whisperModel, (pct, lbl) => {
-              jobState.progress = pct;
-              jobState.stageLabel = lbl;
-            });
+            const out = await executeWhisperAlign(
+              audioBuf,
+              ext,
+              sourceLang,
+              whisperModel,
+              (pct, lbl) => {
+                jobState.progress = pct;
+                jobState.stageLabel = lbl;
+              },
+              { referenceText, alignMode },
+            );
             jobState.status = 'done';
             jobState.progress = 100;
-            jobState.stageLabel = 'Căn chỉnh Whisper hoàn tất!';
+            jobState.stageLabel = 'Căn chỉnh từ hoàn tất!';
             jobState.result = out;
           } catch (err) {
             jobState.status = 'error';
-            jobState.error = err instanceof Error ? err.message : 'Lỗi căn chỉnh Whisper Local.';
+            jobState.error = err instanceof Error ? err.message : 'Lỗi căn chỉnh từ.';
           } finally {
             setTimeout(() => alignJobs.delete(jobId), 15 * 60 * 1000).unref();
           }
@@ -1958,7 +2081,7 @@ async function startServer(): Promise<void> {
 
           const mp3Buf = await fs.promises.readFile(mp3Path);
           const totalDur = await getAudioDurationSec(wavPath);
-          const apiKey = process.env.GEMINI_API_KEY || '';
+          const apiKey = resolveClientAndEnvKeys(req).geminiApiKey;
 
           let rawSegs: Array<{ start: number; end: number; text: string; translation?: string }> = [];
           let detectedLang = sourceLang;
@@ -2049,6 +2172,7 @@ async function startServer(): Promise<void> {
                 const tr = await translateLinesWithGeminiOrFree(
                   rawSegs.map((s) => s.text),
                   translateLang,
+                  apiKey,
                 );
                 translationEngineUsed = tr.engineUsed;
                 rawSegs = rawSegs.map((s, idx) => ({
@@ -2149,7 +2273,8 @@ async function startServer(): Promise<void> {
       }
 
       const sourceTexts = rawCues.map((c) => String(c.text || '').split('\n')[0].trim());
-      const tr = await translateLinesWithGeminiOrFree(sourceTexts, targetLang);
+      const resolvedKeys = resolveClientAndEnvKeys(req, req.body || {});
+      const tr = await translateLinesWithGeminiOrFree(sourceTexts, targetLang, resolvedKeys.geminiApiKey);
 
       const translatedCues = rawCues.map((c, idx) => {
         const st = Math.max(0, Number(c.start ?? 0));
@@ -2190,9 +2315,9 @@ async function startServer(): Promise<void> {
 
   app.post('/api/ai/generate-scene', express.json({ limit: '2mb' }), async (req, res) => {
     try {
-      const apiKey = process.env.GEMINI_API_KEY;
+      const apiKey = resolveClientAndEnvKeys(req, req.body || {}).geminiApiKey;
       if (!apiKey) {
-        res.status(400).json({ error: 'Chưa cấu hình GEMINI_API_KEY trong biến môi trường server.' });
+        res.status(400).json({ error: 'Chưa có GEMINI_API_KEY. Hãy dán trực tiếp Key vào ô nhập trong App.' });
         return;
       }
       const prompt = typeof req.body?.prompt === 'string' ? req.body.prompt : '';
@@ -2228,11 +2353,11 @@ async function startServer(): Promise<void> {
 
   app.post('/api/ai/generate-reading', express.json({ limit: '2mb' }), async (req, res) => {
     try {
-      const apiKey = process.env.GEMINI_API_KEY;
+      const apiKey = resolveClientAndEnvKeys(req, req.body || {}).geminiApiKey;
       if (!apiKey) {
         res.status(400).json({
           error:
-            'Chưa cấu hình GEMINI_API_KEY trong Settings > Secrets trên server để AI tạo hoặc chuyển thể bài đọc.',
+            'Chưa có GEMINI_API_KEY. Hãy dán trực tiếp Key vào ô nhập trong App hoặc dùng công cụ "Tạo Prompt cho Web AI" bên dưới (không cần API key).',
         });
         return;
       }
@@ -2672,6 +2797,10 @@ Return ONLY valid JSON with keys:
       };
       const escAss = (s: string) => s.replace(/\\/g, '\\\\').replace(/\{/g, '(').replace(/\}/g, ')');
 
+      const contentDuration = duration;
+      const hasOutro = outroDuration > 0 && outroText.length > 0;
+      const totalDuration = hasOutro ? contentDuration + outroDuration : contentDuration;
+
       if (watermarkText) {
         const anCode =
           watermarkCorner === 'top-left'
@@ -2686,11 +2815,11 @@ Return ONLY valid JSON with keys:
           .toUpperCase()
           .padStart(2, '0');
         assLines.push(
-          `Dialogue: 1,0:00:00.00,${toAssTime(duration)},Watermark,,0,0,0,,{\\an${anCode}\\alpha&H${alphaHex}&}${escAss(watermarkText)}`,
+          `Dialogue: 1,0:00:00.00,${toAssTime(contentDuration)},Watermark,,0,0,0,,{\\an${anCode}\\alpha&H${alphaHex}&}${escAss(watermarkText)}`,
         );
       }
-      if (outroDuration > 0 && outroText) {
-        const startOutro = Math.max(0, duration - outroDuration);
+      if (hasOutro) {
+        const startOutro = contentDuration;
         const joined = outroText
           .split(/\r?\n/)
           .map((l: string) => escAss(l.trim()))
@@ -2699,7 +2828,7 @@ Return ONLY valid JSON with keys:
           .join('\\N');
         if (joined) {
           assLines.push(
-            `Dialogue: 2,${toAssTime(startOutro)},${toAssTime(duration)},Outro,,0,0,0,,{\\an5\\fad(450,450)}${joined}`,
+            `Dialogue: 2,${toAssTime(startOutro)},${toAssTime(totalDuration)},Outro,,0,0,0,,{\\an5\\fad(450,400)}${joined}`,
           );
         }
       }
@@ -2708,13 +2837,13 @@ Return ONLY valid JSON with keys:
       await fs.promises.writeFile(assPath, '\uFEFF' + assLines.join('\n'), 'utf8');
 
       const vFilters: string[] = [];
-      if (watermarkText || (outroDuration > 0 && outroText)) {
-        vFilters.push(`subtitles=filename=${path.basename(assPath)}`);
+      if (hasOutro) {
+        vFilters.push(`tpad=stop_mode=clone:stop_duration=${outroDuration.toFixed(3)}`);
+        const fadeDur = Math.min(0.55, Math.max(0.2, outroDuration * 0.4));
+        vFilters.push(`fade=t=out:st=${contentDuration.toFixed(3)}:d=${fadeDur.toFixed(3)}`);
       }
-      if (outroDuration > 0) {
-        const dOut = Math.max(0.25, Math.min(outroDuration, duration));
-        const stOut = Math.max(0, duration - dOut);
-        vFilters.push(`fade=t=out:st=${stOut.toFixed(3)}:d=${dOut.toFixed(3)}`);
+      if (watermarkText || hasOutro) {
+        vFilters.push(`subtitles=filename=${path.basename(assPath)}`);
       }
 
       const outLocal = path.join(job.dir, 'merged.mp4');
@@ -2722,7 +2851,17 @@ Return ONLY valid JSON with keys:
       if (shouldLoopVideo) args.push('-stream_loop', '-1');
       args.push('-i', videoPath, '-i', audioPath);
       if (vFilters.length > 0) {
-        args.push('-filter_complex', `[0:v:0]${vFilters.join(',')}[v]`, '-map', '[v]', '-map', '1:a:0');
+        const aFilter = hasOutro
+          ? `[1:a:0]apad=pad_dur=${outroDuration.toFixed(3)}[aout]`
+          : '[1:a:0]anull[aout]';
+        args.push(
+          '-filter_complex',
+          `[0:v:0]${vFilters.join(',')}[v];${aFilter}`,
+          '-map',
+          '[v]',
+          '-map',
+          '[aout]',
+        );
         args.push('-c:v', 'libx264', '-preset', 'medium', '-crf', '19', '-pix_fmt', 'yuv420p');
       } else {
         args.push('-map', '0:v:0', '-map', '1:a:0', '-c:v', shouldLoopVideo ? 'libx264' : 'copy');
@@ -2730,7 +2869,7 @@ Return ONLY valid JSON with keys:
           args.push('-preset', 'medium', '-crf', '19', '-pix_fmt', 'yuv420p');
         }
       }
-      args.push('-t', duration.toFixed(3), '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', outLocal);
+      args.push('-t', totalDuration.toFixed(3), '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', outLocal);
 
       job.status = 'running';
       job.progress = 8;
@@ -2741,7 +2880,7 @@ Return ONLY valid JSON with keys:
         job.dir,
         (p) => activeStudioProcs.set(job.id, p),
         (sec) => {
-          const pct = Math.min(96, Math.max(10, Math.round(10 + (sec / Math.max(0.5, duration)) * 86)));
+          const pct = Math.min(96, Math.max(10, Math.round(10 + (sec / Math.max(0.5, totalDuration)) * 86)));
           job.progress = pct;
           job.stageLabel = `Đang ghép Video + Audio (${pct}%)...`;
         },
@@ -2795,7 +2934,7 @@ Return ONLY valid JSON with keys:
         return;
       }
       const vMeta = await probeMediaMeta(videoPath);
-      const duration = vMeta.duration;
+      const contentDuration = vMeta.duration;
       const assContent = typeof req.body?.assContent === 'string' ? req.body.assContent : '';
       const assPath = path.join(job.dir, 'karaoke.ass');
       if (assContent.trim()) {
@@ -2804,8 +2943,6 @@ Return ONLY valid JSON with keys:
 
       const effect = typeof req.body?.videoEffect === 'string' ? req.body.videoEffect : 'Fade cinematic';
       const outroSeconds = Math.max(0, Math.min(6, Number(req.body?.outroSeconds ?? 0)));
-      const fadeOutStart = outroSeconds > 0 ? Math.max(0, duration - outroSeconds) : Math.max(0, duration - 0.35);
-      const fadeOutDur = Math.max(0.25, duration - fadeOutStart);
 
       const watermarkEnabled = req.body?.watermarkEnabled !== false;
       const watermarkText =
@@ -2817,29 +2954,41 @@ Return ONLY valid JSON with keys:
       const watermarkOpacity = Math.max(0.15, Math.min(1, Number(req.body?.watermarkOpacity ?? 0.65)));
       const outroText = typeof req.body?.outroText === 'string' ? req.body.outroText.trim() : '';
 
+      const hasOutro = outroSeconds > 0 && outroText.length > 0;
+      const totalDuration = hasOutro ? contentDuration + outroSeconds : contentDuration;
+      const fadeOutStart = hasOutro ? contentDuration : Math.max(0, contentDuration - 0.35);
+      const fadeOutDur = hasOutro ? Math.min(0.55, Math.max(0.25, outroSeconds * 0.4)) : 0.35;
+
       const vFilters: string[] = [];
       if (effect === 'Fade cinematic') {
-        vFilters.push('fade=t=in:st=0:d=0.65', `fade=t=out:st=${fadeOutStart.toFixed(3)}:d=${fadeOutDur.toFixed(3)}`);
+        vFilters.push('fade=t=in:st=0:d=0.65');
       } else if (effect === 'Soft vignette + fade') {
-        vFilters.push('vignette=PI/5', 'eq=contrast=1.04:saturation=0.92', 'fade=t=in:st=0:d=0.7', `fade=t=out:st=${fadeOutStart.toFixed(3)}:d=${fadeOutDur.toFixed(3)}`);
+        vFilters.push('vignette=PI/5', 'eq=contrast=1.04:saturation=0.92', 'fade=t=in:st=0:d=0.7');
       } else if (effect === 'Warm film + fade') {
-        vFilters.push('eq=contrast=1.06:saturation=1.12:brightness=0.015', 'colorbalance=rs=0.035:gs=0.012:bs=-0.025', 'vignette=PI/6', 'fade=t=in:st=0:d=0.7', `fade=t=out:st=${fadeOutStart.toFixed(3)}:d=${fadeOutDur.toFixed(3)}`);
+        vFilters.push('eq=contrast=1.06:saturation=1.12:brightness=0.015', 'colorbalance=rs=0.035:gs=0.012:bs=-0.025', 'vignette=PI/6', 'fade=t=in:st=0:d=0.7');
       } else if (effect === 'Cool tech + fade') {
-        vFilters.push('eq=contrast=1.05:saturation=1.08', 'colorbalance=rs=-0.025:gs=0.005:bs=0.035', 'fade=t=in:st=0:d=0.7', `fade=t=out:st=${fadeOutStart.toFixed(3)}:d=${fadeOutDur.toFixed(3)}`);
+        vFilters.push('eq=contrast=1.05:saturation=1.08', 'colorbalance=rs=-0.025:gs=0.005:bs=0.035', 'fade=t=in:st=0:d=0.7');
       } else if (effect === 'Slow zoom + fade') {
         const srcFps = Math.max(24, Math.min(60, vMeta.fps || 30));
         vFilters.push(
           `fps=${srcFps}`,
           `zoompan=z='min(zoom+0.00012,1.045)':d=1:s=${vMeta.width}x${vMeta.height}:fps=${srcFps}`,
           'fade=t=in:st=0:d=0.7',
-          `fade=t=out:st=${fadeOutStart.toFixed(3)}:d=${fadeOutDur.toFixed(3)}`,
         );
       }
+
       if (assContent.trim()) {
         vFilters.push(`subtitles=filename=${path.basename(assPath)}`);
       }
 
-      if (watermarkText || (outroSeconds > 0 && outroText)) {
+      if (hasOutro) {
+        vFilters.push(`tpad=stop_mode=clone:stop_duration=${outroSeconds.toFixed(3)}`);
+      }
+      if (vFilters.length > 0 || hasOutro) {
+        vFilters.push(`fade=t=out:st=${fadeOutStart.toFixed(3)}:d=${fadeOutDur.toFixed(3)}`);
+      }
+
+      if (watermarkText || hasOutro) {
         const toAssTimeOverlay = (sec: number) => {
           const s = Math.max(0, sec);
           const cs = Math.round(s * 100);
@@ -2882,11 +3031,11 @@ Return ONLY valid JSON with keys:
             .toUpperCase()
             .padStart(2, '0');
           overlayLines.push(
-            `Dialogue: 1,0:00:00.00,${toAssTimeOverlay(duration)},Watermark,,0,0,0,,{\\an${anCode}\\alpha&H${alphaHex}&}${escAssOverlay(watermarkText)}`,
+            `Dialogue: 1,0:00:00.00,${toAssTimeOverlay(contentDuration)},Watermark,,0,0,0,,{\\an${anCode}\\alpha&H${alphaHex}&}${escAssOverlay(watermarkText)}`,
           );
         }
-        if (outroSeconds > 0 && outroText) {
-          const startOutro = Math.max(0, duration - outroSeconds);
+        if (hasOutro) {
+          const startOutro = contentDuration;
           const joined = outroText
             .split(/\r?\n/)
             .map((l: string) => escAssOverlay(l.trim()))
@@ -2895,7 +3044,7 @@ Return ONLY valid JSON with keys:
             .join('\\N');
           if (joined) {
             overlayLines.push(
-              `Dialogue: 2,${toAssTimeOverlay(startOutro)},${toAssTimeOverlay(duration)},Outro,,0,0,0,,{\\an5\\fad(450,450)}${joined}`,
+              `Dialogue: 2,${toAssTimeOverlay(startOutro)},${toAssTimeOverlay(totalDuration)},Outro,,0,0,0,,{\\an5\\fad(450,400)}${joined}`,
             );
           }
         }
@@ -2943,29 +3092,30 @@ Return ONLY valid JSON with keys:
       const bedLabels: string[] = [];
 
       if (!muteOriginal && vMeta.hasAudio) {
+        const origPad = hasOutro ? `,apad=pad_dur=${outroSeconds.toFixed(3)}` : '';
         if (removeDialogue && vMeta.isStereo) {
-          filters.push(`[0:a:0]aformat=sample_rates=48000:channel_layouts=stereo,pan=stereo|c0=FL-FR|c1=FR-FL,volume=${originalVol.toFixed(3)}[orig]`);
+          filters.push(`[0:a:0]aformat=sample_rates=48000:channel_layouts=stereo,pan=stereo|c0=FL-FR|c1=FR-FL,volume=${originalVol.toFixed(3)}${origPad}[orig]`);
         } else {
-          filters.push(`[0:a:0]aformat=sample_rates=48000:channel_layouts=stereo,volume=${originalVol.toFixed(3)}[orig]`);
+          filters.push(`[0:a:0]aformat=sample_rates=48000:channel_layouts=stereo,volume=${originalVol.toFixed(3)}${origPad}[orig]`);
         }
         bedLabels.push('[orig]');
       }
       if (musicIdx !== null) {
         filters.push(
-          `[${musicIdx}:a:0]aformat=sample_rates=48000:channel_layouts=stereo,volume=${musicVol.toFixed(3)},atrim=0:${duration.toFixed(3)},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=1.2,afade=t=out:st=${Math.max(0, duration - 1.5).toFixed(3)}:d=${Math.min(1.5, duration).toFixed(3)}[music]`,
+          `[${musicIdx}:a:0]aformat=sample_rates=48000:channel_layouts=stereo,volume=${musicVol.toFixed(3)},atrim=0:${totalDuration.toFixed(3)},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=1.2,afade=t=out:st=${Math.max(0, totalDuration - 1.5).toFixed(3)}:d=${Math.min(1.5, totalDuration).toFixed(3)}[music]`,
         );
         bedLabels.push('[music]');
       }
       if (sfxIdx !== null) {
         filters.push(
-          `[${sfxIdx}:a:0]aformat=sample_rates=48000:channel_layouts=stereo,volume=${sfxVol.toFixed(3)},atrim=0:${duration.toFixed(3)},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=1.8,afade=t=out:st=${Math.max(0, duration - 2.0).toFixed(3)}:d=${Math.min(2.0, duration).toFixed(3)}[sfx]`,
+          `[${sfxIdx}:a:0]aformat=sample_rates=48000:channel_layouts=stereo,volume=${sfxVol.toFixed(3)},atrim=0:${totalDuration.toFixed(3)},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=1.8,afade=t=out:st=${Math.max(0, totalDuration - 2.0).toFixed(3)}:d=${Math.min(2.0, totalDuration).toFixed(3)}[sfx]`,
         );
         bedLabels.push('[sfx]');
       }
       if (voiceIdx !== null) {
         const delayMs = Math.max(0, Math.round(voiceStart * 1000));
         filters.push(
-          `[${voiceIdx}:a:0]aformat=sample_rates=48000:channel_layouts=stereo,volume=${voiceVol.toFixed(3)},adelay=${delayMs}:all=1,apad,atrim=0:${duration.toFixed(3)},asetpts=PTS-STARTPTS[voice]`,
+          `[${voiceIdx}:a:0]aformat=sample_rates=48000:channel_layouts=stereo,volume=${voiceVol.toFixed(3)},adelay=${delayMs}:all=1,apad,atrim=0:${contentDuration.toFixed(3)},asetpts=PTS-STARTPTS${hasOutro ? `,apad=pad_dur=${outroSeconds.toFixed(3)}` : ''}[voice]`,
         );
       }
 
@@ -3005,7 +3155,7 @@ Return ONLY valid JSON with keys:
       const outLocal = path.join(job.dir, 'karaoke_out.mp4');
       cmd.push('-filter_complex', filters.join(';'), '-map', '[vout]');
       if (audioPresent) cmd.push('-map', '[aout]');
-      cmd.push('-t', duration.toFixed(3), '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p');
+      cmd.push('-t', totalDuration.toFixed(3), '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p');
       if (audioPresent) cmd.push('-c:a', 'aac', '-b:a', '192k');
       else cmd.push('-an');
       cmd.push('-movflags', '+faststart', outLocal);
@@ -3019,7 +3169,7 @@ Return ONLY valid JSON with keys:
         job.dir,
         (p) => activeStudioProcs.set(job.id, p),
         (sec) => {
-          const pct = Math.min(96, Math.max(10, Math.round(10 + (sec / Math.max(0.5, duration)) * 86)));
+          const pct = Math.min(96, Math.max(10, Math.round(10 + (sec / Math.max(0.5, totalDuration)) * 86)));
           job.progress = pct;
           job.stageLabel = `Đang render Karaoke & Mix (${pct}%)...`;
         },

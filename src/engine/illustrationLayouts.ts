@@ -2,6 +2,7 @@ import { resolveProjectOverlaps } from './layoutSolver';
 import {
   CanvasThemeId,
   ComparisonItem,
+  CustomComponentPresetConfig,
   IllustrationChecklistItem,
   IllustrationDialogueRow,
   IllustrationFlowNode,
@@ -15,7 +16,9 @@ import {
   SceneElement,
   TranscriptCue,
 } from './types';
+import { getCustomComponentByVariant } from './customComponentStore';
 import {
+  getEffectiveVectorCatalog,
   pickContextualSceneIcon,
   resolveContextualVisualForCue,
 } from './vectorComponentDb';
@@ -129,6 +132,15 @@ export const LAYOUT_COMPOSITIONS: LayoutCompositionMeta[] = [
     recommendedTheme: 'studio-slate',
     signatureVariant: 'flow-diagram',
   },
+  {
+    id: 'custom',
+    name: '🎨 Tự sáng tạo từ Kho Component',
+    shortLabel: 'Tự sáng tạo',
+    description:
+      'Chọn bất kỳ component Bootstrap 5 / Modern CSS / Vector tự vẽ từ Kho Component và tùy biến tiêu đề, nhãn, màu nhấn & bố cục',
+    recommendedTheme: 'soft-lavender',
+    signatureVariant: 'css-sticky-note',
+  },
 ];
 
 export function isLayoutCompositionId(value: unknown): value is LayoutCompositionId {
@@ -188,9 +200,10 @@ export function hasTimeContext(text?: string): boolean {
 export function getEligibleCompositionsForContext(
   transcriptText?: string,
 ): LayoutCompositionMeta[] {
+  const withoutCustom = LAYOUT_COMPOSITIONS.filter((c) => c.id !== 'custom');
   const allowClock = transcriptText ? hasTimeContext(transcriptText) : true;
-  if (allowClock) return LAYOUT_COMPOSITIONS;
-  return LAYOUT_COMPOSITIONS.filter((c) => c.id !== 'clock-spotlight');
+  if (allowClock) return withoutCustom;
+  return withoutCustom.filter((c) => c.id !== 'clock-spotlight');
 }
 
 /**
@@ -643,6 +656,14 @@ function buildIllustrationDataForComposition(
         data: resolved.data,
       };
     }
+
+    case 'custom': {
+      const resolved = resolveContextualVisualForCue(seg.cueText, seg.cardText, 'css-sticky-note');
+      return {
+        variant: resolved.variant,
+        data: resolved.data,
+      };
+    }
   }
 }
 
@@ -770,8 +791,148 @@ export function recomposeProjectWithStyle(
       lastCard3dEnd = safeEnd;
     });
   } else {
-    // 1. Top Comparison Strip spanning the lesson
-    if (stripItems.length >= 2) {
+    // Composition-specific layout architecture & distinct visual styling so presets are unmistakably different
+    const profileMap: Record<
+      string,
+      {
+        showStrip: boolean;
+        stripY: number;
+        pillY: number;
+        illY: number;
+        cardY: number;
+        pillBg?: string;
+        pillColor?: string;
+        cardBg?: string;
+        cardText?: string;
+        emphasisColor?: string;
+        showToneMeter: boolean;
+      }
+    > = {
+      'story-scenes': {
+        showStrip: true,
+        stripY: 185,
+        pillY: 335,
+        illY: 635,
+        cardY: 985,
+        showToneMeter: true,
+      },
+      'flow-steps': {
+        showStrip: true,
+        stripY: 175,
+        pillY: 315,
+        illY: 575,
+        cardY: 945,
+        pillBg: '#E0E7FF',
+        pillColor: '#3730A3',
+        cardBg: '#EEF2FF',
+        cardText: '#1E1B4B',
+        emphasisColor: '#4F46E5',
+        showToneMeter: true,
+      },
+      'gauge-tone': {
+        showStrip: false,
+        stripY: 185,
+        pillY: 225,
+        illY: 570,
+        cardY: 965,
+        pillBg: '#DCFCE7',
+        pillColor: '#065F46',
+        cardBg: '#FFFFFF',
+        cardText: '#0F172A',
+        emphasisColor: '#059669',
+        showToneMeter: false,
+      },
+      'checklist-cards': {
+        showStrip: false,
+        stripY: 185,
+        pillY: 220,
+        illY: 585,
+        cardY: 995,
+        pillBg: '#F3E8FF',
+        pillColor: '#6B21A8',
+        cardBg: '#0F172A',
+        cardText: '#F8FAFC',
+        emphasisColor: '#38BDF8',
+        showToneMeter: false,
+      },
+      'dialogue-upgrade': {
+        showStrip: false,
+        stripY: 185,
+        pillY: 225,
+        illY: 600,
+        cardY: 1005,
+        pillBg: '#FEF3C7',
+        pillColor: '#92400E',
+        cardBg: '#FFFBEB',
+        cardText: '#451A03',
+        emphasisColor: '#D97706',
+        showToneMeter: false,
+      },
+      'timeline-track': {
+        showStrip: true,
+        stripY: 180,
+        pillY: 325,
+        illY: 590,
+        cardY: 955,
+        pillBg: '#CCFBF1',
+        pillColor: '#0F766E',
+        cardBg: '#F0FDFA',
+        cardText: '#134E4A',
+        emphasisColor: '#0D9488',
+        showToneMeter: true,
+      },
+      'spatial-contrast': {
+        showStrip: true,
+        stripY: 180,
+        pillY: 325,
+        illY: 595,
+        cardY: 975,
+        pillBg: '#1E293B',
+        pillColor: '#F8FAFC',
+        cardBg: '#FEFCE8',
+        cardText: '#1C1917',
+        emphasisColor: '#CA8A04',
+        showToneMeter: false,
+      },
+      'avatar-dialogue': {
+        showStrip: false,
+        stripY: 185,
+        pillY: 230,
+        illY: 595,
+        cardY: 985,
+        pillBg: '#FFE4E6',
+        pillColor: '#BE123C',
+        cardBg: '#FFF1F2',
+        cardText: '#1F2937',
+        emphasisColor: '#E11D48',
+        showToneMeter: false,
+      },
+      'clock-spotlight': {
+        showStrip: false,
+        stripY: 185,
+        pillY: 225,
+        illY: 595,
+        cardY: 990,
+        pillBg: '#FDE68A',
+        pillColor: '#78350F',
+        cardBg: '#FFFBEB',
+        cardText: '#1C1917',
+        emphasisColor: '#B45309',
+        showToneMeter: false,
+      },
+      'phrase-icon-split': {
+        showStrip: true,
+        stripY: 185,
+        pillY: 335,
+        illY: 780,
+        cardY: 985,
+        showToneMeter: false,
+      },
+    };
+    const profile = profileMap[compositionId] ?? profileMap['story-scenes'];
+
+    // 1. Optional Top Comparison Strip spanning the lesson
+    if (profile.showStrip && stripItems.length >= 2) {
       newVisuals.push({
         id: `comp-strip-${compositionId}`,
         type: 'comparison-strip',
@@ -780,7 +941,7 @@ export function recomposeProjectWithStyle(
         endTime: project.duration,
         enterAnimation: 'drop-in',
         exitAnimation: 'fade-out',
-        layout: { x: 540, y: 185, width: 900, scale: 1, zIndex: 10 },
+        layout: { x: 540, y: profile.stripY, width: 900, scale: 1, zIndex: 10 },
         props: {
           kind: 'comparison-strip',
           items: stripItems,
@@ -811,12 +972,12 @@ export function recomposeProjectWithStyle(
           endTime: Number(pillEnd.toFixed(2)),
           enterAnimation: 'pop-up',
           exitAnimation: 'fade-out',
-          layout: { x: 540, y: 335, width: 380, scale: 1, zIndex: 12 },
+          layout: { x: 540, y: profile.pillY, width: 410, scale: 1, zIndex: 12 },
           props: {
             kind: 'topic-pill',
             text: seg.topicLabel,
-            bgColor: seg.topicBg,
-            textColor: seg.topicColor,
+            bgColor: profile.pillBg ?? seg.topicBg,
+            textColor: profile.pillColor ?? seg.topicColor,
           },
         });
         lastPillEnd = pillEnd;
@@ -844,7 +1005,7 @@ export function recomposeProjectWithStyle(
           exitAnimation: 'fade-out',
           layout: {
             x: 540,
-            y: compositionId === 'phrase-icon-split' ? 780 : 635,
+            y: profile.illY,
             width: 880,
             scale: 1,
             zIndex: 8,
@@ -868,7 +1029,7 @@ export function recomposeProjectWithStyle(
           endTime: Number(safeEnd.toFixed(2)),
           enterAnimation: 'pop-up',
           exitAnimation: idx === segments.length - 1 ? 'fade-out' : 'shrink',
-          layout: { x: 540, y: 985, width: 830, scale: 1, zIndex: 20 },
+          layout: { x: 540, y: profile.cardY, width: 830, scale: 1, zIndex: 20 },
           props: {
             kind: 'sentence-card',
             text: seg.cardText,
@@ -877,7 +1038,9 @@ export function recomposeProjectWithStyle(
             stampText: seg.stampText,
             stampColor: seg.stampColor,
             emphasisWord: seg.emphasisWord,
-            emphasisColor: seg.emphasisColor,
+            emphasisColor: profile.emphasisColor ?? seg.emphasisColor,
+            bgColor: profile.cardBg,
+            textColor: profile.cardText,
           },
         });
         lastCardEnd = safeEnd;
@@ -885,11 +1048,7 @@ export function recomposeProjectWithStyle(
     });
 
     // 3. Tone meter for compositions that benefit from a continuous bottom sentiment bar
-    if (
-      compositionId === 'story-scenes' ||
-      compositionId === 'flow-steps' ||
-      compositionId === 'timeline-track'
-    ) {
+    if (profile.showToneMeter) {
       newVisuals.push({
         id: `comp-meter-${compositionId}`,
         type: 'tone-meter',
@@ -937,6 +1096,233 @@ export function recomposeProjectWithStyle(
     compositionId,
     subtitle: `${project.cues.length} câu thoại · Phối kiểu ${meta.shortLabel}`,
     elements: resolved,
+  };
+}
+
+/**
+ * Applies a user-designed component configuration picked & customized from Kho Component
+ * onto the entire project (or active segment) with automatic overlap resolution.
+ */
+export function applyCustomComponentComposition(
+  project: LessonProject,
+  customConfig: CustomComponentPresetConfig,
+  options?: { theme?: CanvasThemeId; activeTimeSec?: number; scope?: 'all' | 'active-cue' },
+): LessonProject {
+  const catalog = getEffectiveVectorCatalog();
+  const matchedMeta = catalog.find((c) => c.variant === customConfig.variant);
+  const nextTheme = options?.theme ?? project.theme;
+  const segments = buildBeatSegments(project);
+  const stripItems = deriveStripItems(project);
+  const karaokeEls = project.elements.filter((e) => e.type === 'karaoke-card');
+  const accentColor = customConfig.accentColor || '#4F46E5';
+
+  const makeCustomData = (seg: ReturnType<typeof buildBeatSegments>[number]): IllustrationPropData => ({
+    title: customConfig.title?.trim() || seg.topicLabel || matchedMeta?.label || 'Key Insight',
+    subtitle:
+      customConfig.subtitle?.trim() ||
+      (seg.subtext ? cleanShortPhrase(seg.subtext, 8, 46) : matchedMeta?.description),
+    speechText: customConfig.speechText?.trim() || cleanShortPhrase(seg.cardText, 8, 48),
+    labels:
+      customConfig.labels && customConfig.labels.length > 0
+        ? customConfig.labels
+        : stripItems.slice(0, 3).map((s) => s.label),
+    highlightWord: customConfig.highlightWord?.trim() || seg.emphasisWord,
+    formula: customConfig.formula?.trim() || undefined,
+    sceneIcon: customConfig.sceneIcon ?? matchedMeta?.defaultIcon ?? 'sparkles',
+    customPrimitives: getCustomComponentByVariant(customConfig.variant)?.primitives,
+  });
+
+  if (options?.scope === 'active-cue' && typeof options.activeTimeSec === 'number') {
+    const t = options.activeTimeSec;
+    const activeSeg =
+      segments.find((s) => t >= s.startTime && t <= s.endTime) ?? segments[0];
+    const existingIllustrations = project.elements.filter((e) => e.type === 'illustration-prop');
+    const targetIll =
+      existingIllustrations.find((e) => t >= e.startTime && t <= e.endTime) ??
+      existingIllustrations[0];
+
+    let updatedElements: SceneElement[];
+    if (targetIll && activeSeg) {
+      updatedElements = project.elements.map((el) =>
+        el.id === targetIll.id
+          ? {
+              ...el,
+              label: `Tùy biến: ${matchedMeta?.label || customConfig.variant}`,
+              props: {
+                kind: 'illustration-prop',
+                variant: customConfig.variant,
+                data: makeCustomData(activeSeg),
+              },
+            }
+          : el,
+      );
+    } else {
+      updatedElements = [
+        ...project.elements.filter((e) => e.type !== 'illustration-prop'),
+        {
+          id: `custom-ill-${Date.now()}`,
+          type: 'illustration-prop',
+          label: `Tùy biến: ${matchedMeta?.label || customConfig.variant}`,
+          startTime: activeSeg?.startTime ?? 0,
+          endTime: activeSeg?.endTime ?? project.duration,
+          enterAnimation: 'fade-scale',
+          exitAnimation: 'fade-out',
+          layout: {
+            x: 540,
+            y: customConfig.illustrationY ?? 635,
+            width: 880,
+            scale: 1,
+            zIndex: 10,
+          },
+          props: {
+            kind: 'illustration-prop',
+            variant: customConfig.variant,
+            data: activeSeg ? makeCustomData(activeSeg) : makeCustomData(segments[0]),
+          },
+        },
+      ];
+    }
+
+    return {
+      ...project,
+      theme: nextTheme,
+      compositionId: 'custom',
+      subtitle: `${project.cues.length} câu thoại · Tự sáng tạo (${matchedMeta?.label || customConfig.variant})`,
+      elements: resolveProjectOverlaps(updatedElements),
+    };
+  }
+
+  const newVisuals: SceneElement[] = [];
+  if (customConfig.showStrip !== false && stripItems.length >= 2) {
+    newVisuals.push({
+      id: 'comp-custom-strip',
+      type: 'comparison-strip',
+      label: 'Thanh đối chiếu tùy biến',
+      startTime: 0,
+      endTime: project.duration,
+      enterAnimation: 'drop-in',
+      exitAnimation: 'fade-out',
+      layout: { x: 540, y: 185, width: 900, scale: 1, zIndex: 10 },
+      props: {
+        kind: 'comparison-strip',
+        items: stripItems,
+      },
+    });
+  }
+
+  let lastPillEnd = -1;
+  let lastIllEnd = -1;
+  let lastCardEnd = -1;
+  const pillY = customConfig.showStrip !== false && stripItems.length >= 2 ? 330 : 225;
+  const illY = customConfig.illustrationY ?? (customConfig.showStrip !== false ? 630 : 585);
+  const cardY = customConfig.showToneMeter ? 980 : 1015;
+
+  segments.forEach((seg, idx) => {
+    const safeStart = Math.max(0, seg.startTime);
+    const safeEnd = Math.max(safeStart + 0.45, seg.endTime);
+    const nextSegStart =
+      idx < segments.length - 1 ? Math.max(safeEnd, segments[idx + 1].startTime - 0.03) : project.duration;
+
+    const pillStart = Math.max(safeStart, lastPillEnd + 0.03);
+    const pillEnd = Math.max(safeEnd, nextSegStart);
+    if (pillEnd - pillStart >= 0.35) {
+      newVisuals.push({
+        id: `comp-custom-pill-${idx + 1}`,
+        type: 'topic-pill',
+        label: `Nhãn: ${seg.topicLabel}`,
+        startTime: Number(pillStart.toFixed(2)),
+        endTime: Number(pillEnd.toFixed(2)),
+        enterAnimation: 'pop-up',
+        exitAnimation: 'fade-out',
+        layout: { x: 540, y: pillY, width: 410, scale: 1, zIndex: 12 },
+        props: {
+          kind: 'topic-pill',
+          text: customConfig.title?.trim() && idx === 0 ? customConfig.title.trim() : seg.topicLabel,
+          bgColor: `${accentColor}22`,
+          textColor: accentColor,
+        },
+      });
+      lastPillEnd = pillEnd;
+    }
+
+    const illStart = idx === 0 ? 0 : Math.max(safeStart, lastIllEnd + 0.03);
+    const illEnd = idx === segments.length - 1 ? project.duration : Math.max(safeEnd, nextSegStart);
+    if (illEnd - illStart >= 0.35) {
+      newVisuals.push({
+        id: `comp-custom-ill-${idx + 1}`,
+        type: 'illustration-prop',
+        label: `Kho Component: ${matchedMeta?.label || customConfig.variant}`,
+        startTime: Number(illStart.toFixed(2)),
+        endTime: Number(illEnd.toFixed(2)),
+        enterAnimation: 'fade-scale',
+        exitAnimation: 'fade-out',
+        layout: { x: 540, y: illY, width: 880, scale: 1, zIndex: 9 },
+        props: {
+          kind: 'illustration-prop',
+          variant: customConfig.variant,
+          data: makeCustomData(seg),
+        },
+      });
+      lastIllEnd = illEnd;
+    }
+
+    const cardStart = Math.max(safeStart, lastCardEnd + 0.03);
+    if (customConfig.showSentenceCard !== false && safeEnd - cardStart >= 0.35) {
+      newVisuals.push({
+        id: `comp-custom-card-${idx + 1}`,
+        type: 'sentence-card',
+        label: `Thẻ câu: ${seg.cardText.slice(0, 24)}`,
+        startTime: Number(cardStart.toFixed(2)),
+        endTime: Number(safeEnd.toFixed(2)),
+        enterAnimation: 'pop-up',
+        exitAnimation: idx === segments.length - 1 ? 'fade-out' : 'shrink',
+        layout: { x: 540, y: cardY, width: 830, scale: 1, zIndex: 20 },
+        props: {
+          kind: 'sentence-card',
+          text: seg.cardText,
+          subtext: seg.subtext,
+          badge: seg.badge,
+          stampText: seg.stampText,
+          stampColor: seg.stampColor,
+          emphasisWord: customConfig.highlightWord?.trim() || seg.emphasisWord,
+          emphasisColor: accentColor,
+          bgColor: customConfig.cardBgColor || '#FFFFFF',
+          textColor: customConfig.cardTextColor || '#0F172A',
+        },
+      });
+      lastCardEnd = safeEnd;
+    }
+  });
+
+  if (customConfig.showToneMeter) {
+    newVisuals.push({
+      id: 'comp-custom-meter',
+      type: 'tone-meter',
+      label: 'Thanh sắc thái',
+      startTime: segments[0]?.startTime ?? 0,
+      endTime: project.duration,
+      enterAnimation: 'slide-up',
+      exitAnimation: 'fade-out',
+      layout: { x: 540, y: 1255, width: 700, scale: 1, zIndex: 18 },
+      props: {
+        kind: 'tone-meter',
+        title: 'TONE',
+        leftLabel: 'basic',
+        rightLabel: 'pro',
+        valueStart: 0.25,
+        valueEnd: 0.9,
+        animateStart: project.duration * 0.2,
+        animateEnd: Math.max(1.2, project.duration * 0.78),
+      },
+    });
+  }
+
+  return {
+    ...project,
+    theme: nextTheme,
+    compositionId: 'custom',
+    subtitle: `${project.cues.length} câu thoại · Tự sáng tạo (${matchedMeta?.label || customConfig.variant})`,
+    elements: resolveProjectOverlaps([...newVisuals, ...karaokeEls]),
   };
 }
 

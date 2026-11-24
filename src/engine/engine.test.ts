@@ -37,6 +37,7 @@ import { buildFfmpegArgs } from './ffmpegArgs';
 import { resolveMp4EncodingParams } from './mp4Config';
 import {
   applyCompositionToProject,
+  applyCustomComponentComposition,
   getEligibleCompositionsForContext,
   LAYOUT_COMPOSITIONS,
   matchIllustrationForCue,
@@ -88,6 +89,14 @@ import {
   createDefaultVisualBuilderConfig,
   VISUAL_LAYOUT_PRESETS,
 } from './visualComponentBuilder';
+import { alignKnownTextToPcmFloat, parseWavBufferToMonoFloat32 } from './forcedAligner';
+import { buildReadingWebAiPrompt, parseReadingWebAiResponse } from './readingPromptBuilder';
+import {
+  computeReadingTimelineMetrics,
+  paginateReadingWords,
+  READING_BOOK_FRAMES,
+  READING_POINTER_STYLES,
+} from './eduStudioEffects';
 
 test('interpolateWordTimings distributes word timestamps across cue duration', () => {
   const words = interpolateWordTimings('Give me water please', 1.0, 3.0);
@@ -1319,4 +1328,214 @@ test('resolveMp4EncodingParams returns even dimensions across 9:16, 16:9, 1:1, a
   assert.equal(social45.width, 720);
   assert.equal(social45.height, 900);
 });
+
+function buildSyntheticPcmWav(sampleRate: number, durationSec: number): Buffer {
+  const numSamples = Math.round(sampleRate * durationSec);
+  const dataSize = numSamples * 2;
+  const buf = Buffer.alloc(44 + dataSize);
+  buf.write('RIFF', 0);
+  buf.writeUInt32LE(36 + dataSize, 4);
+  buf.write('WAVE', 8);
+  buf.write('fmt ', 12);
+  buf.writeUInt32LE(16, 16);
+  buf.writeUInt16LE(1, 20); // PCM
+  buf.writeUInt16LE(1, 22); // mono
+  buf.writeUInt32LE(sampleRate, 24);
+  buf.writeUInt32LE(sampleRate * 2, 28);
+  buf.writeUInt16LE(2, 32);
+  buf.writeUInt16LE(16, 34);
+  buf.write('data', 36);
+  buf.writeUInt32LE(dataSize, 40);
+
+  // Two clear speech bursts separated by silence (0.2s..1.4s and 1.8s..3.0s)
+  for (let i = 0; i < numSamples; i++) {
+    const t = i / sampleRate;
+    const active = (t >= 0.2 && t <= 1.4) || (t >= 1.8 && t <= 3.0);
+    const val = active ? Math.round(Math.sin(2 * Math.PI * 220 * t) * 14000) : 0;
+    buf.writeInt16LE(val, 44 + i * 2);
+  }
+  return buf;
+}
+
+test('forcedAligner parses synthetic PCM 16-bit WAV and produces monotonic word timings inside audio duration', () => {
+  const wavBuf = buildSyntheticPcmWav(16000, 3.4);
+  const parsed = parseWavBufferToMonoFloat32(wavBuf);
+  assert.equal(parsed.sampleRate, 16000);
+  assert.equal(parsed.samples.length, Math.round(16000 * 3.4));
+
+  const reference = 'Morning routines build focus.\nOne small step daily.';
+  const aligned = alignKnownTextToPcmFloat(reference, parsed.samples, parsed.sampleRate);
+
+  assert.equal(aligned.words.length, 8);
+  assert.equal(aligned.segments.length, 2);
+  assert.ok(aligned.islands.length >= 2);
+  assert.ok(Math.abs(aligned.durationSec - 3.4) < 0.05);
+
+  for (let i = 0; i < aligned.words.length; i++) {
+    const w = aligned.words[i];
+    assert.ok(w.end > w.start);
+    assert.ok(w.end <= aligned.durationSec + 0.001);
+    if (i > 0) {
+      assert.ok(w.start >= aligned.words[i - 1].start);
+    }
+  }
+});
+
+test('readingPromptBuilder generates web-url & topic prompts and parses fenced JSON, raw JSON, and plain text', () => {
+  const urlPrompt = buildReadingWebAiPrompt({
+    mode: 'web-url',
+    url: 'https://example.com/english-habits',
+    sourceTitle: 'Daily Habits',
+    sourceText: 'Start each day with ten calm minutes of English reading.',
+    level: 'A2',
+    wordCount: 95,
+  });
+  assert.ok(urlPrompt.includes('https://example.com/english-habits'));
+  assert.ok(urlPrompt.includes('CEFR A2'));
+  assert.ok(urlPrompt.includes('95 từ'));
+
+  const topicPrompt = buildReadingWebAiPrompt({
+    mode: 'topic',
+    topic: 'Ordering coffee naturally',
+    level: 'B1',
+    wordCount: 120,
+  });
+  assert.ok(topicPrompt.includes('Ordering coffee naturally'));
+  assert.ok(topicPrompt.includes('CEFR B1'));
+
+  const fencedJson = parseReadingWebAiResponse(
+    '```json\n{"title":"Morning Focus","topicBadge":"CEFR B1","level":"B1","text":"Line one.\\nLine two."}\n```',
+    'B1',
+  );
+  assert.ok(fencedJson !== null);
+  assert.equal(fencedJson!.title, 'Morning Focus');
+  assert.equal(fencedJson!.text, 'Line one.\nLine two.');
+
+  const rawJson = parseReadingWebAiResponse(
+    'Here is your passage: {"title":"Calm Brew","text":"Drink water first. Enjoy your tea."}',
+    'A2',
+  );
+  assert.ok(rawJson !== null);
+  assert.equal(rawJson!.title, 'Calm Brew');
+
+  const plain = parseReadingWebAiResponse(
+    'Cafe Etiquette\nFirst, smile and greet the barista clearly.\nNext, ask politely for your drink size.',
+    'A2',
+  );
+  assert.ok(plain !== null);
+  assert.equal(plain!.title, 'Cafe Etiquette');
+  assert.ok(plain!.text.includes('barista clearly'));
+});
+
+test('eduStudioEffects provides 5 book frames, 7 pointer styles, non-overlapping outro metrics, and multi-page pagination', () => {
+  assert.equal(READING_BOOK_FRAMES.length, 5);
+  assert.equal(READING_POINTER_STYLES.length, 7);
+
+  const words = [
+    { word: 'Practice', start: 0.2, end: 1.1 },
+    { word: 'every', start: 1.2, end: 2.3 },
+    { word: 'day', start: 2.4, end: 8.6 },
+  ];
+  const metrics = computeReadingTimelineMetrics({
+    words,
+    contentDuration: 7.0,
+    totalDuration: 10.0,
+    outroSeconds: 3,
+    outroText: 'Thanks for watching!\nFollow for more',
+  });
+  assert.equal(metrics.hasOutro, true);
+  assert.equal(metrics.lastWordEnd, 8.6);
+  assert.ok(metrics.outroStart >= metrics.lastWordEnd);
+  assert.ok(metrics.effectiveTotalDuration >= metrics.outroStart + 3);
+
+  const manyWords = Array.from({ length: 48 }, (_, i) => ({
+    word: `word${i + 1}`,
+    start: i * 0.4,
+    end: (i + 1) * 0.4,
+  }));
+  const pages = paginateReadingWords(
+    manyWords,
+    (w) => w.length * 14,
+    {
+      startX: 40,
+      maxW: 260,
+      startY: 100,
+      maxY: 220,
+      lineHeight: 36,
+      wordGap: 10,
+    },
+  );
+  assert.ok(pages.length >= 2);
+  assert.equal(pages.flat().length, manyWords.length);
+});
+
+test('illustrationLayouts produces distinct built-in presets and applies custom Kho Component compositions without overlaps', () => {
+  const flowProj = recomposeProjectWithStyle(PRESET_JP_EN_POLITE, 'flow-steps');
+  const gaugeProj = recomposeProjectWithStyle(PRESET_JP_EN_POLITE, 'gauge-tone');
+  const checklistProj = recomposeProjectWithStyle(PRESET_JP_EN_POLITE, 'checklist-cards');
+
+  const flowVariant = flowProj.elements.find((e) => e.props.kind === 'illustration-prop');
+  const gaugeVariant = gaugeProj.elements.find((e) => e.props.kind === 'illustration-prop');
+  const checklistVariant = checklistProj.elements.find((e) => e.props.kind === 'illustration-prop');
+
+  assert.ok(flowVariant?.props.kind === 'illustration-prop');
+  assert.ok(gaugeVariant?.props.kind === 'illustration-prop');
+  assert.ok(checklistVariant?.props.kind === 'illustration-prop');
+  assert.notEqual(flowVariant.props.variant, gaugeVariant.props.variant);
+  assert.notEqual(gaugeVariant.props.variant, checklistVariant.props.variant);
+  assert.notEqual(flowProj.theme, gaugeProj.theme);
+
+  const customCfg = {
+    variant: 'css-sticky-note' as const,
+    sceneIcon: 'sparkles' as const,
+    title: 'Pro Phrasing Tip',
+    subtitle: 'Polite everyday English',
+    speechText: 'Could I possibly grab an iced latte?',
+    labels: ['Polite', 'Natural', 'Warm'],
+    highlightWord: 'possibly',
+    accentColor: '#4F46E5',
+    showStrip: true,
+    showSentenceCard: true,
+    showToneMeter: false,
+  };
+
+  const allCustom = applyCustomComponentComposition(PRESET_JP_EN_POLITE, customCfg, {
+    scope: 'all',
+  });
+  assert.equal(allCustom.compositionId, 'custom');
+  const allIlls = allCustom.elements.filter((e) => e.props.kind === 'illustration-prop');
+  assert.ok(allIlls.length >= 1);
+  assert.ok(
+    allIlls.every(
+      (el) =>
+        el.props.kind === 'illustration-prop' &&
+        el.props.variant === 'css-sticky-note' &&
+        el.props.data?.title === 'Pro Phrasing Tip',
+    ),
+  );
+  assert.equal(findVisualOverlaps(allCustom.elements).length, 0);
+
+  const activeCustom = applyCustomComponentComposition(
+    flowProj,
+    { ...customCfg, variant: 'bs-alert-tip', title: 'Single Cue Override' },
+    { scope: 'active-cue', activeTimeSec: 1.5 },
+  );
+  assert.equal(activeCustom.compositionId, 'custom');
+  assert.ok(
+    activeCustom.elements.some(
+      (e) => e.props.kind === 'illustration-prop' && e.props.variant === 'bs-alert-tip',
+    ),
+  );
+  assert.equal(findVisualOverlaps(activeCustom.elements).length, 0);
+
+  const customPrompt = buildSceneGenerationPrompt(PRESET_JP_EN_POLITE.cues, {
+    title: 'Custom Composition Prompt',
+    style: 'tiktok-cards',
+    compositionId: 'custom',
+    customConfig: customCfg,
+  });
+  assert.ok(customPrompt.includes('css-sticky-note'));
+  assert.ok(customPrompt.includes('Pro Phrasing Tip'));
+});
+
 

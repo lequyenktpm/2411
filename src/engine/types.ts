@@ -280,7 +280,26 @@ export type LayoutCompositionId =
   | 'clock-spotlight'
   | 'phrase-icon-split'
   | 'word-reveal'
-  | '3d-shapes';
+  | '3d-shapes'
+  | 'custom';
+
+export interface CustomComponentPresetConfig {
+  variant: IllustrationVariant;
+  sceneIcon?: IllustrationSceneIcon;
+  title?: string;
+  subtitle?: string;
+  speechText?: string;
+  labels?: string[];
+  highlightWord?: string;
+  formula?: string;
+  accentColor?: string;
+  cardBgColor?: string;
+  cardTextColor?: string;
+  showStrip?: boolean;
+  showToneMeter?: boolean;
+  showSentenceCard?: boolean;
+  illustrationY?: number;
+}
 
 export interface SentenceCardProps {
   kind: 'sentence-card';

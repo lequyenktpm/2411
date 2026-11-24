@@ -69,8 +69,10 @@ import {
   ALL_SCENE_ICONS,
   getEffectiveVectorCatalog,
 } from '../engine/vectorComponentDb';
+import { ApiKeyInlineControl } from './ApiKeyInlineControl';
 import { TtsProviderInfo } from './AudioSubtitleStudioModal';
 import { emitOutputUpdated } from './GlobalOutputPanel';
+import { buildApiKeyHeaders, useClientApiKeys } from '../utils/apiKeysStore';
 
 interface EnglishReelsTabProps {
   onSendToStudio: (project: LessonProject, audioFile: File | null) => void;
@@ -197,8 +199,10 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
   const lastRafTsRef = useRef<number | null>(null);
   const exportAbortRef = useRef<AbortController | null>(null);
 
-  useEffect(() => {
-    fetch('/api/tts/voices')
+  const { keys: clientKeys } = useClientApiKeys();
+
+  const refreshTtsVoices = () => {
+    fetch('/api/tts/voices', { headers: buildApiKeyHeaders() })
       .then((r) => r.json())
       .then((data) => {
         if (Array.isArray(data?.providers)) {
@@ -208,6 +212,10 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
         }
       })
       .catch(() => undefined);
+  };
+
+  useEffect(() => {
+    refreshTtsVoices();
   }, []);
 
   useEffect(() => {
@@ -222,16 +230,19 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
     };
   }, [generatedAudioUrl]);
 
+  const effectiveHasGeminiKey = hasGeminiKey || Boolean(clientKeys.geminiApiKey);
+  const effectiveHasElevenLabsKey = hasElevenLabsKey || Boolean(clientKeys.elevenlabsApiKey);
+
   const availableVoices = useMemo(() => {
     if (ttsProvider === 'auto') {
       return ttsProviders.flatMap((p) => {
-        if (p.id === 'gemini' && !hasGeminiKey) return [];
-        if (p.id === 'elevenlabs' && !hasElevenLabsKey) return [];
+        if (p.id === 'gemini' && !effectiveHasGeminiKey) return [];
+        if (p.id === 'elevenlabs' && !effectiveHasElevenLabsKey) return [];
         return p.voices;
       });
     }
     return ttsProviders.find((p) => p.id === ttsProvider)?.voices ?? [];
-  }, [ttsProviders, ttsProvider, hasGeminiKey, hasElevenLabsKey]);
+  }, [ttsProviders, ttsProvider, effectiveHasGeminiKey, effectiveHasElevenLabsKey]);
 
   useEffect(() => {
     if (availableVoices.length > 0 && !availableVoices.some((v) => v.id === ttsVoice)) {
@@ -771,14 +782,14 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
   };
 
   const handleServerAiGenerateCards = async () => {
-    if (!hasGeminiKey || isGeneratingAiCards) return;
+    if (!effectiveHasGeminiKey || isGeneratingAiCards) return;
     setIsGeneratingAiCards(true);
     setAiJsonError(null);
     setAiJsonNotice(null);
     try {
       const res = await fetch('/api/ai/generate-scene', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: buildApiKeyHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ prompt: webAiPrompt }),
       });
       const data = await parseApiJson<{ text?: string; error?: string }>(
@@ -983,7 +994,7 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
                   Nội dung đã lọc sạch (hoặc dán văn bản bài đọc / từ vựng / câu hỏi)
                 </label>
                 <div className="flex items-center gap-3">
-                  {hasGeminiKey && (
+                  {effectiveHasGeminiKey && (
                     <button
                       type="button"
                       disabled={isGeneratingAiCards}
@@ -1846,13 +1857,13 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
               </div>
             </div>
 
-            {((ttsProvider === 'elevenlabs' && !hasElevenLabsKey) ||
-              (ttsProvider === 'gemini' && !hasGeminiKey)) && (
-              <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
-                {ttsProvider === 'elevenlabs'
-                  ? 'Cần thiết lập ELEVENLABS_API_KEY trong Environment Secrets / .env trên server để đọc bằng ElevenLabs.'
-                  : 'Cần thiết lập GEMINI_API_KEY trong Environment Secrets / .env trên server để đọc bằng Gemini Flash TTS.'}
-              </p>
+            {(ttsProvider === 'elevenlabs' || ttsProvider === 'gemini') && (
+              <ApiKeyInlineControl
+                provider={ttsProvider === 'elevenlabs' ? 'elevenlabs' : 'gemini'}
+                hasServerKey={ttsProvider === 'elevenlabs' ? hasElevenLabsKey : hasGeminiKey}
+                onSaved={refreshTtsVoices}
+                compact
+              />
             )}
 
             <div>

@@ -253,38 +253,67 @@ async function getWhisperPipeline(
       env.allowLocalModels = true;
       notify(2, `Đang kiểm tra / tải model ${modelId}...`);
       const fileProgress = new Map<string, number>();
-      const pipe = await pipeline('automatic-speech-recognition', modelId, {
-        dtype: 'q8',
-        progress_callback: (info: any) => {
-          if (!info || typeof info !== 'object') return;
-          const fileName = String(info.file || modelId).split('/').pop() || modelId;
-          if (info.status === 'initiate' || info.status === 'download') {
-            if (!fileProgress.has(fileName)) fileProgress.set(fileName, 0);
+
+      const isTransient429OrNet = (err: unknown): boolean => {
+        const msg = err instanceof Error ? err.message : String(err || '');
+        return /\b(429|502|503|504|rate limit|too many requests|fetch failed|econnreset|etimedout)\b/i.test(msg);
+      };
+
+      let pipe: any = null;
+      let lastErr: unknown = null;
+      const maxAttempts = 3;
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+          pipe = await pipeline('automatic-speech-recognition', modelId, {
+            dtype: 'q8',
+            progress_callback: (info: any) => {
+              if (!info || typeof info !== 'object') return;
+              const fileName = String(info.file || modelId).split('/').pop() || modelId;
+              if (info.status === 'initiate' || info.status === 'download') {
+                if (!fileProgress.has(fileName)) fileProgress.set(fileName, 0);
+                notify(
+                  Math.max(3, whisperPreloadState.progress),
+                  `Đang tải tệp model ${fileName}...`,
+                );
+              } else if (info.status === 'progress') {
+                const rawPct =
+                  typeof info.progress === 'number'
+                    ? info.progress
+                    : info.total
+                      ? (Number(info.loaded || 0) / Number(info.total || 1)) * 100
+                      : 0;
+                fileProgress.set(fileName, Math.max(0, Math.min(100, rawPct)));
+                const vals = Array.from(fileProgress.values());
+                const avg = vals.length > 0 ? vals.reduce((a, b) => a + b, 0) / vals.length : rawPct;
+                notify(Math.max(5, Math.min(95, avg)), `Đang tải ${fileName} (${Math.round(rawPct)}%)...`);
+              } else if (info.status === 'done') {
+                fileProgress.set(fileName, 100);
+                const vals = Array.from(fileProgress.values());
+                const avg = vals.length > 0 ? vals.reduce((a, b) => a + b, 0) / vals.length : 100;
+                notify(Math.min(96, avg), `Đã nạp ${fileName}`);
+              } else if (info.status === 'ready') {
+                notify(100, `Model ${modelId} đã sẵn sàng`);
+              }
+            },
+          });
+          break;
+        } catch (err) {
+          lastErr = err;
+          if (attempt < maxAttempts && isTransient429OrNet(err)) {
+            const delayMs = 900 * Math.pow(2, attempt - 1);
             notify(
               Math.max(3, whisperPreloadState.progress),
-              `Đang tải tệp model ${fileName}...`,
+              `HuggingFace phản hồi chậm/HTTP 429 — tự động thử lại (${attempt}/${maxAttempts - 1})...`,
             );
-          } else if (info.status === 'progress') {
-            const rawPct =
-              typeof info.progress === 'number'
-                ? info.progress
-                : info.total
-                  ? (Number(info.loaded || 0) / Number(info.total || 1)) * 100
-                  : 0;
-            fileProgress.set(fileName, Math.max(0, Math.min(100, rawPct)));
-            const vals = Array.from(fileProgress.values());
-            const avg = vals.length > 0 ? vals.reduce((a, b) => a + b, 0) / vals.length : rawPct;
-            notify(Math.max(5, Math.min(95, avg)), `Đang tải ${fileName} (${Math.round(rawPct)}%)...`);
-          } else if (info.status === 'done') {
-            fileProgress.set(fileName, 100);
-            const vals = Array.from(fileProgress.values());
-            const avg = vals.length > 0 ? vals.reduce((a, b) => a + b, 0) / vals.length : 100;
-            notify(Math.min(96, avg), `Đã nạp ${fileName}`);
-          } else if (info.status === 'ready') {
-            notify(100, `Model ${modelId} đã sẵn sàng`);
+            await new Promise((r) => setTimeout(r, delayMs));
+            continue;
           }
-        },
-      });
+          throw err;
+        }
+      }
+      if (!pipe) {
+        throw lastErr instanceof Error ? lastErr : new Error('Không tải được model Whisper.');
+      }
       notify(100, `Model ${modelId} đã sẵn sàng`);
       return pipe;
     })();
@@ -674,13 +703,14 @@ export async function runLocalWhisperOnWav(
 export async function translateLinesWithGeminiOrFree(
   lines: string[],
   targetLang: string,
+  geminiApiKeyOverride?: string,
 ): Promise<{ translations: string[]; engineUsed: string }> {
   const cleanLines = lines.map((l) => l.trim());
   if (cleanLines.length === 0 || !targetLang || targetLang === 'none') {
     return { translations: cleanLines, engineUsed: 'none' };
   }
 
-  const apiKey = process.env.GEMINI_API_KEY || '';
+  const apiKey = (geminiApiKeyOverride || '').trim() || process.env.GEMINI_API_KEY || '';
   if (apiKey) {
     try {
       const { GoogleGenAI, Type } = await import('@google/genai');

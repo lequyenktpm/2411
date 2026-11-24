@@ -1,7 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   BookOpen,
+  Check,
   CheckCircle2,
+  Copy,
   Download,
   Eye,
   FileAudio,
@@ -24,14 +26,19 @@ import {
 import {
   buildEduKaraokeAss,
   buildEstimatedReadingWords,
+  computeReadingTimelineMetrics,
   EduKaraokePosition,
   EduKaraokeSize,
   EduWatermarkCorner,
   EduWatermarkOutroConfig,
   KARAOKE_EFFECT_PRESETS,
+  READING_BOOK_FRAMES,
   READING_BOOK_PALETTES,
+  READING_POINTER_STYLES,
+  ReadingBookFrameId,
   ReadingBookPalette,
   ReadingIllustrationStyle,
+  ReadingPointerStyleId,
   renderReadingAlongFrame,
 } from '../engine/eduStudioEffects';
 import {
@@ -44,6 +51,10 @@ import {
   resolveMp4EncodingParams,
 } from '../engine/mp4Config';
 import { ExportAbortedError, exportProjectToServerDisk } from '../engine/mp4Exporter';
+import {
+  buildReadingWebAiPrompt,
+  parseReadingWebAiResponse,
+} from '../engine/readingPromptBuilder';
 import { parseTranscriptAuto } from '../engine/transcriptParser';
 import {
   alignAudioWithProgressJob,
@@ -52,6 +63,8 @@ import {
   TtsProviderItem,
 } from '../engine/ttsSyncHelper';
 import { LessonProject, TranscriptCue, WordTiming } from '../engine/types';
+import { buildApiKeyHeaders, useClientApiKeys } from '../utils/apiKeysStore';
+import { ApiKeyInlineControl } from './ApiKeyInlineControl';
 import { emitOutputUpdated } from './GlobalOutputPanel';
 
 interface EducationalStudioTabProps {
@@ -606,6 +619,7 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
   const [mergeAudioUrl, setMergeAudioUrl] = useState<string | null>(null);
   const mergePreviewVideoRef = useRef<HTMLVideoElement>(null);
   const mergePreviewAudioRef = useRef<HTMLAudioElement>(null);
+  const [showMergeOutroPreview, setShowMergeOutroPreview] = useState(false);
   const [durationMode, setDurationMode] = useState<'loop-video' | 'shortest'>('shortest');
   const [mergeOutputName, setMergeOutputName] = useState('');
   const [isMerging, setIsMerging] = useState(false);
@@ -1045,18 +1059,25 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
   };
 
   // ── Sub-tab 3: Reading Along Studio (Book + Pointer Hand + Whisper + MP4 Export) ──
+  const [showKmOutroPreview, setShowKmOutroPreview] = useState(false);
+  const { keys: clientKeys } = useClientApiKeys();
   const [readingTitle, setReadingTitle] = useState('A Simple Morning Routine');
   const [readingTopic, setReadingTopic] = useState('Daily life · A1');
   const [readingPaletteId, setReadingPaletteId] =
     useState<ReadingBookPalette['id']>('Sunny Yellow');
   const [readingIllustration, setReadingIllustration] =
     useState<ReadingIllustrationStyle>('2.5D');
+  const [readingBookFrame, setReadingBookFrame] =
+    useState<ReadingBookFrameId>('classic-page');
+  const [readingPointerStyle, setReadingPointerStyle] =
+    useState<ReadingPointerStyleId>('hand-classic');
   const [readingText, setReadingText] = useState(
     `Tom wakes up early every morning.\nHe opens the window and makes his bed.\nThen he drinks a glass of water and eats breakfast.\nHe checks the time, takes his bag, and leaves home.\nA good morning helps him start the day with energy.`,
   );
   const [alignFile, setAlignFile] = useState<File | null>(null);
   const [alignAudioUrl, setAlignAudioUrl] = useState<string | null>(null);
   const [alignAudioDur, setAlignAudioDur] = useState<number>(14);
+  const [alignMode, setAlignMode] = useState<'fast-forced' | 'whisper'>('fast-forced');
   const [alignLang, setAlignLang] = useState('auto');
   const [alignModel, setAlignModel] = useState('Xenova/whisper-small');
   const [readingTtsRate, setReadingTtsRate] = useState(1.0);
@@ -1076,6 +1097,16 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
   const [readingFps, setReadingFps] = useState<ExportFpsOption>(30);
   const [readingUrl, setReadingUrl] = useState('');
   const [readingUrlSubLinks, setReadingUrlSubLinks] = useState<Array<{ title: string; url: string }>>([]);
+  const [scrapedWebSource, setScrapedWebSource] = useState<{
+    url: string;
+    title: string;
+    rawText: string;
+  } | null>(null);
+  const [readingWebPromptMode, setReadingWebPromptMode] = useState<'web-url' | 'topic'>('web-url');
+  const [isWebPromptOpen, setIsWebPromptOpen] = useState<boolean>(false);
+  const [copiedReadingPrompt, setCopiedReadingPrompt] = useState<boolean>(false);
+  const [pastedReadingAiResponse, setPastedReadingAiResponse] = useState<string>('');
+  const [pastedReadingAiError, setPastedReadingAiError] = useState<string | null>(null);
   const [readingAiTopic, setReadingAiTopic] = useState('Morning habits for better focus');
   const [readingAiLevel, setReadingAiLevel] = useState<'A1' | 'A2' | 'B1' | 'B2' | 'C1'>('B1');
   const [readingAiLength, setReadingAiLength] = useState<number>(110);
@@ -1102,7 +1133,7 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
   const alignAudioRef = useRef<HTMLAudioElement>(null);
   const readingCanvasRef = useRef<HTMLCanvasElement>(null);
 
-  useEffect(() => {
+  const refreshReadingVoices = useCallback(() => {
     void fetchTtsVoicesCatalog()
       .then((res) => {
         setTtsVoices(res.providers);
@@ -1112,18 +1143,26 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
       .catch(() => undefined);
   }, []);
 
+  useEffect(() => {
+    refreshReadingVoices();
+  }, [refreshReadingVoices]);
+
+  const effectiveReadingGeminiKey = hasReadingGeminiKey || Boolean(clientKeys.geminiApiKey);
+  const effectiveReadingElevenLabsKey =
+    hasReadingElevenLabsKey || Boolean(clientKeys.elevenlabsApiKey);
+
   const allReadingVoices = useMemo(() => {
     if (readingProvider === 'auto') {
       return ttsVoices
         .filter(
           (p) =>
-            (p.id !== 'gemini' || hasReadingGeminiKey) &&
-            (p.id !== 'elevenlabs' || hasReadingElevenLabsKey),
+            (p.id !== 'gemini' || effectiveReadingGeminiKey) &&
+            (p.id !== 'elevenlabs' || effectiveReadingElevenLabsKey),
         )
         .flatMap((p) => p.voices);
     }
     return ttsVoices.find((p) => p.id === readingProvider)?.voices ?? [];
-  }, [ttsVoices, readingProvider, hasReadingGeminiKey, hasReadingElevenLabsKey]);
+  }, [ttsVoices, readingProvider, effectiveReadingGeminiKey, effectiveReadingElevenLabsKey]);
 
   useEffect(() => {
     if (allReadingVoices.length > 0 && !allReadingVoices.some((v) => v.id === readingVoice)) {
@@ -1139,16 +1178,51 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
 
   const effectiveReadingWords = useMemo(() => {
     if (alignResult && alignResult.words.length > 0) return alignResult.words;
-    return buildEstimatedReadingWords(readingText, alignAudioDur);
-  }, [alignResult, readingText, alignAudioDur]);
+    return buildEstimatedReadingWords(readingText, alignAudioUrl ? alignAudioDur : undefined);
+  }, [alignResult, readingText, alignAudioDur, alignAudioUrl]);
 
-  const effectiveReadingDuration = useMemo(() => {
+  const effectiveReadingContentDuration = useMemo(() => {
     const lastWordEnd =
       effectiveReadingWords.length > 0
         ? effectiveReadingWords[effectiveReadingWords.length - 1].end
-        : 10;
-    return Math.max(4, alignResult?.durationSec || alignAudioDur || lastWordEnd + 0.5);
-  }, [effectiveReadingWords, alignResult, alignAudioDur]);
+        : 8;
+    const audioBound = alignAudioUrl ? alignAudioDur : 0;
+    return Math.max(3, alignResult?.durationSec || audioBound || lastWordEnd + 0.5, lastWordEnd + 0.35);
+  }, [effectiveReadingWords, alignResult, alignAudioDur, alignAudioUrl]);
+
+  const readingTimeline = useMemo(
+    () =>
+      computeReadingTimelineMetrics({
+        words: effectiveReadingWords,
+        contentDuration: effectiveReadingContentDuration,
+        outroSeconds: watermarkOutro.outroSeconds,
+        outroText: [watermarkOutro.outroLine1.trim(), watermarkOutro.outroLine2.trim()]
+          .filter(Boolean)
+          .join('\n'),
+      }),
+    [effectiveReadingWords, effectiveReadingContentDuration, watermarkOutro],
+  );
+
+  const readingWebAiPrompt = useMemo(
+    () =>
+      buildReadingWebAiPrompt({
+        mode: readingWebPromptMode,
+        url: readingUrl || scrapedWebSource?.url,
+        sourceTitle: scrapedWebSource?.title,
+        sourceText: scrapedWebSource?.rawText,
+        topic: readingAiTopic,
+        level: readingAiLevel,
+        wordCount: readingAiLength,
+      }),
+    [
+      readingWebPromptMode,
+      readingUrl,
+      scrapedWebSource,
+      readingAiTopic,
+      readingAiLevel,
+      readingAiLength,
+    ],
+  );
 
   const resolvedReadingDims = useMemo(
     () =>
@@ -1189,9 +1263,12 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
       text: readingText,
       words: effectiveReadingWords,
       currentTime: alignCurrentSec,
-      totalDuration: effectiveReadingDuration,
+      contentDuration: readingTimeline.contentEnd,
+      totalDuration: readingTimeline.effectiveTotalDuration,
       paletteId: readingPaletteId,
       illustrationStyle: readingIllustration,
+      bookFrame: readingBookFrame,
+      pointerStyle: readingPointerStyle,
       watermarkOutro,
     });
   }, [
@@ -1200,28 +1277,38 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
     readingText,
     effectiveReadingWords,
     alignCurrentSec,
-    effectiveReadingDuration,
+    readingTimeline.contentEnd,
+    readingTimeline.effectiveTotalDuration,
     readingPaletteId,
     readingIllustration,
+    readingBookFrame,
+    readingPointerStyle,
     watermarkOutro,
     previewCanvasDims.w,
     previewCanvasDims.h,
+    subTab,
   ]);
 
-  // Playback timer when previewing without audio or syncing with audio
+  // Playback timer when previewing without audio or continuing into Outro after audio ends
   useEffect(() => {
     if (!isPlayingReadingPreview) return;
     let rafId = 0;
     let lastTs = performance.now();
+    const totalLimit = readingTimeline.effectiveTotalDuration;
     const tick = (now: number) => {
-      if (alignAudioRef.current && alignAudioUrl && !alignAudioRef.current.paused) {
+      const dt = Math.min(0.1, (now - lastTs) / 1000);
+      lastTs = now;
+      if (
+        alignAudioRef.current &&
+        alignAudioUrl &&
+        !alignAudioRef.current.paused &&
+        !alignAudioRef.current.ended
+      ) {
         setAlignCurrentSec(alignAudioRef.current.currentTime);
       } else {
-        const dt = (now - lastTs) / 1000;
-        lastTs = now;
         setAlignCurrentSec((prev) => {
           const next = prev + dt;
-          if (next >= effectiveReadingDuration) {
+          if (next >= totalLimit) {
             setIsPlayingReadingPreview(false);
             return 0;
           }
@@ -1232,7 +1319,7 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
     };
     rafId = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(rafId);
-  }, [isPlayingReadingPreview, alignAudioUrl, effectiveReadingDuration]);
+  }, [isPlayingReadingPreview, alignAudioUrl, readingTimeline.effectiveTotalDuration]);
 
   const handleGenerateReadingTts = async () => {
     if (isGeneratingReadingTts || !readingText.trim()) return;
@@ -1257,7 +1344,7 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
         },
       });
       setAlignFile(res.audioFile);
-      setAlignAudioDur(Math.max(4, res.durationSec));
+      setAlignAudioDur(Math.max(3, res.durationSec));
       setAlignAudioUrl((prev) => {
         if (prev) URL.revokeObjectURL(prev);
         return URL.createObjectURL(res.audioFile);
@@ -1265,7 +1352,7 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
       const flatWords = res.cues.flatMap((c) => c.words);
       setAlignResult({
         language: res.detectedLanguage,
-        modelUsed: alignModel,
+        modelUsed: res.whisperAligned ? 'fast-forced' : res.providerUsed,
         backendUsed: res.providerUsed,
         durationSec: res.durationSec,
         text: readingText,
@@ -1286,53 +1373,54 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
     setAlignError(null);
     setIsAligning(true);
     setReadingTtsProgress(5);
-    setReadingTtsStageLabel('Đang tải model Whisper & căn chỉnh từng từ...');
+    setReadingTtsStageLabel(
+      alignMode === 'fast-forced'
+        ? 'Đang căn nhịp siêu tốc theo kịch bản (Fast Forced Align)...'
+        : 'Đang tải model Whisper & căn chỉnh từng từ...',
+    );
     try {
-      const extMatch = alignFile.name.match(/(\.[a-z0-9]+)$/i);
-      const ext = extMatch ? extMatch[1].toLowerCase() : '.mp3';
-      const buf = new Uint8Array(await alignFile.arrayBuffer());
-      let bin = '';
-      for (let i = 0; i < buf.length; i += 0x8000) {
-        bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
-      }
-      const audioBase64 = btoa(bin);
       const data = await alignAudioWithProgressJob(
         {
-          audioBase64,
-          ext,
+          audioFile: alignFile,
           lang: alignLang,
           model: alignModel,
+          referenceText: readingText,
+          alignMode,
         },
         (pct, label) => {
           setReadingTtsProgress(pct);
           setReadingTtsStageLabel(label);
         },
       );
-      if (data.text?.trim()) {
+      if (alignMode === 'whisper' && data.text?.trim() && !readingText.trim()) {
         setReadingText(data.text.trim());
       }
       if (alignAudioRef.current && Number.isFinite(alignAudioRef.current.duration)) {
         setAlignAudioDur(alignAudioRef.current.duration);
       }
       const cuesArr = Array.isArray(data.cues) ? data.cues : [];
-      const dur =
-        cuesArr.length > 0
-          ? cuesArr[cuesArr.length - 1].end
-          : alignAudioRef.current && Number.isFinite(alignAudioRef.current.duration)
-            ? alignAudioRef.current.duration
-            : alignAudioDur;
+      const wordsArr = Array.isArray(data.words) ? data.words : [];
+      const wordsEnd = wordsArr.length > 0 ? wordsArr[wordsArr.length - 1].end : 0;
+      const cuesEnd = cuesArr.length > 0 ? cuesArr[cuesArr.length - 1].end : 0;
+      const dur = Math.max(
+        wordsEnd,
+        cuesEnd,
+        alignAudioRef.current && Number.isFinite(alignAudioRef.current.duration)
+          ? alignAudioRef.current.duration
+          : alignAudioDur,
+      );
       setAlignResult({
         language: data.language,
-        modelUsed: data.modelUsed || alignModel,
-        backendUsed: data.backendUsed || 'faster-whisper',
+        modelUsed: data.modelUsed || (alignMode === 'fast-forced' ? 'fast-forced' : alignModel),
+        backendUsed: data.backendUsed || (alignMode === 'fast-forced' ? 'fast-forced' : 'whisper'),
         durationSec: Number(dur || 0),
-        text: data.text || '',
-        words: Array.isArray(data.words) ? data.words : [],
+        text: data.text || readingText,
+        words: wordsArr,
         cues: cuesArr,
         srt: data.srt || '',
       });
     } catch (err) {
-      setAlignError(err instanceof Error ? err.message : 'Lỗi chạy Whisper Local.');
+      setAlignError(err instanceof Error ? err.message : 'Lỗi căn chỉnh từng từ.');
     } finally {
       setIsAligning(false);
     }
@@ -1358,7 +1446,7 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
         title: readingTitle,
         subtitle: readingTopic,
         theme: 'pastel-sunrise',
-        duration: effectiveReadingDuration + (watermarkOutro.outroSeconds > 0 ? watermarkOutro.outroSeconds : 0),
+        duration: readingTimeline.effectiveTotalDuration,
         fps: 30,
         cues: [],
         elements: [],
@@ -1394,9 +1482,12 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
               text: readingText,
               words: effectiveReadingWords,
               currentTime: time,
+              contentDuration: readingTimeline.contentEnd,
               totalDuration: totalWithOutro,
               paletteId: readingPaletteId,
               illustrationStyle: readingIllustration,
+              bookFrame: readingBookFrame,
+              pointerStyle: readingPointerStyle,
               watermarkOutro,
             });
           },
@@ -1436,27 +1527,41 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
       });
       const scraped = await parseApiJson<{
         title?: string;
+        rawText?: string;
         text?: string;
+        links?: Array<{ title: string; url: string }>;
         subLinks?: Array<{ title: string; url: string }>;
         error?: string;
       }>(scrapeRes, 'Không đọc được nội dung từ trang web');
-      if (!scrapeRes.ok || !scraped.text?.trim()) {
+      const extractedText = (scraped.rawText || scraped.text || '').trim();
+      const extractedLinks = Array.isArray(scraped.links)
+        ? scraped.links
+        : Array.isArray(scraped.subLinks)
+          ? scraped.subLinks
+          : [];
+      if (!scrapeRes.ok || !extractedText) {
         throw new Error(scraped.error || 'Không trích xuất được nội dung bài đọc từ URL này.');
       }
-      setReadingUrlSubLinks(Array.isArray(scraped.subLinks) ? scraped.subLinks.slice(0, 8) : []);
+      setReadingUrlSubLinks(extractedLinks.slice(0, 8));
+      setScrapedWebSource({
+        url: cleanUrl,
+        title: scraped.title || cleanUrl,
+        rawText: extractedText,
+      });
+      setReadingWebPromptMode('web-url');
       setReadingAiProgress(55);
 
-      if (adaptWithAi && hasReadingGeminiKey) {
+      if (adaptWithAi && effectiveReadingGeminiKey) {
         setReadingAiStageLabel(`AI đang biên tập lại theo trình độ ${readingAiLevel}...`);
         const aiRes = await fetch('/api/ai/generate-reading', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: buildApiKeyHeaders({ 'Content-Type': 'application/json' }),
           body: JSON.stringify({
             mode: 'adapt-url',
             level: readingAiLevel,
             wordCount: readingAiLength,
             sourceTitle: scraped.title || '',
-            sourceText: scraped.text,
+            sourceText: extractedText,
           }),
         });
         const aiData = await parseApiJson<{
@@ -1471,25 +1576,28 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
           setReadingTopic(aiData.topicBadge || `CEFR ${readingAiLevel} · WEB`);
           setReadingText(aiData.text.trim());
           setAlignResult(null);
+          setAlignCurrentSec(0);
           setReadingAiStageLabel(`Đã lấy bài từ web & chuyển thể trình độ ${readingAiLevel}!`);
           return;
         }
       }
 
-      const rawLines = scraped.text
+      const rawLines = extractedText
         .split(/(?<=[.!?])\s+|\r?\n+/)
         .map((s) => s.trim())
         .filter((s) => s.length >= 12)
-        .slice(0, 12);
+        .slice(0, 14);
       setReadingAiProgress(100);
       if (scraped.title?.trim()) setReadingTitle(scraped.title.trim().slice(0, 80));
       setReadingTopic(`WEB ARTICLE · ${readingAiLevel}`);
-      setReadingText((rawLines.length > 0 ? rawLines : [scraped.text.slice(0, 700)]).join('\n'));
+      setReadingText((rawLines.length > 0 ? rawLines : [extractedText.slice(0, 900)]).join('\n'));
       setAlignResult(null);
+      setAlignCurrentSec(0);
+      setIsWebPromptOpen(true);
       setReadingAiStageLabel(
-        hasReadingGeminiKey
+        effectiveReadingGeminiKey
           ? 'Đã lấy nội dung trang web vào bài đọc!'
-          : 'Đã bóc tách văn bản sạch từ trang web (nếu muốn AI biên tập lại theo trình độ A1–C1, hãy thêm GEMINI_API_KEY vào Settings > Secrets).',
+          : 'Đã bóc tách văn bản sạch từ Web — có thể sao chép Prompt Web AI bên dưới rồi dán kết quả về sách!',
       );
     } catch (err) {
       setAlignError(err instanceof Error ? err.message : 'Lỗi đọc nội dung từ trang web.');
@@ -1508,7 +1616,7 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
     try {
       const res = await fetch('/api/ai/generate-reading', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: buildApiKeyHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           mode: 'generate',
           topic: readingAiTopic.trim(),
@@ -1530,6 +1638,7 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
       setReadingTopic(data.topicBadge || `CEFR ${readingAiLevel}`);
       setReadingText(data.text.trim());
       setAlignResult(null);
+      setAlignCurrentSec(0);
       setReadingAiStageLabel(`AI đã tạo xong bài đọc trình độ ${readingAiLevel}!`);
     } catch (err) {
       setAlignError(err instanceof Error ? err.message : 'Lỗi AI tạo bài đọc.');
@@ -1537,6 +1646,31 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
     } finally {
       setIsScrapingOrGeneratingReading(false);
     }
+  };
+
+  const handleCopyReadingWebPrompt = async () => {
+    try {
+      await navigator.clipboard.writeText(readingWebAiPrompt);
+      setCopiedReadingPrompt(true);
+      setTimeout(() => setCopiedReadingPrompt(false), 2000);
+    } catch {
+      setCopiedReadingPrompt(false);
+    }
+  };
+
+  const handleApplyPastedReadingAi = () => {
+    setPastedReadingAiError(null);
+    const parsed = parseReadingWebAiResponse(pastedReadingAiResponse, readingAiLevel);
+    if (!parsed) {
+      setPastedReadingAiError('Hãy dán kết quả JSON hoặc văn bản tiếng Anh từ ChatGPT/Gemini vào ô trên.');
+      return;
+    }
+    setReadingTitle(parsed.title);
+    setReadingTopic(parsed.topicBadge);
+    setReadingText(parsed.text);
+    setAlignResult(null);
+    setAlignCurrentSec(0);
+    setReadingAiStageLabel(`Đã nạp nội dung từ Web AI (${parsed.title}) vào trang sách!`);
   };
 
   const wmPosClass =
@@ -1766,6 +1900,7 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                         <button
                           type="button"
                           onClick={() => {
+                            setShowMergeOutroPreview(false);
                             const v = mergePreviewVideoRef.current;
                             const a = mergePreviewAudioRef.current;
                             if (!v || !a) return;
@@ -1783,6 +1918,20 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                         >
                           <Play className="w-2.5 h-2.5 fill-current" />
                           <span>Phát khớp Video &amp; Audio</span>
+                        </button>
+                      )}
+                      {watermarkOutro.outroSeconds > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setShowMergeOutroPreview((o) => !o)}
+                          className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded text-[10px] font-semibold ${
+                            showMergeOutroPreview
+                              ? 'bg-amber-500 text-slate-950'
+                              : 'bg-slate-700 hover:bg-slate-600 text-white'
+                          }`}
+                        >
+                          <Eye className="w-2.5 h-2.5" />
+                          <span>{showMergeOutroPreview ? 'Đóng Outro' : 'Xem thử Outro'}</span>
                         </button>
                       )}
                     </div>
@@ -1816,6 +1965,20 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                         className={`pointer-events-none absolute px-2.5 py-1 rounded bg-black/55 text-white text-xs font-semibold ${wmPosClass}`}
                       >
                         {watermarkOutro.watermarkText}
+                      </div>
+                    )}
+
+                    {showMergeOutroPreview && (
+                      <div className="absolute inset-0 bg-slate-900/95 flex flex-col items-center justify-center p-6 text-center space-y-1.5 z-10">
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-400">
+                          Xem trước Outro cuối video (+{watermarkOutro.outroSeconds}s sau khi kết thúc)
+                        </span>
+                        <div className="text-base font-bold text-white">
+                          {watermarkOutro.outroLine1 || 'Thanks for watching!'}
+                        </div>
+                        {watermarkOutro.outroLine2 && (
+                          <div className="text-xs text-slate-300">{watermarkOutro.outroLine2}</div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -2053,6 +2216,7 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                         <button
                           type="button"
                           onClick={() => {
+                            setShowKmOutroPreview(false);
                             const v = kmVideoRef.current;
                             const a = kmVoiceRef.current;
                             if (!v || !a) return;
@@ -2070,6 +2234,20 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                         >
                           <Play className="w-2.5 h-2.5 fill-current" />
                           <span>Phát khớp Video &amp; Voice</span>
+                        </button>
+                      )}
+                      {watermarkOutro.outroSeconds > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setShowKmOutroPreview((o) => !o)}
+                          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold ${
+                            showKmOutroPreview
+                              ? 'bg-amber-500 text-slate-950'
+                              : 'bg-slate-700 hover:bg-slate-600 text-white'
+                          }`}
+                        >
+                          <Eye className="w-2.5 h-2.5" />
+                          <span>{showKmOutroPreview ? 'Đóng Outro' : 'Xem thử Outro'}</span>
                         </button>
                       )}
                       <span className="font-mono text-slate-400">{kmPreviewTimeSec.toFixed(1)}s</span>
@@ -2099,7 +2277,7 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                     )}
 
                     {/* Live Subtitle Style Preview */}
-                    {kmActiveCue && (
+                    {kmActiveCue && !showKmOutroPreview && (
                       <div
                         className={`pointer-events-none absolute inset-x-4 flex justify-center ${
                           kmSubPosition === 'Trên'
@@ -2163,6 +2341,20 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                         className={`pointer-events-none absolute px-2.5 py-1 rounded bg-black/55 text-white text-xs font-semibold ${wmPosClass}`}
                       >
                         {watermarkOutro.watermarkText}
+                      </div>
+                    )}
+
+                    {showKmOutroPreview && (
+                      <div className="absolute inset-0 bg-slate-900/95 flex flex-col items-center justify-center p-6 text-center space-y-1.5 z-10">
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-400">
+                          Xem trước Outro cuối video (+{watermarkOutro.outroSeconds}s sau khi kết thúc karaoke)
+                        </span>
+                        <div className="text-base font-bold text-white">
+                          {watermarkOutro.outroLine1 || 'Thanks for watching!'}
+                        </div>
+                        {watermarkOutro.outroLine2 && (
+                          <div className="text-xs text-slate-300">{watermarkOutro.outroLine2}</div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -2500,19 +2692,29 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
             {/* ── SUB-TAB 3: READING ALONG STUDIO (Book + Pointer + Export MP4) ── */}
             {subTab === 'align' && (
               <>
-                {/* Webpage URL Scraper + AI CEFR Generator */}
+                {/* Webpage URL Scraper + Web AI Prompt + Inline Gemini API */}
                 <div className="p-3.5 rounded-xl bg-gradient-to-br from-indigo-50/80 via-white to-sky-50/70 border border-indigo-200/80 space-y-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="text-xs font-bold text-indigo-950 inline-flex items-center gap-1.5">
                       <Globe className="w-4 h-4 text-indigo-600" />
-                      <span>Lấy bài từ Trang Web hoặc Nhờ AI tạo bài theo cấp độ (A1–C1)</span>
+                      <span>Lấy bài từ Trang Web, Prompt Web AI hoặc Gemini API</span>
                     </div>
-                    <span className="text-[11px] font-medium text-slate-500">
-                      {hasReadingGeminiKey
-                        ? 'Gemini AI đã sẵn sàng trên server'
-                        : 'Thêm GEMINI_API_KEY vào Settings > Secrets để bật AI tạo/chuyển thể bài'}
-                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setIsWebPromptOpen((o) => !o)}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold text-indigo-700 bg-white border border-indigo-200 rounded-lg hover:bg-indigo-50"
+                    >
+                      <Sparkles className="w-3.5 h-3.5" />
+                      <span>{isWebPromptOpen ? 'Ẩn Prompt Web AI' : 'Tạo Prompt cho Web AI (Không cần API Key)'}</span>
+                    </button>
                   </div>
+
+                  <ApiKeyInlineControl
+                    provider="gemini"
+                    hasServerKey={hasReadingGeminiKey}
+                    onSaved={refreshReadingVoices}
+                    compact
+                  />
 
                   {/* URL Input */}
                   <div className="flex flex-col sm:flex-row gap-2">
@@ -2520,6 +2722,7 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                       <Link2 className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
                       <input
                         type="url"
+                        aria-label="Đường link bài báo hoặc truyện tiếng Anh"
                         value={readingUrl}
                         onChange={(e) => setReadingUrl(e.target.value)}
                         placeholder="Dán link bài báo/truyện tiếng Anh (vd: https://...) để lấy vào bài đọc"
@@ -2562,9 +2765,10 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                   <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 pt-2 border-t border-indigo-100">
                     <input
                       type="text"
+                      aria-label="Chủ đề bài đọc"
                       value={readingAiTopic}
                       onChange={(e) => setReadingAiTopic(e.target.value)}
-                      placeholder="Chủ đề để AI tự viết bài đọc (vd: A rainy day in London, Space travel...)"
+                      placeholder="Chủ đề bài đọc (vd: A rainy day in London, Space travel...)"
                       className="sm:col-span-5 px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-lg"
                     />
                     <select
@@ -2606,6 +2810,85 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                     </button>
                   </div>
 
+                  {/* External Web AI Prompt Builder & Paste Response Box */}
+                  {isWebPromptOpen && (
+                    <div className="p-3 rounded-xl bg-white border border-indigo-200 space-y-2.5 text-xs">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-bold text-indigo-950">Prompt cho ChatGPT / Gemini / Claude Web:</span>
+                          <button
+                            type="button"
+                            onClick={() => setReadingWebPromptMode('web-url')}
+                            className={`px-2 py-0.5 text-[10px] font-semibold rounded border ${
+                              readingWebPromptMode === 'web-url'
+                                ? 'bg-indigo-600 border-indigo-600 text-white'
+                                : 'bg-slate-50 border-slate-200 text-slate-600'
+                            }`}
+                          >
+                            Theo URL Web
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setReadingWebPromptMode('topic')}
+                            className={`px-2 py-0.5 text-[10px] font-semibold rounded border ${
+                              readingWebPromptMode === 'topic'
+                                ? 'bg-indigo-600 border-indigo-600 text-white'
+                                : 'bg-slate-50 border-slate-200 text-slate-600'
+                            }`}
+                          >
+                            Theo Chủ đề
+                          </button>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => void handleCopyReadingWebPrompt()}
+                          className="inline-flex items-center gap-1.5 px-3 py-1 text-[11px] font-semibold text-white bg-indigo-600 rounded-lg hover:bg-indigo-700"
+                        >
+                          {copiedReadingPrompt ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                          <span>{copiedReadingPrompt ? 'Đã chép Prompt!' : 'Sao chép Prompt Web AI'}</span>
+                        </button>
+                      </div>
+
+                      <textarea
+                        readOnly
+                        aria-label="Prompt tạo bài đọc cho Web AI"
+                        rows={4}
+                        value={readingWebAiPrompt}
+                        className="w-full p-2 text-[11px] font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-700"
+                      />
+
+                      <div className="space-y-1.5">
+                        <label htmlFor="paste-web-ai-reading" className="block text-[11px] font-semibold text-slate-700">
+                          Dán kết quả JSON (hoặc đoạn văn) từ Web AI vào đây rồi bấm Áp dụng:
+                        </label>
+                        <textarea
+                          id="paste-web-ai-reading"
+                          rows={3}
+                          value={pastedReadingAiResponse}
+                          onChange={(e) => {
+                            setPastedReadingAiResponse(e.target.value);
+                            setPastedReadingAiError(null);
+                          }}
+                          placeholder='Dán {"title": "...", "topicBadge": "...", "text": "..."} hoặc đoạn văn tiếng Anh...'
+                          className="w-full p-2 text-[11px] font-mono bg-slate-50 border border-slate-200 rounded-lg"
+                        />
+                        {pastedReadingAiError && (
+                          <p className="text-[11px] text-rose-700">{pastedReadingAiError}</p>
+                        )}
+                        <div className="flex justify-end">
+                          <button
+                            type="button"
+                            onClick={handleApplyPastedReadingAi}
+                            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-[11px] font-semibold text-white bg-emerald-600 rounded-lg hover:bg-emerald-700"
+                          >
+                            <CheckCircle2 className="w-3.5 h-3.5" />
+                            <span>Áp dụng vào Sách</span>
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   {(isScrapingOrGeneratingReading || readingAiStageLabel) && (
                     <div className="p-2 rounded-lg bg-white border border-indigo-200 space-y-1">
                       <div className="flex items-center justify-between text-[11px] font-medium text-indigo-900">
@@ -2629,10 +2912,11 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                   <div className="md:col-span-7 space-y-3">
                     <div className="grid grid-cols-2 gap-2.5">
                       <div>
-                        <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                        <label htmlFor="reading-palette-select" className="block text-[11px] font-semibold text-slate-700 mb-1">
                           Màu sách (Book Palette)
                         </label>
                         <select
+                          id="reading-palette-select"
                           value={readingPaletteId}
                           onChange={(e) =>
                             setReadingPaletteId(e.target.value as ReadingBookPalette['id'])
@@ -2647,10 +2931,11 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                         </select>
                       </div>
                       <div>
-                        <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                        <label htmlFor="reading-illustration-select" className="block text-[11px] font-semibold text-slate-700 mb-1">
                           Phong cách minh họa
                         </label>
                         <select
+                          id="reading-illustration-select"
                           value={readingIllustration}
                           onChange={(e) =>
                             setReadingIllustration(e.target.value as ReadingIllustrationStyle)
@@ -2666,10 +2951,50 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
 
                     <div className="grid grid-cols-2 gap-2.5">
                       <div>
-                        <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                        <label htmlFor="reading-book-frame-select" className="block text-[11px] font-semibold text-slate-700 mb-1">
+                          Khung sách (5 mẫu)
+                        </label>
+                        <select
+                          id="reading-book-frame-select"
+                          value={readingBookFrame}
+                          onChange={(e) => setReadingBookFrame(e.target.value as ReadingBookFrameId)}
+                          className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-lg"
+                        >
+                          {READING_BOOK_FRAMES.map((bf) => (
+                            <option key={bf.id} value={bf.id}>
+                              {bf.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label htmlFor="reading-pointer-style-select" className="block text-[11px] font-semibold text-slate-700 mb-1">
+                          Kiểu con trỏ chỉ chữ (7 mẫu)
+                        </label>
+                        <select
+                          id="reading-pointer-style-select"
+                          value={readingPointerStyle}
+                          onChange={(e) =>
+                            setReadingPointerStyle(e.target.value as ReadingPointerStyleId)
+                          }
+                          className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-lg"
+                        >
+                          {READING_POINTER_STYLES.map((ps) => (
+                            <option key={ps.id} value={ps.id}>
+                              {ps.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2.5">
+                      <div>
+                        <label htmlFor="reading-title-input" className="block text-[11px] font-semibold text-slate-700 mb-1">
                           Tiêu đề trang sách
                         </label>
                         <input
+                          id="reading-title-input"
                           type="text"
                           value={readingTitle}
                           onChange={(e) => setReadingTitle(e.target.value)}
@@ -2677,10 +3002,11 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                         />
                       </div>
                       <div>
-                        <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                        <label htmlFor="reading-topic-input" className="block text-[11px] font-semibold text-slate-700 mb-1">
                           Chủ đề / Trình độ
                         </label>
                         <input
+                          id="reading-topic-input"
                           type="text"
                           value={readingTopic}
                           onChange={(e) => setReadingTopic(e.target.value)}
@@ -2691,7 +3017,7 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
 
                     <div>
                       <div className="flex items-center justify-between mb-1">
-                        <label className="text-[11px] font-semibold text-slate-700">
+                        <label htmlFor="reading-passage-textarea" className="text-[11px] font-semibold text-slate-700">
                           Nội dung bài đọc
                         </label>
                         <label className="text-[11px] font-semibold text-indigo-600 hover:text-indigo-700 cursor-pointer">
@@ -2702,20 +3028,29 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                             className="hidden"
                             onChange={async (e) => {
                               const f = e.target.files?.[0];
-                              if (f) setReadingText(await f.text());
+                              if (f) {
+                                setReadingText(await f.text());
+                                setAlignResult(null);
+                                setAlignCurrentSec(0);
+                              }
                             }}
                           />
                         </label>
                       </div>
                       <textarea
+                        id="reading-passage-textarea"
                         rows={4}
                         value={readingText}
-                        onChange={(e) => setReadingText(e.target.value)}
+                        onChange={(e) => {
+                          setReadingText(e.target.value);
+                          setAlignResult(null);
+                          setAlignCurrentSec(0);
+                        }}
                         className="w-full p-2.5 text-xs bg-slate-50 border border-slate-200 rounded-lg leading-relaxed"
                       />
                     </div>
 
-                    {/* TTS / Audio + Whisper Word-Level */}
+                    {/* TTS / Audio + Fast Forced Align & Whisper */}
                     <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-2.5">
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <span className="text-[11px] font-bold text-slate-800">
@@ -2732,6 +3067,8 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                               const f = e.target.files?.[0] ?? null;
                               setAlignFile(f);
                               setAlignError(null);
+                              setAlignResult(null);
+                              setAlignCurrentSec(0);
                               setAlignAudioUrl((prev) => {
                                 if (prev) URL.revokeObjectURL(prev);
                                 return f ? URL.createObjectURL(f) : null;
@@ -2743,6 +3080,7 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
 
                       <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                         <select
+                          aria-label="Nhà cung cấp TTS bài đọc"
                           value={readingProvider}
                           onChange={(e) => setReadingProvider(e.target.value)}
                           className="px-2 py-1.5 text-xs bg-white border border-slate-200 rounded-lg"
@@ -2750,15 +3088,16 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                           <option value="auto">Tự động (Edge TTS miễn phí)</option>
                           <option value="edge">Edge TTS (Miễn phí)</option>
                           <option value="elevenlabs">
-                            ElevenLabs AI Voice ({hasReadingElevenLabsKey ? 'Đã kết nối Secrets' : 'Cần ELEVENLABS_API_KEY'})
+                            ElevenLabs AI Voice ({effectiveReadingElevenLabsKey ? 'Đã có Key' : 'Nhập Key ngay dưới'})
                           </option>
                           <option value="google">Google Translate TTS (Miễn phí)</option>
                           <option value="polly">Amazon Polly (Miễn phí)</option>
                           <option value="gemini">
-                            Gemini Flash TTS ({hasReadingGeminiKey ? 'Đã kết nối Secrets' : 'Cần GEMINI_API_KEY'})
+                            Gemini Flash TTS ({effectiveReadingGeminiKey ? 'Đã có Key' : 'Nhập Key ngay dưới'})
                           </option>
                         </select>
                         <select
+                          aria-label="Giọng đọc bài đọc"
                           value={readingVoice}
                           onChange={(e) => setReadingVoice(e.target.value)}
                           className="sm:col-span-2 px-2 py-1.5 text-xs bg-white border border-slate-200 rounded-lg"
@@ -2775,19 +3114,22 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                         </select>
                       </div>
 
-                      {((readingProvider === 'elevenlabs' && !hasReadingElevenLabsKey) ||
-                        (readingProvider === 'gemini' && !hasReadingGeminiKey)) && (
-                        <div className="px-2.5 py-1.5 rounded-lg bg-amber-50 border border-amber-200 text-[11px] text-amber-900">
-                          Nhà cung cấp này cần cấu hình biến môi trường{' '}
-                          <code className="font-mono font-semibold">
-                            {readingProvider === 'elevenlabs' ? 'ELEVENLABS_API_KEY' : 'GEMINI_API_KEY'}
-                          </code>{' '}
-                          trong <strong>Environment Secrets / .env</strong> ở server rồi khởi động lại server (không nhập key trên trình duyệt để bảo mật).
-                        </div>
+                      {(readingProvider === 'elevenlabs' || readingProvider === 'gemini') && (
+                        <ApiKeyInlineControl
+                          provider={readingProvider === 'elevenlabs' ? 'elevenlabs' : 'gemini'}
+                          hasServerKey={
+                            readingProvider === 'elevenlabs'
+                              ? hasReadingElevenLabsKey
+                              : hasReadingGeminiKey
+                          }
+                          onSaved={refreshReadingVoices}
+                          compact
+                        />
                       )}
 
                       <div className="flex flex-wrap items-center gap-2">
                         <select
+                          aria-label="Tốc độ đọc TTS"
                           value={readingTtsRate}
                           onChange={(e) => setReadingTtsRate(Number(e.target.value))}
                           className="px-2 py-1.5 text-xs bg-white border border-slate-200 rounded-lg"
@@ -2832,11 +3174,22 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                         </div>
                       )}
 
-                      <div className="grid grid-cols-2 gap-2">
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                         <select
+                          aria-label="Chế độ căn chỉnh từ"
+                          value={alignMode}
+                          onChange={(e) => setAlignMode(e.target.value as 'fast-forced' | 'whisper')}
+                          className="px-2 py-1.5 text-[11px] bg-white border border-slate-200 rounded-lg font-medium"
+                        >
+                          <option value="fast-forced">⚡ Fast Forced Align (&lt;0.2s)</option>
+                          <option value="whisper">Whisper ONNX (Chậm hơn)</option>
+                        </select>
+                        <select
+                          aria-label="Model Whisper căn chữ"
+                          disabled={alignMode === 'fast-forced'}
                           value={alignModel}
                           onChange={(e) => setAlignModel(e.target.value)}
-                          className="px-2 py-1.5 text-[11px] bg-white border border-slate-200 rounded-lg font-mono"
+                          className="px-2 py-1.5 text-[11px] bg-white border border-slate-200 rounded-lg font-mono disabled:opacity-50"
                         >
                           <option value="Xenova/whisper-small">whisper-small</option>
                           <option value="Xenova/whisper-base">whisper-base</option>
@@ -2844,6 +3197,7 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                           <option value="large-v3-turbo">large-v3-turbo</option>
                         </select>
                         <select
+                          aria-label="Ngôn ngữ căn chữ"
                           value={alignLang}
                           onChange={(e) => setAlignLang(e.target.value)}
                           className="px-2 py-1.5 text-[11px] bg-white border border-slate-200 rounded-lg"
@@ -2870,7 +3224,9 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                           <span>
                             {isAligning
                               ? `Đang căn chỉnh từng từ... ${readingTtsProgress}%`
-                              : 'Chạy Whisper Word Alignment (khớp bàn tay)'}
+                              : alignMode === 'fast-forced'
+                                ? '⚡ Căn nhịp siêu tốc theo kịch bản (<0.2s)'
+                                : 'Chạy Whisper Word Alignment (khớp bàn tay)'}
                           </span>
                         </button>
                       )}
@@ -2879,41 +3235,63 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
 
                   {/* Right Live Book + Pointer Preview */}
                   <div className="md:col-span-5 bg-slate-900 rounded-xl p-3 text-white space-y-2.5">
-                    <div className="flex items-center justify-between text-[11px]">
+                    <div className="flex flex-wrap items-center justify-between gap-1.5 text-[11px]">
                       <span className="font-bold text-indigo-300">BOOK + POINTER PREVIEW</span>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (isPlayingReadingPreview) {
-                            setIsPlayingReadingPreview(false);
-                            alignAudioRef.current?.pause();
-                          } else {
-                            setIsPlayingReadingPreview(true);
-                            if (alignAudioRef.current && alignAudioUrl) {
-                              alignAudioRef.current.currentTime = alignCurrentSec;
-                              void alignAudioRef.current.play().catch(() => undefined);
-                            }
-                          }
-                        }}
-                        className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white text-[10px] font-semibold"
-                      >
-                        {isPlayingReadingPreview ? (
-                          <>
-                            <Pause className="w-2.5 h-2.5" />
-                            <span>Tạm dừng</span>
-                          </>
-                        ) : (
-                          <>
-                            <Play className="w-2.5 h-2.5 fill-current" />
-                            <span>Phát thử trang sách</span>
-                          </>
+                      <div className="flex items-center gap-1.5">
+                        {readingTimeline.hasOutro && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              alignAudioRef.current?.pause();
+                              setAlignCurrentSec(Math.min(readingTimeline.effectiveTotalDuration - 0.1, readingTimeline.outroStart + 0.1));
+                              setIsPlayingReadingPreview(true);
+                            }}
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 text-[10px] font-bold"
+                          >
+                            <Eye className="w-2.5 h-2.5" />
+                            <span>Xem thử Outro</span>
+                          </button>
                         )}
-                      </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (isPlayingReadingPreview) {
+                              setIsPlayingReadingPreview(false);
+                              alignAudioRef.current?.pause();
+                            } else {
+                              if (alignCurrentSec >= readingTimeline.effectiveTotalDuration - 0.05) {
+                                setAlignCurrentSec(0);
+                              }
+                              setIsPlayingReadingPreview(true);
+                              if (alignAudioRef.current && alignAudioUrl) {
+                                if (alignCurrentSec < readingTimeline.contentEnd) {
+                                  alignAudioRef.current.currentTime = alignCurrentSec;
+                                  void alignAudioRef.current.play().catch(() => undefined);
+                                }
+                              }
+                            }
+                          }}
+                          className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white text-[10px] font-semibold"
+                        >
+                          {isPlayingReadingPreview ? (
+                            <>
+                              <Pause className="w-2.5 h-2.5" />
+                              <span>Tạm dừng</span>
+                            </>
+                          ) : (
+                            <>
+                              <Play className="w-2.5 h-2.5 fill-current" />
+                              <span>Phát thử trang sách</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
                     </div>
 
                     <div className={`${previewCanvasDims.cls} mx-auto rounded-lg overflow-hidden bg-slate-950 border border-slate-800`}>
                       <canvas
                         ref={readingCanvasRef}
+                        data-testid="reading-along-canvas"
                         width={previewCanvasDims.w}
                         height={previewCanvasDims.h}
                         className="w-full h-full object-contain"
@@ -2923,23 +3301,34 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                     <div className="flex items-center gap-2">
                       <input
                         type="range"
+                        aria-label="Thanh tua xem trước Reading Along"
                         min={0}
-                        max={effectiveReadingDuration}
+                        max={readingTimeline.effectiveTotalDuration}
                         step={0.05}
-                        value={alignCurrentSec}
+                        value={Math.min(alignCurrentSec, readingTimeline.effectiveTotalDuration)}
                         onChange={(e) => {
                           const t = Number(e.target.value);
                           setAlignCurrentSec(t);
                           if (alignAudioRef.current && alignAudioUrl) {
-                            alignAudioRef.current.currentTime = t;
+                            if (t < readingTimeline.contentEnd) {
+                              alignAudioRef.current.currentTime = Math.min(t, alignAudioRef.current.duration || t);
+                            } else {
+                              alignAudioRef.current.pause();
+                            }
                           }
                         }}
                         className="flex-1 accent-indigo-400 h-1"
                       />
                       <span className="text-[10px] font-mono text-slate-300 tabular-nums">
-                        {alignCurrentSec.toFixed(1)}s / {effectiveReadingDuration.toFixed(1)}s
+                        {alignCurrentSec.toFixed(1)}s / {readingTimeline.effectiveTotalDuration.toFixed(1)}s
                       </span>
                     </div>
+                    {readingTimeline.hasOutro && (
+                      <div className="text-[10px] text-slate-400 flex items-center justify-between">
+                        <span>Chữ kết thúc: {readingTimeline.lastWordEnd.toFixed(1)}s</span>
+                        <span className="text-amber-300">Outro bắt đầu: {readingTimeline.outroStart.toFixed(1)}s (không đè chữ)</span>
+                      </div>
+                    )}
 
                     {alignAudioUrl && (
                       <audio
@@ -2951,7 +3340,19 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                             setAlignAudioDur(e.currentTarget.duration);
                           }
                         }}
-                        onTimeUpdate={(e) => setAlignCurrentSec(e.currentTarget.currentTime)}
+                        onTimeUpdate={(e) => {
+                          if (!e.currentTarget.paused) {
+                            setAlignCurrentSec(e.currentTarget.currentTime);
+                          }
+                        }}
+                        onEnded={() => {
+                          if (readingTimeline.hasOutro) {
+                            setAlignCurrentSec(readingTimeline.contentEnd);
+                            setIsPlayingReadingPreview(true);
+                          } else {
+                            setIsPlayingReadingPreview(false);
+                          }
+                        }}
                         className="w-full h-8"
                       />
                     )}

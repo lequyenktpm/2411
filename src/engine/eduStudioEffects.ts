@@ -352,6 +352,52 @@ export const READING_BOOK_PALETTES: ReadingBookPalette[] = [
 
 export type ReadingIllustrationStyle = 'Flat 2D' | '2.5D' | '3D Cartoon';
 
+export type ReadingBookFrameId =
+  | 'classic-page'
+  | 'open-spread'
+  | 'spiral-notebook'
+  | 'textbook-card'
+  | 'chalkboard';
+
+export interface ReadingBookFrameMeta {
+  id: ReadingBookFrameId;
+  label: string;
+  description: string;
+}
+
+export const READING_BOOK_FRAMES: ReadingBookFrameMeta[] = [
+  { id: 'classic-page', label: 'Trang Sách Cổ Điển', description: 'Khung trang sách bo tròn có gáy nổi truyền thống' },
+  { id: 'open-spread', label: 'Sách Mở Hai Trang', description: 'Mở trang đôi kèm dải ruy-băng đánh dấu trang' },
+  { id: 'spiral-notebook', label: 'Sổ Lò Xo Dòng Kẻ', description: 'Gáy xoắn lò xo phía trên kèm dòng kẻ vở học tập' },
+  { id: 'textbook-card', label: 'Giáo Trình Hiện Đại', description: 'Header dải màu toàn phần phong cách Oxford/Cambridge' },
+  { id: 'chalkboard', label: 'Bảng Phấn Lớp Học', description: 'Bảng đen viền gỗ với chữ phấn trắng nổi bật' },
+];
+
+export type ReadingPointerStyleId =
+  | 'hand-classic'
+  | 'magic-wand'
+  | 'highlighter'
+  | 'laser-dot'
+  | 'bouncing-arrow'
+  | 'fountain-pen'
+  | 'underline-only';
+
+export interface ReadingPointerStyleMeta {
+  id: ReadingPointerStyleId;
+  label: string;
+  description: string;
+}
+
+export const READING_POINTER_STYLES: ReadingPointerStyleMeta[] = [
+  { id: 'hand-classic', label: 'Ngón Tay Chỉ Chữ', description: 'Bàn tay hoạt hình di chuyển mượt theo từng từ' },
+  { id: 'magic-wand', label: 'Đũa Phép Ngôi Sao', description: 'Đũa sao phát sáng lướt nhẹ dưới từ đang đọc' },
+  { id: 'highlighter', label: 'Bút Dạ Quang', description: 'Ngòi bút highlight kèm vệt sáng đánh dấu từ' },
+  { id: 'laser-dot', label: 'Tia Laser Đỏ', description: 'Chấm laser kèm vầng hào quang sắc nét' },
+  { id: 'bouncing-arrow', label: 'Mũi Tên Nhún Nhảy', description: 'Mũi tên chỉ lên nhịp nhàng theo tốc độ đọc' },
+  { id: 'fountain-pen', label: 'Bút Máy Cổ Điển', description: 'Ngòi bút máy nghiêng theo nhịp từng chữ' },
+  { id: 'underline-only', label: 'Gạch Chân Tối Giản', description: 'Thanh gạch chân động mượt mà, không che chữ' },
+];
+
 export interface ReadingAlongRenderOptions {
   width: number;
   height: number;
@@ -361,9 +407,104 @@ export interface ReadingAlongRenderOptions {
   words: WordTiming[];
   currentTime: number;
   totalDuration: number;
+  contentDuration?: number;
   paletteId: ReadingBookPalette['id'];
   illustrationStyle: ReadingIllustrationStyle;
+  bookFrame?: ReadingBookFrameId;
+  pointerStyle?: ReadingPointerStyleId;
   watermarkOutro: EduWatermarkOutroConfig;
+}
+
+export interface ReadingTimelineMetrics {
+  lastWordEnd: number;
+  contentEnd: number;
+  outroStart: number;
+  effectiveTotalDuration: number;
+  hasOutro: boolean;
+}
+
+/**
+ * Guarantees Outro never overlaps active words by placing outroStart strictly
+ * after both contentDuration and the last spoken word's end timestamp.
+ */
+export function computeReadingTimelineMetrics(params: {
+  words: WordTiming[];
+  totalDuration?: number;
+  contentDuration?: number;
+  outroSeconds: number;
+  outroText?: string;
+}): ReadingTimelineMetrics {
+  const lastWordEnd = params.words.reduce((mx, w) => Math.max(mx, Number(w.end) || 0), 0);
+  const contentEnd = Math.max(Number(params.contentDuration) || 0, lastWordEnd, 1);
+  const outroSec = Math.max(0, Number(params.outroSeconds) || 0);
+  const hasOutroText = params.outroText === undefined ? true : params.outroText.trim().length > 0;
+  const hasOutro = outroSec > 0 && hasOutroText;
+  const baseTotal = Math.max(Number(params.totalDuration) || 0, contentEnd);
+  const outroStart = hasOutro
+    ? Math.max(contentEnd, baseTotal - outroSec)
+    : baseTotal;
+  const effectiveTotalDuration = hasOutro
+    ? Math.max(baseTotal, outroStart + outroSec)
+    : baseTotal;
+  return {
+    lastWordEnd: Number(lastWordEnd.toFixed(3)),
+    contentEnd: Number(contentEnd.toFixed(3)),
+    outroStart: Number(outroStart.toFixed(3)),
+    effectiveTotalDuration: Number(effectiveTotalDuration.toFixed(3)),
+    hasOutro,
+  };
+}
+
+export interface PaginatedPositionedWord {
+  item: WordTiming;
+  x: number;
+  y: number;
+  w: number;
+  index: number;
+  pageIndex: number;
+}
+
+export function paginateReadingWords(
+  wordsList: WordTiming[],
+  measureWidth: (word: string) => number,
+  bounds: {
+    startX: number;
+    maxW: number;
+    startY: number;
+    maxY: number;
+    lineHeight: number;
+    wordGap: number;
+  },
+): PaginatedPositionedWord[][] {
+  const pages: PaginatedPositionedWord[][] = [[]];
+  let curPageIdx = 0;
+  let curX = bounds.startX;
+  let curY = bounds.startY;
+
+  for (let i = 0; i < wordsList.length; i++) {
+    const item = wordsList[i];
+    const w = measureWidth(item.word);
+    if (curX + w > bounds.startX + bounds.maxW && curX > bounds.startX) {
+      curX = bounds.startX;
+      curY += bounds.lineHeight;
+    }
+    if (curY > bounds.maxY && pages[curPageIdx].length > 0) {
+      curPageIdx += 1;
+      pages.push([]);
+      curX = bounds.startX;
+      curY = bounds.startY;
+    }
+    pages[curPageIdx].push({
+      item,
+      x: curX,
+      y: curY,
+      w,
+      index: i,
+      pageIndex: curPageIdx,
+    });
+    curX += w + bounds.wordGap;
+  }
+  return pages;
 }
 
 function roundRectPath(
@@ -405,6 +546,207 @@ export function buildEstimatedReadingWords(text: string, totalDuration = 12): Wo
   });
 }
 
+function drawReadingPointer(
+  ctx: CanvasRenderingContext2D,
+  style: ReadingPointerStyleId,
+  x: number,
+  y: number,
+  wordW: number,
+  fontSize: number,
+  palette: ReadingBookPalette,
+  scale: number,
+  timeSec: number,
+  isChalkboard: boolean,
+) {
+  const bob = Math.sin(timeSec * 7.5) * 2.2;
+  ctx.save();
+
+  switch (style) {
+    case 'underline-only': {
+      const barY = y - 2;
+      ctx.fillStyle = isChalkboard ? '#FACC15' : palette.highlightBg;
+      roundRectPath(ctx, x - wordW / 2 - 4, barY, wordW + 8, Math.max(4, Math.round(fontSize * 0.14)), 4);
+      ctx.fill();
+      ctx.restore();
+      return;
+    }
+
+    case 'laser-dot': {
+      const dotX = x;
+      const dotY = y + 4 + bob * 0.4;
+      const r = Math.max(7, 10 * scale);
+      const glow = ctx.createRadialGradient(dotX, dotY, 1, dotX, dotY, r * 2.6);
+      glow.addColorStop(0, 'rgba(239, 68, 68, 0.95)');
+      glow.addColorStop(0.45, 'rgba(239, 68, 68, 0.35)');
+      glow.addColorStop(1, 'rgba(239, 68, 68, 0)');
+      ctx.fillStyle = glow;
+      ctx.beginPath();
+      ctx.arc(dotX, dotY, r * 2.6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#FFFFFF';
+      ctx.beginPath();
+      ctx.arc(dotX, dotY, r * 0.45, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+      return;
+    }
+
+    case 'bouncing-arrow': {
+      const arrY = y + 2 + Math.abs(bob) * 1.4;
+      ctx.translate(x, arrY);
+      ctx.scale(scale, scale);
+      ctx.shadowColor = 'rgba(15, 23, 42, 0.25)';
+      ctx.shadowBlur = 8;
+      ctx.shadowOffsetY = 3;
+      ctx.fillStyle = isChalkboard ? '#38BDF8' : palette.accent;
+      ctx.strokeStyle = '#FFFFFF';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(0, -4);
+      ctx.lineTo(18, 22);
+      ctx.lineTo(7, 22);
+      ctx.lineTo(7, 46);
+      ctx.lineTo(-7, 46);
+      ctx.lineTo(-7, 22);
+      ctx.lineTo(-18, 22);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+      return;
+    }
+
+    case 'highlighter': {
+      ctx.translate(x + 6, y + 6 + bob * 0.5);
+      ctx.scale(scale, scale);
+      ctx.rotate(-0.42);
+      ctx.shadowColor = 'rgba(15, 23, 42, 0.24)';
+      ctx.shadowBlur = 8;
+      ctx.shadowOffsetY = 3;
+      // Glowing marker tip
+      ctx.fillStyle = '#FACC15';
+      ctx.beginPath();
+      ctx.moveTo(-8, -2);
+      ctx.lineTo(8, -2);
+      ctx.lineTo(5, 12);
+      ctx.lineTo(-5, 12);
+      ctx.closePath();
+      ctx.fill();
+      // Marker body
+      ctx.fillStyle = '#FEF08A';
+      ctx.strokeStyle = '#CA8A04';
+      ctx.lineWidth = 2.5;
+      roundRectPath(ctx, -11, 10, 22, 46, 5);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = palette.accent;
+      roundRectPath(ctx, -11, 38, 22, 18, 4);
+      ctx.fill();
+      ctx.restore();
+      return;
+    }
+
+    case 'magic-wand': {
+      ctx.translate(x, y + 8 + bob * 0.6);
+      ctx.scale(scale, scale);
+      ctx.shadowColor = 'rgba(250, 204, 21, 0.55)';
+      ctx.shadowBlur = 12;
+      // Wand stick angled down-right
+      ctx.strokeStyle = '#7C3AED';
+      ctx.lineWidth = 7;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(2, 6);
+      ctx.lineTo(26, 52);
+      ctx.stroke();
+      ctx.strokeStyle = '#DDD6FE';
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.moveTo(5, 12);
+      ctx.lineTo(24, 48);
+      ctx.stroke();
+      // 5-point Star tip
+      ctx.fillStyle = '#FACC15';
+      ctx.strokeStyle = '#D97706';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      for (let i = 0; i < 10; i++) {
+        const r = i % 2 === 0 ? 15 : 6.5;
+        const a = -Math.PI / 2 + (i * Math.PI) / 5 + Math.sin(timeSec * 3) * 0.08;
+        const px = Math.cos(a) * r;
+        const py = Math.sin(a) * r;
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+      return;
+    }
+
+    case 'fountain-pen': {
+      ctx.translate(x + 4, y + 6 + bob * 0.4);
+      ctx.scale(scale, scale);
+      ctx.rotate(-0.35);
+      ctx.shadowColor = 'rgba(15, 23, 42, 0.25)';
+      ctx.shadowBlur = 8;
+      // Gold nib
+      ctx.fillStyle = '#F59E0B';
+      ctx.strokeStyle = '#78350F';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(0, -4);
+      ctx.lineTo(9, 14);
+      ctx.lineTo(-9, 14);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      // Pen barrel
+      ctx.fillStyle = '#1E293B';
+      roundRectPath(ctx, -8, 13, 16, 48, 5);
+      ctx.fill();
+      ctx.fillStyle = '#F59E0B';
+      ctx.fillRect(-8, 15, 16, 4);
+      ctx.restore();
+      return;
+    }
+
+    case 'hand-classic':
+    default: {
+      ctx.translate(x, y + 4 + bob * 0.6);
+      ctx.scale(scale, scale);
+      ctx.shadowColor = 'rgba(15, 23, 42, 0.25)';
+      ctx.shadowBlur = 10;
+      ctx.shadowOffsetY = 4;
+      ctx.fillStyle = '#FDBA74';
+      ctx.strokeStyle = '#7C2D12';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(-6, 4);
+      ctx.lineTo(-6, 22);
+      ctx.quadraticCurveTo(-18, 22, -18, 34);
+      ctx.lineTo(-18, 48);
+      ctx.quadraticCurveTo(-18, 62, 0, 62);
+      ctx.quadraticCurveTo(22, 62, 22, 46);
+      ctx.lineTo(22, 30);
+      ctx.quadraticCurveTo(22, 20, 12, 20);
+      ctx.lineTo(12, 4);
+      ctx.quadraticCurveTo(12, -4, 3, -4);
+      ctx.quadraticCurveTo(-6, -4, -6, 4);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = palette.accent;
+      roundRectPath(ctx, -14, 58, 32, 16, 6);
+      ctx.fill();
+      ctx.restore();
+      return;
+    }
+  }
+}
+
 export function renderReadingAlongFrame(
   ctx: CanvasRenderingContext2D,
   opts: ReadingAlongRenderOptions,
@@ -414,18 +756,26 @@ export function renderReadingAlongFrame(
   const refH = isLandscape ? Math.round(height * 1.28) : height;
   const palette =
     READING_BOOK_PALETTES.find((p) => p.id === opts.paletteId) ?? READING_BOOK_PALETTES[0];
+  const bookFrame: ReadingBookFrameId = opts.bookFrame ?? 'classic-page';
+  const pointerStyle: ReadingPointerStyleId = opts.pointerStyle ?? 'hand-classic';
+  const isChalkboard = bookFrame === 'chalkboard';
 
   // Background gradient
   const grad = ctx.createLinearGradient(0, 0, 0, height);
-  grad.addColorStop(0, palette.bgTop);
-  grad.addColorStop(1, palette.bgBottom);
+  if (isChalkboard) {
+    grad.addColorStop(0, '#1E293B');
+    grad.addColorStop(1, '#0F172A');
+  } else {
+    grad.addColorStop(0, palette.bgTop);
+    grad.addColorStop(1, palette.bgBottom);
+  }
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, width, height);
 
-  // Decorative floating circles based on illustration style
+  // Decorative floating circles
   ctx.save();
   ctx.globalAlpha = opts.illustrationStyle === '3D Cartoon' ? 0.32 : 0.2;
-  ctx.fillStyle = palette.pageBorder;
+  ctx.fillStyle = isChalkboard ? '#38BDF8' : palette.pageBorder;
   ctx.beginPath();
   ctx.arc(width * 0.14, height * 0.1, Math.min(width, height) * 0.11, 0, Math.PI * 2);
   ctx.fill();
@@ -434,153 +784,244 @@ export function renderReadingAlongFrame(
   ctx.fill();
   ctx.restore();
 
-  // Book outer shadow & cover
   const bookX = width * (isLandscape ? 0.045 : 0.065);
   const bookY = height * (isLandscape ? 0.065 : 0.085);
   const bookW = width * (isLandscape ? 0.91 : 0.87);
   const bookH = height * (isLandscape ? 0.86 : 0.81);
+  const frameRadius = bookFrame === 'textbook-card' ? Math.min(width, height) * 0.024 : Math.min(width, height) * 0.034;
 
-  if (opts.illustrationStyle !== 'Flat 2D') {
+  // Frame outer cover / stacked pages
+  if (bookFrame === 'open-spread') {
     ctx.save();
     ctx.fillStyle = palette.spineColor;
+    roundRectPath(ctx, bookX - 10, bookY + 6, bookW + 20, bookH + 8, frameRadius + 6);
+    ctx.fill();
+    // Stacked side paper layers
+    ctx.fillStyle = '#E2E8F0';
+    roundRectPath(ctx, bookX - 5, bookY + 3, bookW + 10, bookH + 3, frameRadius + 2);
+    ctx.fill();
+    ctx.restore();
+  } else if (opts.illustrationStyle !== 'Flat 2D' || isChalkboard) {
+    ctx.save();
+    ctx.fillStyle = isChalkboard ? '#78350F' : palette.spineColor;
     roundRectPath(
       ctx,
-      bookX + Math.min(width, height) * 0.014,
-      bookY + Math.min(width, height) * 0.012,
+      bookX + Math.min(width, height) * (isChalkboard ? 0.008 : 0.014),
+      bookY + Math.min(width, height) * (isChalkboard ? 0.01 : 0.012),
       bookW,
       bookH,
-      Math.min(width, height) * 0.036,
+      frameRadius,
     );
     ctx.fill();
     ctx.restore();
   }
 
-  // Book main page
+  // Book main surface
   ctx.save();
-  ctx.shadowColor = 'rgba(15, 23, 42, 0.16)';
+  ctx.shadowColor = 'rgba(15, 23, 42, 0.18)';
   ctx.shadowBlur = Math.min(width, height) * 0.04;
   ctx.shadowOffsetY = Math.min(width, height) * 0.01;
-  ctx.fillStyle = palette.pageBg;
-  roundRectPath(ctx, bookX, bookY, bookW, bookH, Math.min(width, height) * 0.034);
+  ctx.fillStyle = isChalkboard ? '#14332B' : palette.pageBg;
+  roundRectPath(ctx, bookX, bookY, bookW, bookH, frameRadius);
   ctx.fill();
-  ctx.lineWidth = Math.max(2, Math.min(width, height) * 0.004);
-  ctx.strokeStyle = palette.pageBorder;
+  ctx.lineWidth = isChalkboard ? Math.max(8, Math.min(width, height) * 0.014) : Math.max(2, Math.min(width, height) * 0.004);
+  ctx.strokeStyle = isChalkboard ? '#92400E' : palette.pageBorder;
   ctx.stroke();
   ctx.restore();
 
+  // Frame-specific chrome accents
+  if (bookFrame === 'textbook-card') {
+    ctx.save();
+    roundRectPath(ctx, bookX, bookY, bookW, bookH, frameRadius);
+    ctx.clip();
+    ctx.fillStyle = palette.accent;
+    ctx.fillRect(bookX, bookY, bookW, Math.max(12, Math.round(bookH * 0.022)));
+    ctx.restore();
+  } else if (bookFrame === 'open-spread') {
+    // Satin bookmark ribbon hanging from top right
+    ctx.save();
+    const ribX = bookX + bookW * 0.82;
+    const ribW = Math.max(16, Math.round(width * 0.02));
+    const ribH = Math.max(38, Math.round(bookH * 0.095));
+    ctx.fillStyle = palette.accent;
+    ctx.beginPath();
+    ctx.moveTo(ribX, bookY - 2);
+    ctx.lineTo(ribX + ribW, bookY - 2);
+    ctx.lineTo(ribX + ribW, bookY + ribH);
+    ctx.lineTo(ribX + ribW / 2, bookY + ribH - 10);
+    ctx.lineTo(ribX, bookY + ribH);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  } else if (bookFrame === 'spiral-notebook') {
+    ctx.save();
+    const ringCount = isLandscape ? 14 : 10;
+    const ringSpan = bookW * 0.84;
+    const ringStart = bookX + bookW * 0.08;
+    for (let r = 0; r < ringCount; r++) {
+      const rx = ringStart + (r / Math.max(1, ringCount - 1)) * ringSpan;
+      ctx.fillStyle = '#475569';
+      ctx.beginPath();
+      ctx.arc(rx, bookY + 12, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#94A3B8';
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.arc(rx, bookY + 2, 10, Math.PI * 0.9, Math.PI * 2.1);
+      ctx.stroke();
+    }
+    // Red vertical notebook margin
+    ctx.strokeStyle = 'rgba(239, 68, 68, 0.35)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(bookX + bookW * 0.042, bookY + 28);
+    ctx.lineTo(bookX + bookW * 0.042, bookY + bookH - 18);
+    ctx.stroke();
+    ctx.restore();
+  }
+
   // Book header banner & illustration badge
-  const padX = bookX + bookW * 0.06;
-  const contentW = bookW * 0.88;
-  const pillY = bookY + bookH * 0.045;
+  const padX = bookX + bookW * (bookFrame === 'spiral-notebook' ? 0.07 : 0.06);
+  const contentW = bookW * (bookFrame === 'spiral-notebook' ? 0.86 : 0.88);
+  const pillY = bookY + bookH * (bookFrame === 'spiral-notebook' ? 0.068 : 0.048);
   const pillH = Math.max(24, refH * 0.03);
 
   if (opts.topicBadge) {
     ctx.save();
-    ctx.fillStyle = palette.headerBg;
+    ctx.fillStyle = isChalkboard ? 'rgba(255,255,255,0.12)' : palette.headerBg;
     roundRectPath(ctx, padX, pillY, Math.min(contentW * 0.72, Math.max(200, width * 0.42)), pillH, pillH / 2);
     ctx.fill();
-    ctx.fillStyle = palette.headerText;
+    ctx.fillStyle = isChalkboard ? '#FDE68A' : palette.headerText;
     ctx.font = `700 ${Math.round(refH * 0.0155)}px "Plus Jakarta Sans", sans-serif`;
     ctx.textBaseline = 'middle';
     ctx.fillText(opts.topicBadge, padX + 14, pillY + pillH / 2);
     ctx.restore();
   }
 
-  // Mini book icon on top right of page
-  ctx.save();
-  const iconS = Math.min(54, Math.min(width, height) * 0.065);
-  const iconX = bookX + bookW - padX * 0.35 - iconS - 12;
-  const iconY = pillY - 2;
-  ctx.fillStyle = palette.accent;
-  if (opts.illustrationStyle === '3D Cartoon') {
-    ctx.shadowColor = 'rgba(0,0,0,0.22)';
-    ctx.shadowBlur = 8;
-    ctx.shadowOffsetY = 4;
+  // Mini book/chalk icon on top right of page
+  if (bookFrame !== 'open-spread') {
+    ctx.save();
+    const iconS = Math.min(54, Math.min(width, height) * 0.065);
+    const iconX = bookX + bookW - padX * 0.35 - iconS - 12;
+    const iconY = pillY - 2;
+    ctx.fillStyle = isChalkboard ? '#F59E0B' : palette.accent;
+    if (opts.illustrationStyle === '3D Cartoon') {
+      ctx.shadowColor = 'rgba(0,0,0,0.22)';
+      ctx.shadowBlur = 8;
+      ctx.shadowOffsetY = 4;
+    }
+    roundRectPath(ctx, iconX, iconY, iconS, iconS * 0.78, 10);
+    ctx.fill();
+    ctx.fillStyle = '#FFFFFF';
+    ctx.fillRect(iconX + iconS * 0.48, iconY + 6, 2.5, iconS * 0.78 - 12);
+    ctx.restore();
   }
-  roundRectPath(ctx, iconX, iconY, iconS, iconS * 0.78, 10);
-  ctx.fill();
-  ctx.fillStyle = '#FFFFFF';
-  ctx.fillRect(iconX + iconS * 0.48, iconY + 6, 2.5, iconS * 0.78 - 12);
-  ctx.restore();
 
   // Title
-  const titleY = pillY + pillH + refH * 0.025;
+  const titleY = pillY + pillH + refH * 0.022;
   ctx.save();
-  ctx.fillStyle = palette.headerText;
+  ctx.fillStyle = isChalkboard ? '#F8FAFC' : palette.headerText;
   ctx.font = `800 ${Math.round(refH * 0.026)}px "Outfit", "Plus Jakarta Sans", sans-serif`;
   ctx.textBaseline = 'top';
-  ctx.fillText(opts.title || 'Reading Practice', padX, titleY, contentW - iconS - 12);
+  ctx.fillText(opts.title || 'Reading Practice', padX, titleY, contentW - 70);
   ctx.restore();
 
   // Divider line
   const dividerY = titleY + refH * 0.044;
-  ctx.strokeStyle = palette.headerBg;
+  ctx.strokeStyle = isChalkboard ? 'rgba(255,255,255,0.2)' : palette.headerBg;
   ctx.lineWidth = 2;
   ctx.beginPath();
   ctx.moveTo(padX, dividerY);
   ctx.lineTo(padX + contentW, dividerY);
   ctx.stroke();
 
-  // Layout words on the page
+  // Layout words with automatic multi-page pagination
+  const wm = opts.watermarkOutro;
+  const outroText = [wm.outroLine1.trim(), wm.outroLine2.trim()].filter(Boolean).join('\n');
+  const timeline = computeReadingTimelineMetrics({
+    words: opts.words,
+    totalDuration: opts.totalDuration,
+    contentDuration: opts.contentDuration,
+    outroSeconds: wm.outroSeconds,
+    outroText,
+  });
+
   const wordsList =
     opts.words.length > 0
       ? opts.words
-      : buildEstimatedReadingWords(opts.text, opts.totalDuration);
+      : buildEstimatedReadingWords(opts.text, timeline.contentEnd);
 
   const fontSize = Math.max(15, Math.round(refH * 0.0235));
   const lineHeight = Math.round(fontSize * 1.72);
   const wordGap = Math.round(fontSize * 0.34);
   ctx.font = `600 ${fontSize}px "Plus Jakarta Sans", sans-serif`;
 
-  interface PositionedWord {
-    item: WordTiming;
-    x: number;
-    y: number;
-    w: number;
-    index: number;
-  }
+  const startBodyY = dividerY + refH * 0.026;
+  const maxBodyY = bookY + bookH - refH * 0.075;
 
-  const placed: PositionedWord[] = [];
-  let curX = padX;
-  let curY = dividerY + refH * 0.028;
-  const maxY = bookY + bookH - refH * 0.07;
-
-  for (let i = 0; i < wordsList.length; i++) {
-    const item = wordsList[i];
-    const m = ctx.measureText(item.word);
-    const w = m.width;
-    if (curX + w > padX + contentW && curX > padX) {
-      curX = padX;
-      curY += lineHeight;
-    }
-    if (curY > maxY) break;
-    placed.push({ item, x: curX, y: curY, w, index: i });
-    curX += w + wordGap;
-  }
-
-  // Find active word
-  let activeIdx = placed.findIndex(
-    (p) => opts.currentTime >= p.item.start && opts.currentTime <= p.item.end,
+  const pages = paginateReadingWords(
+    wordsList,
+    (w) => ctx.measureText(w).width,
+    {
+      startX: padX,
+      maxW: contentW,
+      startY: startBodyY,
+      maxY: maxBodyY,
+      lineHeight,
+      wordGap,
+    },
   );
-  if (activeIdx === -1 && placed.length > 0) {
-    for (let i = placed.length - 1; i >= 0; i--) {
-      if (opts.currentTime >= placed[i].item.start) {
-        activeIdx = i;
+
+  // Spiral notebook ruled lines
+  if (bookFrame === 'spiral-notebook') {
+    ctx.save();
+    ctx.strokeStyle = 'rgba(148, 163, 184, 0.25)';
+    ctx.lineWidth = 1.5;
+    for (let ly = startBodyY + fontSize + 8; ly <= maxBodyY + fontSize; ly += lineHeight) {
+      ctx.beginPath();
+      ctx.moveTo(padX, ly);
+      ctx.lineTo(padX + contentW, ly);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // Find global active word index
+  const clampedWordTime = Math.min(opts.currentTime, Math.max(0, timeline.contentEnd - 0.001));
+  let globalActiveIdx = wordsList.findIndex(
+    (w) => clampedWordTime >= w.start && clampedWordTime <= w.end,
+  );
+  if (globalActiveIdx === -1 && wordsList.length > 0) {
+    for (let i = wordsList.length - 1; i >= 0; i--) {
+      if (clampedWordTime >= wordsList[i].start) {
+        globalActiveIdx = i;
         break;
       }
     }
-    if (activeIdx === -1) activeIdx = 0;
+    if (globalActiveIdx === -1) globalActiveIdx = 0;
   }
 
-  // Draw words
-  for (let i = 0; i < placed.length; i++) {
-    const p = placed[i];
-    const isActive = i === activeIdx;
-    const isSpoken = i < activeIdx;
+  // Pick page holding globalActiveIdx
+  const activePageIdx = Math.max(
+    0,
+    pages.findIndex((pg) => pg.some((p) => p.index === globalActiveIdx)),
+  );
+  const activePageWords = pages[activePageIdx] ?? pages[0] ?? [];
+
+  // Draw words on current page
+  for (let i = 0; i < activePageWords.length; i++) {
+    const p = activePageWords[i];
+    const isActive = p.index === globalActiveIdx;
+    const isSpoken = p.index < globalActiveIdx;
 
     if (isActive) {
       ctx.save();
-      ctx.fillStyle = palette.highlightBg;
+      ctx.fillStyle =
+        pointerStyle === 'highlighter'
+          ? 'rgba(250, 204, 21, 0.9)'
+          : isChalkboard
+            ? '#F59E0B'
+            : palette.highlightBg;
       roundRectPath(
         ctx,
         p.x - 8,
@@ -591,59 +1032,75 @@ export function renderReadingAlongFrame(
       );
       ctx.fill();
       ctx.restore();
-      ctx.fillStyle = palette.highlightText;
+      ctx.fillStyle =
+        pointerStyle === 'highlighter'
+          ? '#0F172A'
+          : isChalkboard
+            ? '#0F172A'
+            : palette.highlightText;
     } else if (isSpoken) {
-      ctx.fillStyle = palette.spokenText;
+      ctx.fillStyle = isChalkboard ? '#CBD5E1' : palette.spokenText;
     } else {
-      ctx.fillStyle = palette.bodyText;
+      ctx.fillStyle = isChalkboard ? '#F8FAFC' : palette.bodyText;
     }
     ctx.font = `${isActive ? 700 : 600} ${fontSize}px "Plus Jakarta Sans", sans-serif`;
     ctx.textBaseline = 'top';
     ctx.fillText(p.item.word, p.x, p.y);
   }
 
-  // Pointing hand cursor under active word
-  if (activeIdx >= 0 && placed[activeIdx]) {
-    const target = placed[activeIdx];
-    const handX = target.x + target.w / 2;
-    const handY = target.y + fontSize + 10;
-    const scale = Math.max(0.6, Math.min(width, height) / 1080);
+  // Multi-page indicator if >= 2 pages
+  if (pages.length > 1) {
     ctx.save();
-    ctx.translate(handX, handY);
-    ctx.scale(scale, scale);
-    ctx.shadowColor = 'rgba(15, 23, 42, 0.25)';
-    ctx.shadowBlur = 10;
-    ctx.shadowOffsetY = 4;
-
-    // Stylized pointing hand (index finger up)
-    ctx.fillStyle = '#FDBA74';
-    ctx.strokeStyle = '#7C2D12';
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    ctx.moveTo(-6, 4);
-    ctx.lineTo(-6, 22);
-    ctx.quadraticCurveTo(-18, 22, -18, 34);
-    ctx.lineTo(-18, 48);
-    ctx.quadraticCurveTo(-18, 62, 0, 62);
-    ctx.quadraticCurveTo(22, 62, 22, 46);
-    ctx.lineTo(22, 30);
-    ctx.quadraticCurveTo(22, 20, 12, 20);
-    ctx.lineTo(12, 4);
-    ctx.quadraticCurveTo(12, -4, 3, -4);
-    ctx.quadraticCurveTo(-6, -4, -6, 4);
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-
-    // Cuff
-    ctx.fillStyle = palette.accent;
-    roundRectPath(ctx, -14, 58, 32, 16, 6);
-    ctx.fill();
+    const pgLabel = `Trang ${activePageIdx + 1}/${pages.length}`;
+    ctx.font = `700 ${Math.max(12, Math.round(refH * 0.014))}px "Plus Jakarta Sans", sans-serif`;
+    ctx.fillStyle = isChalkboard ? 'rgba(255,255,255,0.65)' : palette.spokenText;
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(pgLabel, bookX + bookW - bookW * 0.05, bookY + bookH - Math.max(14, bookH * 0.026));
     ctx.restore();
   }
 
+  // Pointer cursor smoothly glided toward next word on the same page
+  const activePosIdx = activePageWords.findIndex((p) => p.index === globalActiveIdx);
+  if (activePosIdx >= 0 && activePageWords[activePosIdx]) {
+    const target = activePageWords[activePosIdx];
+    const nextTarget =
+      activePosIdx + 1 < activePageWords.length ? activePageWords[activePosIdx + 1] : null;
+    let handX = target.x + target.w / 2;
+    let handY = target.y + fontSize + 10;
+    let interpW = target.w;
+
+    if (nextTarget) {
+      const wordDur = Math.max(0.08, target.item.end - target.item.start);
+      const transitionWindow = Math.min(0.14, wordDur * 0.34);
+      const timeRemaining = target.item.end - clampedWordTime;
+      if (timeRemaining >= 0 && timeRemaining < transitionWindow) {
+        const rawT = 1 - timeRemaining / transitionWindow;
+        const ease = rawT * rawT * (3 - 2 * rawT);
+        const nextX = nextTarget.x + nextTarget.w / 2;
+        const nextY = nextTarget.y + fontSize + 10;
+        handX = handX + (nextX - handX) * ease;
+        handY = handY + (nextY - handY) * ease;
+        interpW = target.w + (nextTarget.w - target.w) * ease;
+      }
+    }
+
+    const scale = Math.max(0.6, Math.min(width, height) / 1080);
+    drawReadingPointer(
+      ctx,
+      pointerStyle,
+      handX,
+      handY,
+      interpW,
+      fontSize,
+      palette,
+      scale,
+      opts.currentTime,
+      isChalkboard,
+    );
+  }
+
   // Watermark overlay (always visible if enabled & non-empty)
-  const wm = opts.watermarkOutro;
   if (wm.watermarkEnabled && wm.watermarkText.trim()) {
     ctx.save();
     ctx.globalAlpha = Math.max(0.15, Math.min(1, wm.watermarkOpacity));
@@ -671,27 +1128,26 @@ export function renderReadingAlongFrame(
     ctx.restore();
   }
 
-  // Outro screen fade + 2 lines
-  const outroText = [wm.outroLine1.trim(), wm.outroLine2.trim()].filter(Boolean).join('\n');
-  if (wm.outroSeconds > 0 && outroText && opts.totalDuration > 0) {
-    const outroStart = Math.max(0, opts.totalDuration - wm.outroSeconds);
-    if (opts.currentTime >= outroStart) {
-      const progress = Math.min(1, (opts.currentTime - outroStart) / Math.min(0.6, wm.outroSeconds));
-      ctx.save();
-      ctx.fillStyle = `rgba(15, 23, 42, ${(0.88 * progress).toFixed(3)})`;
-      ctx.fillRect(0, 0, width, height);
-      ctx.globalAlpha = progress;
-      ctx.fillStyle = '#FFFFFF';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      const lines = outroText.split('\n');
-      const outroSize = Math.max(24, Math.round(height * 0.036));
-      ctx.font = `800 ${outroSize}px "Outfit", "Plus Jakarta Sans", sans-serif`;
-      const baseLineY = height / 2 - ((lines.length - 1) * outroSize * 1.4) / 2;
-      lines.forEach((line, idx) => {
-        ctx.fillText(line, width / 2, baseLineY + idx * outroSize * 1.4, width * 0.85);
-      });
-      ctx.restore();
-    }
+  // Outro screen strictly after all content & words have completed
+  if (timeline.hasOutro && outroText && opts.currentTime >= timeline.outroStart) {
+    const progress = Math.min(
+      1,
+      (opts.currentTime - timeline.outroStart) / Math.min(0.55, Math.max(0.25, wm.outroSeconds)),
+    );
+    ctx.save();
+    ctx.fillStyle = `rgba(15, 23, 42, ${(0.9 * progress).toFixed(3)})`;
+    ctx.fillRect(0, 0, width, height);
+    ctx.globalAlpha = progress;
+    ctx.fillStyle = '#FFFFFF';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const lines = outroText.split('\n');
+    const outroSize = Math.max(24, Math.round(height * 0.036));
+    ctx.font = `800 ${outroSize}px "Outfit", "Plus Jakarta Sans", sans-serif`;
+    const baseLineY = height / 2 - ((lines.length - 1) * outroSize * 1.4) / 2;
+    lines.forEach((line, idx) => {
+      ctx.fillText(line, width / 2, baseLineY + idx * outroSize * 1.4, width * 0.85);
+    });
+    ctx.restore();
   }
 }

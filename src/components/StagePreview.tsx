@@ -7,6 +7,7 @@ import {
   STAGE_HEIGHT,
   STAGE_WIDTH,
 } from '../engine/canvasRenderer';
+import { subscribeCustomComponents } from '../engine/customComponentStore';
 import { LAYOUT_COMPOSITIONS } from '../engine/illustrationLayouts';
 import {
   FPS_OPTIONS,
@@ -20,11 +21,15 @@ import {
   BackgroundImageConfig,
   CANVAS_THEMES,
   CanvasThemeId,
+  CustomComponentPresetConfig,
+  IllustrationSceneIcon,
+  IllustrationVariant,
   LayoutCompositionId,
   LessonProject,
   WatermarkCorner,
   WatermarkOutroConfig,
 } from '../engine/types';
+import { getEffectiveVectorCatalog, SCENE_ICON_KEYWORDS } from '../engine/vectorComponentDb';
 import { resizeImageFileToStageDataUrl } from '../utils/imageResize';
 
 const DEFAULT_WATERMARK_CONFIG: WatermarkOutroConfig = {
@@ -52,9 +57,12 @@ interface StagePreviewProps {
   } | null;
   selectedElementId: string | null;
   mp4Settings: Mp4ExportSettings;
+  customCompositionConfig?: CustomComponentPresetConfig;
   onChangeMp4Settings: (next: Mp4ExportSettings) => void;
   onChangeComposition: (compositionId: LayoutCompositionId) => void;
   onRandomizeComposition: () => void;
+  onChangeCustomComposition?: (next: CustomComponentPresetConfig) => void;
+  onApplyCustomComposition?: (config: CustomComponentPresetConfig, scope?: 'all' | 'active-cue') => void;
   onTogglePlay: () => void;
   onRestart: () => void;
   onSeek: (time: number) => void;
@@ -78,9 +86,12 @@ export const StagePreview: React.FC<StagePreviewProps> = ({
   lastExportSummary,
   selectedElementId,
   mp4Settings,
+  customCompositionConfig,
   onChangeMp4Settings,
   onChangeComposition,
   onRandomizeComposition,
+  onChangeCustomComposition,
+  onApplyCustomComposition,
   onTogglePlay,
   onRestart,
   onSeek,
@@ -97,6 +108,7 @@ export const StagePreview: React.FC<StagePreviewProps> = ({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const bgInputRef = useRef<HTMLInputElement>(null);
   const [assetVersion, setAssetVersion] = useState(0);
+  const [dbVersion, setDbVersion] = useState(0);
   const [isProcessingBg, setIsProcessingBg] = useState(false);
   const [isWatermarkOpen, setIsWatermarkOpen] = useState(false);
   const dragStateRef = useRef<{
@@ -104,6 +116,13 @@ export const StagePreview: React.FC<StagePreviewProps> = ({
     offsetX: number;
     offsetY: number;
   } | null>(null);
+
+  useEffect(() => {
+    return subscribeCustomComponents(() => setDbVersion((v) => v + 1));
+  }, []);
+
+  void dbVersion;
+  const vectorCatalog = getEffectiveVectorCatalog();
 
   const wmConfig = project.watermark ?? DEFAULT_WATERMARK_CONFIG;
 
@@ -253,6 +272,97 @@ export const StagePreview: React.FC<StagePreviewProps> = ({
           <span>Phối ngẫu nhiên</span>
         </button>
       </div>
+
+      {project.compositionId === 'custom' && customCompositionConfig && onChangeCustomComposition && onApplyCustomComposition && (
+        <div className="w-full mt-2 p-2.5 rounded-lg bg-indigo-50/60 border border-indigo-200 space-y-2 text-[11px]">
+          <div className="flex items-center justify-between gap-2">
+            <span className="font-semibold text-indigo-900">Tự sáng tạo Component từ Kho ({vectorCatalog.length})</span>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => onApplyCustomComposition(customCompositionConfig, 'active-cue')}
+                className="px-2 py-0.5 text-[10px] font-semibold bg-white border border-indigo-300 text-indigo-700 rounded hover:bg-indigo-100"
+              >
+                Áp dụng câu này
+              </button>
+              <button
+                type="button"
+                onClick={() => onApplyCustomComposition(customCompositionConfig, 'all')}
+                className="px-2 py-0.5 text-[10px] font-semibold bg-indigo-600 text-white rounded hover:bg-indigo-700"
+              >
+                Áp dụng cả bài
+              </button>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-1.5">
+            <select
+              aria-label="Chọn component từ Kho cho Xem trước"
+              value={customCompositionConfig.variant}
+              onChange={(e) =>
+                onChangeCustomComposition({
+                  ...customCompositionConfig,
+                  variant: e.target.value as IllustrationVariant,
+                })
+              }
+              className="px-2 py-1 text-[11px] bg-white border border-slate-200 rounded"
+            >
+              {vectorCatalog.map((item) => (
+                <option key={item.variant} value={item.variant}>
+                  {item.label} ({item.category})
+                </option>
+              ))}
+            </select>
+            <select
+              aria-label="Chọn Icon minh họa cho Xem trước"
+              value={customCompositionConfig.sceneIcon || 'sparkles'}
+              onChange={(e) =>
+                onChangeCustomComposition({
+                  ...customCompositionConfig,
+                  sceneIcon: e.target.value as IllustrationSceneIcon,
+                })
+              }
+              className="px-2 py-1 text-[11px] bg-white border border-slate-200 rounded"
+            >
+              {SCENE_ICON_KEYWORDS.map((ic) => (
+                <option key={ic.icon} value={ic.icon}>
+                  {ic.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <input
+              type="text"
+              aria-label="Tiêu đề component tùy biến"
+              value={customCompositionConfig.title || ''}
+              onChange={(e) =>
+                onChangeCustomComposition({ ...customCompositionConfig, title: e.target.value })
+              }
+              placeholder="Tiêu đề thẻ..."
+              className="flex-1 min-w-0 px-2 py-1 text-[11px] bg-white border border-slate-200 rounded"
+            />
+            <input
+              type="text"
+              aria-label="Nội dung thẻ tùy biến"
+              value={customCompositionConfig.speechText || ''}
+              onChange={(e) =>
+                onChangeCustomComposition({ ...customCompositionConfig, speechText: e.target.value })
+              }
+              placeholder="Chữ nhấn / ghi chú..."
+              className="flex-1 min-w-0 px-2 py-1 text-[11px] bg-white border border-slate-200 rounded"
+            />
+            <input
+              type="color"
+              aria-label="Màu nhấn component tùy biến"
+              value={customCompositionConfig.accentColor || '#4F46E5'}
+              onChange={(e) =>
+                onChangeCustomComposition({ ...customCompositionConfig, accentColor: e.target.value })
+              }
+              className="w-7 h-6 p-0.5 bg-white border border-slate-200 rounded cursor-pointer shrink-0"
+            />
+          </div>
+        </div>
+      )}
 
       {/* Background Image Upload (Auto-Resize 9:16) */}
       <div className="w-full pt-2 flex flex-wrap items-center justify-between gap-2">

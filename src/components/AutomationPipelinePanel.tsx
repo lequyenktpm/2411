@@ -52,8 +52,12 @@ import {
   formatTimeToken,
   parseTranscriptAuto,
 } from '../engine/transcriptParser';
-import { getEffectiveVectorCatalog } from '../engine/vectorComponentDb';
+import { ApiKeyInlineControl } from './ApiKeyInlineControl';
+import { getEffectiveVectorCatalog, SCENE_ICON_KEYWORDS } from '../engine/vectorComponentDb';
 import {
+  CustomComponentPresetConfig,
+  IllustrationSceneIcon,
+  IllustrationVariant,
   isDarkCanvasTheme,
   LayoutCompositionId,
   LessonProject,
@@ -61,6 +65,7 @@ import {
   TranscriptCue,
   WordTiming,
 } from '../engine/types';
+import { useClientApiKeys } from '../utils/apiKeysStore';
 
 export type PresetId = 'jp-en' | 'water' | 'ed' | '3d' | 'xun';
 
@@ -74,9 +79,12 @@ interface AutomationPipelinePanelProps {
   exportStageLabel: string;
   exportError: string | null;
   mp4Settings: Mp4ExportSettings;
+  customCompositionConfig?: CustomComponentPresetConfig;
   onChangeMp4Settings: (next: Mp4ExportSettings) => void;
   onChangeComposition: (compositionId: LayoutCompositionId) => void;
   onRandomizeComposition: () => void;
+  onChangeCustomComposition?: (next: CustomComponentPresetConfig) => void;
+  onApplyCustomComposition?: (config: CustomComponentPresetConfig, scope?: 'all' | 'active-cue') => void;
   onSelectPreset: (presetId: PresetId) => void;
   onUploadAudio: (file: File) => void;
   onClearAudio: () => void;
@@ -110,9 +118,12 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
   exportStageLabel,
   exportError,
   mp4Settings,
+  customCompositionConfig,
   onChangeMp4Settings,
   onChangeComposition,
   onRandomizeComposition,
+  onChangeCustomComposition,
+  onApplyCustomComposition,
   onSelectPreset,
   onUploadAudio,
   onClearAudio,
@@ -132,7 +143,25 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
   );
   const [customTitle, setCustomTitle] = useState<string>(project.title);
   const [promptStyle, setPromptStyle] = useState<PromptVideoStyle>('tiktok-cards');
-  const [compositionMode, setCompositionMode] = useState<'manual' | 'ai-decide' | 'random'>('ai-decide');
+  const [compositionMode, setCompositionMode] = useState<'manual' | 'ai-decide' | 'random' | 'custom'>('ai-decide');
+  const [localCustomConfig, setLocalCustomConfig] = useState<CustomComponentPresetConfig>({
+    variant: 'css-sticky-note',
+    sceneIcon: 'sparkles',
+    title: '',
+    subtitle: '',
+    speechText: '',
+    labels: ['Step 1', 'Step 2', 'Step 3'],
+    highlightWord: '',
+    accentColor: '#4F46E5',
+    showStrip: true,
+    showToneMeter: false,
+    showSentenceCard: true,
+  });
+  const activeCustomConfig = customCompositionConfig ?? localCustomConfig;
+  const updateCustomConfig = (next: CustomComponentPresetConfig) => {
+    setLocalCustomConfig(next);
+    onChangeCustomComposition?.(next);
+  };
   const [copiedPrompt, setCopiedPrompt] = useState<boolean>(false);
 
   const [rawSceneJson, setRawSceneJson] = useState<string>(() =>
@@ -144,6 +173,8 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
   );
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [renderNotice, setRenderNotice] = useState<string | null>(null);
+
+  const { keys: clientKeys } = useClientApiKeys();
 
   // Inline TTS synthesis & auto-sync state (mirrors English Reels Studio)
   const [ttsProviders, setTtsProviders] = useState<TtsProviderItem[]>([]);
@@ -162,7 +193,7 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
   const audioInputRef = useRef<HTMLInputElement>(null);
   const transcriptInputRef = useRef<HTMLInputElement>(null);
 
-  useEffect(() => {
+  const refreshTtsVoices = () => {
     void fetchTtsVoicesCatalog()
       .then((res) => {
         setTtsProviders(res.providers);
@@ -170,18 +201,25 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
         setHasElevenLabsKey(res.hasElevenLabsKey);
       })
       .catch(() => undefined);
+  };
+
+  useEffect(() => {
+    refreshTtsVoices();
   }, []);
+
+  const effectiveHasGeminiKey = hasGeminiKey || Boolean(clientKeys.geminiApiKey);
+  const effectiveHasElevenLabsKey = hasElevenLabsKey || Boolean(clientKeys.elevenlabsApiKey);
 
   const inlineAvailableVoices = useMemo(() => {
     if (inlineProvider === 'auto') {
       return ttsProviders.flatMap((p) => {
-        if (p.id === 'gemini' && !hasGeminiKey) return [];
-        if (p.id === 'elevenlabs' && !hasElevenLabsKey) return [];
+        if (p.id === 'gemini' && !effectiveHasGeminiKey) return [];
+        if (p.id === 'elevenlabs' && !effectiveHasElevenLabsKey) return [];
         return p.voices;
       });
     }
     return ttsProviders.find((p) => p.id === inlineProvider)?.voices ?? [];
-  }, [ttsProviders, inlineProvider, hasGeminiKey, hasElevenLabsKey]);
+  }, [ttsProviders, inlineProvider, effectiveHasGeminiKey, effectiveHasElevenLabsKey]);
 
   useEffect(() => {
     if (
@@ -201,16 +239,18 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
     setCustomTitle(project.title);
   }, [project.id, project.cues, project.title]);
 
-  const activeVectorCount = useMemo(() => {
+  const vectorCatalog = useMemo(() => {
     void dbVersion;
-    return getEffectiveVectorCatalog().length;
+    return getEffectiveVectorCatalog();
   }, [dbVersion]);
+  const activeVectorCount = vectorCatalog.length;
 
   const liveTranscriptCues = useMemo(() => parseTranscriptAuto(rawTranscript), [rawTranscript]);
   const activeCues = project.cues.length > 0 ? project.cues : liveTranscriptCues;
 
   // Resolve effective compositionId for the prompt
   const effectiveCompositionId = useMemo((): LayoutCompositionId | 'ai-decide' => {
+    if (compositionMode === 'custom') return 'custom';
     if (compositionMode === 'ai-decide') return 'ai-decide';
     if (compositionMode === 'random') {
       const transcriptText = activeCues.map((c) => c.text).join(' ');
@@ -234,8 +274,9 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
               ? '3d-shapes'
               : 'word-reveal',
         theme: isDarkCanvasTheme(project.theme) ? project.theme : undefined,
+        customConfig: compositionMode === 'custom' ? activeCustomConfig : undefined,
       }),
-    [activeCues, customTitle, project.title, project.theme, effectiveCompositionId, promptStyle, dbVersion],
+    [activeCues, customTitle, project.title, project.theme, effectiveCompositionId, promptStyle, dbVersion, compositionMode, activeCustomConfig],
   );
 
   const jsonPreviewSummary = useMemo(() => {
@@ -729,13 +770,13 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
                     </button>
                   </div>
 
-                  {((inlineProvider === 'elevenlabs' && !hasElevenLabsKey) ||
-                    (inlineProvider === 'gemini' && !hasGeminiKey)) && (
-                    <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
-                      {inlineProvider === 'elevenlabs'
-                        ? 'Cần thiết lập ELEVENLABS_API_KEY trong Environment Secrets / .env trên server để dùng giọng ElevenLabs (hoặc chọn Edge Neural / Google miễn phí).'
-                        : 'Cần thiết lập GEMINI_API_KEY trong Environment Secrets / .env trên server để dùng Gemini Flash TTS.'}
-                    </p>
+                  {(inlineProvider === 'elevenlabs' || inlineProvider === 'gemini') && (
+                    <ApiKeyInlineControl
+                      provider={inlineProvider === 'elevenlabs' ? 'elevenlabs' : 'gemini'}
+                      hasServerKey={inlineProvider === 'elevenlabs' ? hasElevenLabsKey : hasGeminiKey}
+                      onSaved={refreshTtsVoices}
+                      compact
+                    />
                   )}
 
                   {isGeneratingInlineAudio && (
@@ -950,66 +991,237 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
 
               {/* Composition picker — only for tiktok-cards */}
               {promptStyle === 'tiktok-cards' && (
-                <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-lg bg-slate-50 border border-slate-200">
-                  <div className="flex items-center gap-2 min-w-0 flex-1 flex-wrap">
-                    <label
-                      htmlFor="step2-composition-select"
-                      className="text-[11px] font-semibold text-slate-700 whitespace-nowrap"
-                    >
-                      Cách phối minh họa:
-                    </label>
-                    {/* Mode tabs */}
-                    <div className="flex gap-1">
-                      {(['ai-decide', 'manual', 'random'] as const).map((m) => (
-                        <button
-                          key={m}
-                          type="button"
-                          onClick={() => setCompositionMode(m)}
-                          className={`px-2 py-0.5 text-[10px] font-medium rounded border transition-colors ${
-                            compositionMode === m
-                              ? 'bg-indigo-600 border-indigo-600 text-white'
-                              : 'bg-white border-slate-200 text-slate-500 hover:bg-slate-50'
-                          }`}
-                        >
-                          {m === 'ai-decide' ? '✨ AI chọn' : m === 'random' ? '🔀 Ngẫu nhiên' : 'Thủ công'}
-                        </button>
-                      ))}
-                    </div>
-                    {/* Manual dropdown */}
-                    {compositionMode === 'manual' && (
-                      <select
-                        id="step2-composition-select"
-                        value={project.compositionId ?? 'story-scenes'}
-                        onChange={(e) => onChangeComposition(e.target.value as LayoutCompositionId)}
-                        className="flex-1 min-w-0 px-2 py-1 text-xs bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0 flex-1 flex-wrap">
+                      <label
+                        htmlFor="step2-composition-select"
+                        className="text-[11px] font-semibold text-slate-700 whitespace-nowrap"
                       >
-                        {LAYOUT_COMPOSITIONS.map((comp) => (
-                          <option key={comp.id} value={comp.id}>
-                            {comp.name}
-                          </option>
+                        Cách phối minh họa:
+                      </label>
+                      {/* Mode tabs */}
+                      <div className="flex flex-wrap gap-1">
+                        {(['ai-decide', 'manual', 'custom', 'random'] as const).map((m) => (
+                          <button
+                            key={m}
+                            type="button"
+                            onClick={() => setCompositionMode(m)}
+                            className={`px-2 py-0.5 text-[10px] font-medium rounded border transition-colors ${
+                              compositionMode === m
+                                ? 'bg-indigo-600 border-indigo-600 text-white'
+                                : 'bg-white border-slate-200 text-slate-500 hover:bg-slate-50'
+                            }`}
+                          >
+                            {m === 'ai-decide'
+                              ? '✨ AI chọn'
+                              : m === 'random'
+                                ? '🔀 Ngẫu nhiên'
+                                : m === 'custom'
+                                  ? '🎨 Tự sáng tạo'
+                                  : 'Thủ công'}
+                          </button>
                         ))}
-                      </select>
+                      </div>
+                      {/* Manual dropdown */}
+                      {compositionMode === 'manual' && (
+                        <select
+                          id="step2-composition-select"
+                          value={project.compositionId ?? 'story-scenes'}
+                          onChange={(e) => onChangeComposition(e.target.value as LayoutCompositionId)}
+                          className="flex-1 min-w-0 px-2 py-1 text-xs bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                        >
+                          {LAYOUT_COMPOSITIONS.map((comp) => (
+                            <option key={comp.id} value={comp.id}>
+                              {comp.name}
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                    </div>
+                    {compositionMode === 'manual' && (
+                      <button
+                        type="button"
+                        onClick={onRandomizeComposition}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-md hover:bg-indigo-100 transition-colors whitespace-nowrap"
+                      >
+                        <Shuffle className="w-3 h-3" />
+                        <span>Phối ngẫu nhiên</span>
+                      </button>
+                    )}
+                    {compositionMode === 'ai-decide' && (
+                      <span className="text-[10px] text-violet-700">
+                        ✨ AI phân tích context và tự chọn kiểu phối tối ưu + ghi lý do vào JSON
+                      </span>
+                    )}
+                    {compositionMode === 'random' && (
+                      <span className="text-[10px] text-orange-600">
+                        🔀 Mỗi lần tạo prompt sẽ chọn ngẫu nhiên một kiểu phối
+                      </span>
                     )}
                   </div>
-                  {compositionMode === 'manual' && (
-                    <button
-                      type="button"
-                      onClick={onRandomizeComposition}
-                      className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-md hover:bg-indigo-100 transition-colors whitespace-nowrap"
-                    >
-                      <Shuffle className="w-3 h-3" />
-                      <span>Phối ngẫu nhiên</span>
-                    </button>
-                  )}
-                  {compositionMode === 'ai-decide' && (
-                    <span className="text-[10px] text-violet-700">
-                      ✨ AI phân tích context và tự chọn kiểu phối tối ưu + ghi lý do vào JSON
-                    </span>
-                  )}
-                  {compositionMode === 'random' && (
-                    <span className="text-[10px] text-orange-600">
-                      🔀 Mỗi lần tạo prompt sẽ chọn ngẫu nhiên một kiểu phối
-                    </span>
+
+                  {compositionMode === 'custom' && (
+                    <div className="p-2.5 rounded-lg bg-white border border-indigo-200/80 space-y-2 text-[11px]">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <div>
+                          <label htmlFor="custom-comp-variant" className="block text-[10px] font-semibold text-slate-600 mb-0.5">
+                            Component từ Kho ({activeVectorCount})
+                          </label>
+                          <select
+                            id="custom-comp-variant"
+                            value={activeCustomConfig.variant}
+                            onChange={(e) =>
+                              updateCustomConfig({
+                                ...activeCustomConfig,
+                                variant: e.target.value as IllustrationVariant,
+                              })
+                            }
+                            className="w-full px-2 py-1 text-xs bg-slate-50 border border-slate-200 rounded"
+                          >
+                            {vectorCatalog.map((c) => (
+                              <option key={c.variant} value={c.variant}>
+                                {c.label} ({c.category})
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <div>
+                          <label htmlFor="custom-comp-icon" className="block text-[10px] font-semibold text-slate-600 mb-0.5">
+                            Biểu tượng (sceneIcon)
+                          </label>
+                          <select
+                            id="custom-comp-icon"
+                            value={activeCustomConfig.sceneIcon || 'sparkles'}
+                            onChange={(e) =>
+                              updateCustomConfig({
+                                ...activeCustomConfig,
+                                sceneIcon: e.target.value as IllustrationSceneIcon,
+                              })
+                            }
+                            className="w-full px-2 py-1 text-xs bg-slate-50 border border-slate-200 rounded"
+                          >
+                            {SCENE_ICON_KEYWORDS.map((ic) => (
+                              <option key={ic.icon} value={ic.icon}>
+                                {ic.label}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                        <input
+                          type="text"
+                          aria-label="Tiêu đề component"
+                          value={activeCustomConfig.title || ''}
+                          onChange={(e) => updateCustomConfig({ ...activeCustomConfig, title: e.target.value })}
+                          placeholder="Tiêu đề (title)..."
+                          className="px-2 py-1 text-xs bg-slate-50 border border-slate-200 rounded"
+                        />
+                        <input
+                          type="text"
+                          aria-label="Phụ đề component"
+                          value={activeCustomConfig.subtitle || ''}
+                          onChange={(e) => updateCustomConfig({ ...activeCustomConfig, subtitle: e.target.value })}
+                          placeholder="Phụ đề (subtitle)..."
+                          className="px-2 py-1 text-xs bg-slate-50 border border-slate-200 rounded"
+                        />
+                        <input
+                          type="text"
+                          aria-label="Từ khóa nhấn mạnh"
+                          value={activeCustomConfig.highlightWord || ''}
+                          onChange={(e) => updateCustomConfig({ ...activeCustomConfig, highlightWord: e.target.value })}
+                          placeholder="Từ nhấn mạnh..."
+                          className="px-2 py-1 text-xs bg-slate-50 border border-slate-200 rounded"
+                        />
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 items-center">
+                        <input
+                          type="text"
+                          aria-label="Nội dung thoại minh họa"
+                          value={activeCustomConfig.speechText || ''}
+                          onChange={(e) => updateCustomConfig({ ...activeCustomConfig, speechText: e.target.value })}
+                          placeholder="Câu / Text trên component..."
+                          className="px-2 py-1 text-xs bg-slate-50 border border-slate-200 rounded"
+                        />
+                        <input
+                          type="text"
+                          aria-label="Danh sách nhãn cách nhau dấu phẩy"
+                          value={(activeCustomConfig.labels || []).join(', ')}
+                          onChange={(e) =>
+                            updateCustomConfig({
+                              ...activeCustomConfig,
+                              labels: e.target.value.split(',').map((s) => s.trim()).filter(Boolean),
+                            })
+                          }
+                          placeholder="Nhãn: Step 1, Step 2, Step 3"
+                          className="px-2 py-1 text-xs bg-slate-50 border border-slate-200 rounded"
+                        />
+                        <div className="flex items-center gap-2">
+                          <label className="text-[10px] font-medium text-slate-600 shrink-0">Màu nhấn:</label>
+                          <input
+                            type="color"
+                            aria-label="Màu nhấn"
+                            value={activeCustomConfig.accentColor || '#4F46E5'}
+                            onChange={(e) => updateCustomConfig({ ...activeCustomConfig, accentColor: e.target.value })}
+                            className="w-7 h-6 p-0.5 bg-white border border-slate-200 rounded cursor-pointer"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-slate-100">
+                        <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-700">
+                          <label className="inline-flex items-center gap-1 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={activeCustomConfig.showStrip !== false}
+                              onChange={(e) => updateCustomConfig({ ...activeCustomConfig, showStrip: e.target.checked })}
+                              className="rounded border-slate-300 text-indigo-600"
+                            />
+                            <span>Thanh đối chiếu</span>
+                          </label>
+                          <label className="inline-flex items-center gap-1 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={activeCustomConfig.showSentenceCard !== false}
+                              onChange={(e) => updateCustomConfig({ ...activeCustomConfig, showSentenceCard: e.target.checked })}
+                              className="rounded border-slate-300 text-indigo-600"
+                            />
+                            <span>Thẻ câu nổi</span>
+                          </label>
+                          <label className="inline-flex items-center gap-1 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={Boolean(activeCustomConfig.showToneMeter)}
+                              onChange={(e) => updateCustomConfig({ ...activeCustomConfig, showToneMeter: e.target.checked })}
+                              className="rounded border-slate-300 text-indigo-600"
+                            />
+                            <span>Thanh sắc thái</span>
+                          </label>
+                        </div>
+
+                        {onApplyCustomComposition && (
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => onApplyCustomComposition(activeCustomConfig, 'active-cue')}
+                              className="px-2.5 py-1 text-[10px] font-semibold bg-white border border-indigo-300 text-indigo-700 rounded hover:bg-indigo-50"
+                            >
+                              Áp dụng câu đang xem
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => onApplyCustomComposition(activeCustomConfig, 'all')}
+                              className="px-2.5 py-1 text-[10px] font-semibold bg-indigo-600 text-white rounded hover:bg-indigo-700"
+                            >
+                              Áp dụng cả bài
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
                   )}
                 </div>
               )}
