@@ -68,6 +68,8 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
   // TTS state
   const [providers, setProviders] = useState<TtsProviderInfo[]>([]);
   const [hasGeminiKey, setHasGeminiKey] = useState(false);
+  const [hasElevenLabsKey, setHasElevenLabsKey] = useState(false);
+  const [fasterWhisperAvailable, setFasterWhisperAvailable] = useState(false);
   const [provider, setProvider] = useState<string>('auto');
   const [voice, setVoice] = useState<string>('en-US-JennyNeural');
   const [rate, setRate] = useState<number>(1.0);
@@ -76,18 +78,23 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
     initialTranscriptText?.trim() ? initialTranscriptText : SAMPLE_TTS_SCRIPT,
   );
   const [isSynthesizing, setIsSynthesizing] = useState(false);
+  const [isAligningTts, setIsAligningTts] = useState(false);
   const [ttsError, setTtsError] = useState<string | null>(null);
   const [ttsResult, setTtsResult] = useState<{
     audioFile: File;
     audioUrl: string;
+    audioBase64: string;
     cues: TranscriptCue[];
     srt: string;
     providerUsed: string;
     durationSec: number;
   } | null>(null);
 
-  // Transcribe state
+  // Transcribe state (defaults: faster-whisper Built-in, large-v3-turbo, .srt)
   const [mediaFile, setMediaFile] = useState<File | null>(null);
+  const [sttService, setSttService] = useState<'faster-whisper' | 'whisper' | 'gemini'>('faster-whisper');
+  const [whisperModel, setWhisperModel] = useState<string>('large-v3-turbo');
+  const [outputFormat, setOutputFormat] = useState<'srt' | 'vtt'>('srt');
   const [sourceLang, setSourceLang] = useState<string>('auto');
   const [translateLang, setTranslateLang] = useState<string>('none');
   const [isTranscribing, setIsTranscribing] = useState(false);
@@ -100,6 +107,8 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
     srt: string;
     vtt: string;
     audioFile: File | null;
+    engineUsed?: string;
+    modelUsed?: string;
   } | null>(null);
   const [editableSrt, setEditableSrt] = useState<string>('');
 
@@ -113,6 +122,8 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
         if (Array.isArray(data?.providers)) {
           setProviders(data.providers);
           setHasGeminiKey(Boolean(data?.hasGeminiKey));
+          setHasElevenLabsKey(Boolean(data?.hasElevenLabsKey));
+          setFasterWhisperAvailable(Boolean(data?.fasterWhisperAvailable));
         }
       })
       .catch(() => undefined);
@@ -126,12 +137,14 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
 
   const availableVoices = useMemo(() => {
     if (provider === 'auto') {
-      return providers.flatMap((p) =>
-        p.id === 'gemini' && !hasGeminiKey ? [] : p.voices,
-      );
+      return providers.flatMap((p) => {
+        if (p.id === 'gemini' && !hasGeminiKey) return [];
+        if (p.id === 'elevenlabs' && !hasElevenLabsKey) return [];
+        return p.voices;
+      });
     }
     return providers.find((p) => p.id === provider)?.voices ?? [];
-  }, [providers, provider, hasGeminiKey]);
+  }, [providers, provider, hasGeminiKey, hasElevenLabsKey]);
 
   useEffect(() => {
     if (availableVoices.length > 0 && !availableVoices.some((v) => v.id === voice)) {
@@ -177,6 +190,7 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
         return {
           audioFile,
           audioUrl,
+          audioBase64: data.audioBase64,
           cues: data.cues || [],
           srt: data.srt || '',
           providerUsed: data.providerUsed || provider,
@@ -187,6 +201,44 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
       setTtsError(err instanceof Error ? err.message : 'Lỗi khi tạo Audio TTS.');
     } finally {
       setIsSynthesizing(false);
+    }
+  };
+
+  const handleAlignTtsWithWhisper = async () => {
+    if (!ttsResult?.audioBase64) return;
+    setTtsError(null);
+    setIsAligningTts(true);
+    try {
+      const res = await fetch('/api/subtitles/align', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          audioBase64: ttsResult.audioBase64,
+          ext: '.mp3',
+          lang: selectedVoiceObj?.lang?.split('-')[0] || 'en',
+          model: 'large-v3-turbo',
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data?.error || 'Không thể căn chỉnh word-level bằng Whisper.');
+      }
+      if (Array.isArray(data?.cues) && data.cues.length > 0) {
+        setTtsResult((prev) =>
+          prev
+            ? {
+                ...prev,
+                cues: data.cues,
+                srt: data.srt || prev.srt,
+                providerUsed: `${prev.providerUsed} + ${data.backendUsed || 'whisper'} (${data.modelUsed || 'large-v3-turbo'})`,
+              }
+            : null,
+        );
+      }
+    } catch (err) {
+      setTtsError(err instanceof Error ? err.message : 'Lỗi căn chỉnh Whisper.');
+    } finally {
+      setIsAligningTts(false);
     }
   };
 
@@ -206,6 +258,9 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
         headers: {
           'Content-Type': 'application/octet-stream',
           'x-file-ext': ext,
+          'x-engine': sttService,
+          'x-whisper-model': whisperModel,
+          'x-output-format': outputFormat,
           'x-source-lang': sourceLang,
           'x-translate-lang': translateLang,
         },
@@ -229,7 +284,10 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
         srt: data.srt || '',
         vtt: data.vtt || '',
         audioFile: extractedAudio,
+        engineUsed: data.engineUsed,
+        modelUsed: data.modelUsed,
       });
+      setSubFormatTab(outputFormat);
       setEditableSrt(data.srt || '');
     } catch (err) {
       setTranscribeError(err instanceof Error ? err.message : 'Lỗi bóc phụ đề.');
@@ -263,10 +321,10 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
             </div>
             <div>
               <h2 id="audio-sub-studio-title" className="text-base font-bold text-slate-900">
-                Studio Sinh Audio TTS &amp; Bóc Sub Đa Ngôn Ngữ
+                Studio Sinh Audio TTS &amp; Whisper STT Đa Ngôn Ngữ
               </h2>
               <p className="text-xs text-slate-500">
-                Tạo giọng đọc miễn phí (Edge Neural · Google · Polly · Gemini) hoặc bóc phụ đề từ Video/Audio
+                Giọng đọc miễn phí (Edge Neural · Google · Polly · ElevenLabs · Gemini) &amp; bóc sub nội bộ faster-whisper ({fasterWhisperAvailable ? 'Python Native sẵn sàng' : 'Built-in ONNX'})
               </p>
             </div>
           </div>
@@ -316,19 +374,25 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    API Giọng đọc miễn phí
+                    Nhà cung cấp Giọng đọc (TTS)
                   </label>
                   <select
                     value={provider}
                     onChange={(e) => setProvider(e.target.value)}
                     className="w-full px-3 py-2 text-xs bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   >
-                    <option value="auto">Tự động (Edge Neural → Google → Polly)</option>
-                    {providers.map((p) => (
-                      <option key={p.id} value={p.id} disabled={p.id === 'gemini' && !hasGeminiKey}>
-                        {p.name}
-                      </option>
-                    ))}
+                    <option value="auto">Tự động miễn phí (Edge Neural → Google → Polly)</option>
+                    {providers.map((p) => {
+                      const disabled =
+                        (p.id === 'gemini' && !hasGeminiKey) ||
+                        (p.id === 'elevenlabs' && !hasElevenLabsKey);
+                      return (
+                        <option key={p.id} value={p.id} disabled={disabled}>
+                          {p.name}
+                          {disabled ? ' (Cần Secret trên Server)' : ''}
+                        </option>
+                      );
+                    })}
                   </select>
                 </div>
 
@@ -363,6 +427,32 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
                     className="w-full accent-indigo-600 mt-2"
                   />
                 </div>
+              </div>
+
+              {/* Secret configuration clarity (server-side only, zero browser key inputs) */}
+              <div className="px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-600">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 font-semibold">
+                    Edge Neural · Google · Polly: Miễn phí (Không cần Key)
+                  </span>
+                  <span
+                    className={`px-2 py-0.5 rounded font-semibold ${
+                      hasElevenLabsKey ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-200 text-slate-700'
+                    }`}
+                  >
+                    ELEVENLABS_API_KEY: {hasElevenLabsKey ? 'Đã cấu hình' : 'Chưa đặt'}
+                  </span>
+                  <span
+                    className={`px-2 py-0.5 rounded font-semibold ${
+                      hasGeminiKey ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-200 text-slate-700'
+                    }`}
+                  >
+                    GEMINI_API_KEY: {hasGeminiKey ? 'Đã cấu hình' : 'Chưa đặt'}
+                  </span>
+                </div>
+                <span className="text-[10px] text-slate-500">
+                  Bảo mật: API Key đặt trong mục Secrets của môi trường / file <code>.env</code> trên server.
+                </span>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
@@ -455,7 +545,25 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
 
                   <audio controls src={ttsResult.audioUrl} className="w-full h-9" />
 
-                  <div className="flex justify-end">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <button
+                      type="button"
+                      disabled={isAligningTts}
+                      onClick={() => void handleAlignTtsWithWhisper()}
+                      className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-indigo-700 bg-white border border-indigo-200 rounded-lg hover:bg-indigo-50 disabled:opacity-50"
+                    >
+                      {isAligningTts ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Languages className="w-3.5 h-3.5" />
+                      )}
+                      <span>
+                        {isAligningTts
+                          ? 'Đang căn chỉnh Whisper...'
+                          : 'Căn chỉnh từng từ bằng Whisper Local (large-v3-turbo)'}
+                      </span>
+                    </button>
+
                     <button
                       type="button"
                       onClick={() => {
@@ -504,6 +612,64 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
                     <span>{mediaFile ? 'Đổi file Video/Audio' : 'Chọn Video / Audio'}</span>
                   </button>
                 </div>
+              </div>
+
+              {/* STT Service, Model & Output Config (Default: faster-whisper Built-in / large-v3-turbo / srt) */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 p-3.5 rounded-xl bg-indigo-50/50 border border-indigo-200/80">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    STT Service
+                  </label>
+                  <select
+                    value={sttService}
+                    onChange={(e) => setSttService(e.target.value as 'faster-whisper' | 'whisper' | 'gemini')}
+                    className="w-full px-3 py-2 text-xs bg-white border border-slate-200 rounded-lg font-medium"
+                  >
+                    <option value="faster-whisper">faster-whisper (Built-in)</option>
+                    <option value="whisper">Local Whisper (ONNX Built-in)</option>
+                    <option value="gemini" disabled={!hasGeminiKey}>
+                      Gemini AI {!hasGeminiKey ? '(Chưa có GEMINI_API_KEY)' : ''}
+                    </option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Model
+                  </label>
+                  <select
+                    value={whisperModel}
+                    disabled={sttService === 'gemini'}
+                    onChange={(e) => setWhisperModel(e.target.value)}
+                    className="w-full px-3 py-2 text-xs bg-white border border-slate-200 rounded-lg font-mono disabled:opacity-50"
+                  >
+                    <option value="large-v3-turbo">large-v3-turbo</option>
+                    <option value="Xenova/whisper-small">whisper-small (Nhanh)</option>
+                    <option value="Xenova/whisper-base">whisper-base</option>
+                    <option value="Xenova/whisper-tiny">whisper-tiny (Siêu nhẹ)</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Output
+                  </label>
+                  <select
+                    value={outputFormat}
+                    onChange={(e) => {
+                      const fmt = e.target.value as 'srt' | 'vtt';
+                      setOutputFormat(fmt);
+                      setSubFormatTab(fmt);
+                    }}
+                    className="w-full px-3 py-2 text-xs bg-white border border-slate-200 rounded-lg font-mono"
+                  >
+                    <option value="srt">srt (.srt)</option>
+                    <option value="vtt">vtt (.vtt)</option>
+                  </select>
+                </div>
+                <p className="sm:col-span-3 text-[11px] text-slate-600 leading-relaxed">
+                  <strong>Cơ chế chạy nội bộ:</strong> Lần đầu chạy, server tự tải &amp; lưu cache mô hình ({fasterWhisperAvailable ? 'Python faster-whisper sẵn sàng' : 'ONNX @huggingface/transformers trên server'}), không cài gì vào trình duyệt hay PC người dùng; các lần sau chạy ngay từ cache.
+                </p>
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -557,7 +723,11 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
                 ) : (
                   <Languages className="w-4 h-4" />
                 )}
-                <span>{isTranscribing ? 'Đang tách âm & bóc phụ đề...' : 'Bóc tách Phụ đề tự động'}</span>
+                <span>
+                  {isTranscribing
+                    ? `Đang chạy ${sttService} (${whisperModel})...`
+                    : `Bóc phụ đề (${sttService} · ${whisperModel} → .${outputFormat})`}
+                </span>
               </button>
 
               {transcribeError && (
@@ -570,7 +740,8 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
                 <div className="p-4 rounded-xl bg-white border border-emerald-200 space-y-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <span className="text-xs font-bold text-emerald-800">
-                      Ngôn ngữ: {transcribeResult.language} · {transcribeResult.cues.length} dòng phụ đề · {transcribeResult.durationSec.toFixed(1)}s
+                      {transcribeResult.engineUsed ? `[${transcribeResult.engineUsed}${transcribeResult.modelUsed ? ` · ${transcribeResult.modelUsed}` : ''}] ` : ''}
+                      Ngôn ngữ: {transcribeResult.language} · {transcribeResult.cues.length} dòng · {transcribeResult.durationSec.toFixed(1)}s
                     </span>
                     <div className="flex items-center gap-1.5">
                       <button

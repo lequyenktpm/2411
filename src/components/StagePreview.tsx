@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Download, Image as ImageIcon, Pause, Play, RotateCcw, Shuffle, Trash2 } from 'lucide-react';
+import { Download, FolderOpen, Image as ImageIcon, Pause, Play, RotateCcw, Shuffle, Square, Trash2 } from 'lucide-react';
 import {
   ensureProjectAssetsLoaded,
   hitTestElements,
@@ -32,6 +32,12 @@ interface StagePreviewProps {
   isExportingVideo: boolean;
   exportProgress: number;
   exportStageLabel?: string;
+  lastExportSummary?: {
+    fileName: string;
+    savedPath?: string;
+    outputCount: number;
+    outputDir?: string;
+  } | null;
   selectedElementId: string | null;
   mp4Settings: Mp4ExportSettings;
   onChangeMp4Settings: (next: Mp4ExportSettings) => void;
@@ -45,6 +51,8 @@ interface StagePreviewProps {
   onSelectElement: (id: string | null) => void;
   onMoveElement: (id: string, x: number, y: number) => void;
   onExportVideo: () => void;
+  onCancelExportVideo?: () => void;
+  onOpenOutputFolder?: () => void;
 }
 
 export const StagePreview: React.FC<StagePreviewProps> = ({
@@ -54,6 +62,7 @@ export const StagePreview: React.FC<StagePreviewProps> = ({
   isExportingVideo,
   exportProgress,
   exportStageLabel,
+  lastExportSummary,
   selectedElementId,
   mp4Settings,
   onChangeMp4Settings,
@@ -67,6 +76,8 @@ export const StagePreview: React.FC<StagePreviewProps> = ({
   onSelectElement,
   onMoveElement,
   onExportVideo,
+  onCancelExportVideo,
+  onOpenOutputFolder,
 }) => {
   const resolved = resolveMp4EncodingParams(mp4Settings);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -308,9 +319,9 @@ export const StagePreview: React.FC<StagePreviewProps> = ({
             className="w-full h-full block cursor-grab active:cursor-grabbing touch-none"
           />
           {isExportingVideo && (
-            <div className="absolute inset-0 bg-slate-900/70 backdrop-blur-[2px] flex flex-col items-center justify-center text-white p-5 text-center">
+            <div className="absolute inset-0 bg-slate-900/75 backdrop-blur-[2px] flex flex-col items-center justify-center text-white p-5 text-center">
               <p className="text-sm font-semibold mb-2">
-                {exportStageLabel || 'Đang render Video MP4 (FFmpeg)...'}
+                {exportStageLabel || 'Đang render Video MP4...'}
               </p>
               <div className="w-48 h-2 bg-white/25 rounded-full overflow-hidden mb-1.5">
                 <div
@@ -318,9 +329,19 @@ export const StagePreview: React.FC<StagePreviewProps> = ({
                   style={{ width: `${Math.round(exportProgress * 100)}%` }}
                 />
               </div>
-              <span className="text-xs tabular-nums text-white/85">
+              <span className="text-xs tabular-nums text-white/85 mb-4">
                 {Math.round(exportProgress * 100)}%
               </span>
+              {onCancelExportVideo && (
+                <button
+                  type="button"
+                  onClick={onCancelExportVideo}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-white bg-rose-600 hover:bg-rose-700 rounded-lg shadow-sm transition-colors"
+                >
+                  <Square className="w-3 h-3 fill-current" />
+                  <span>Hủy render</span>
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -434,16 +455,52 @@ export const StagePreview: React.FC<StagePreviewProps> = ({
             </button>
           </div>
 
-          <button
-            type="button"
-            disabled={isExportingVideo}
-            onClick={onExportVideo}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-lg hover:bg-indigo-100 disabled:opacity-50 transition-colors whitespace-nowrap"
-          >
-            <Download className="w-3.5 h-3.5" />
-            <span>{isExportingVideo ? 'Đang render MP4...' : 'Render & Tải MP4'}</span>
-          </button>
+          {isExportingVideo && onCancelExportVideo ? (
+            <button
+              type="button"
+              onClick={onCancelExportVideo}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-rose-600 rounded-lg hover:bg-rose-700 transition-colors whitespace-nowrap"
+            >
+              <Square className="w-3.5 h-3.5 fill-current" />
+              <span>Hủy render</span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              disabled={isExportingVideo}
+              onClick={onExportVideo}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-lg hover:bg-indigo-100 disabled:opacity-50 transition-colors whitespace-nowrap"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>{isExportingVideo ? 'Đang render MP4...' : 'Render & Tải MP4'}</span>
+            </button>
+          )}
         </div>
+
+        {lastExportSummary && !isExportingVideo && (
+          <div className="px-3 py-2 rounded-lg bg-emerald-50 border border-emerald-200 flex items-center justify-between gap-2 text-[11px] text-emerald-900">
+            <div className="min-w-0">
+              <div className="font-semibold truncate">
+                ✓ Đã xuất {lastExportSummary.fileName} ({lastExportSummary.outputCount} file trong Output)
+              </div>
+              {(lastExportSummary.savedPath || lastExportSummary.outputDir) && (
+                <div className="text-[10px] text-emerald-700 font-mono truncate">
+                  Lưu tại: {lastExportSummary.savedPath || lastExportSummary.outputDir}
+                </div>
+              )}
+            </div>
+            {onOpenOutputFolder && (
+              <button
+                type="button"
+                onClick={onOpenOutputFolder}
+                className="inline-flex items-center gap-1 px-2.5 py-1 text-[10px] font-semibold bg-white border border-emerald-300 text-emerald-800 rounded-md hover:bg-emerald-100 shrink-0"
+              >
+                <FolderOpen className="w-3 h-3" />
+                <span>Mở thư mục Output</span>
+              </button>
+            )}
+          </div>
+        )}
       </div>
     </section>
   );

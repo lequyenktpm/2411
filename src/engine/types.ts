@@ -1,3 +1,5 @@
+import type { VectorPrimitive } from './customComponentTypes';
+
 export type CanvasThemeId =
   | 'pastel-sunrise'
   | 'soft-lavender'
@@ -167,6 +169,26 @@ export type BuiltinIllustrationVariant =
   | 'idiom-split'
   | 'syllable-stress'
   | 'intonation-curve'
+  | 'bs-alert-tip'
+  | 'bs-card-header'
+  | 'bs-progress-meter'
+  | 'bs-toast-notify'
+  | 'bs-list-group'
+  | 'bs-pricing-tier'
+  | 'bs-accordion-faq'
+  | 'bs-breadcrumb-path'
+  | 'css-bento-stats'
+  | 'css-glass-quote'
+  | 'css-chat-thread'
+  | 'css-roadmap-steps'
+  | 'css-toggle-switch'
+  | 'css-browser-mockup'
+  | 'css-grammar-equation'
+  | 'css-flashcard-flip'
+  | 'css-sticky-note'
+  | 'bs-badge-cluster'
+  | 'css-magnifying-word'
+  | 'bs-modal-quiz'
   | 'dynamic-scene';
 
 export type IllustrationVariant = BuiltinIllustrationVariant | (string & {});
@@ -237,6 +259,7 @@ export interface IllustrationPropData {
   sceneIcon?: IllustrationSceneIcon;
   highlightWord?: string;
   dynamicScene?: DynamicSceneSpec;
+  customPrimitives?: VectorPrimitive[];
 }
 
 export interface IllustrationPropProps {

@@ -20,6 +20,7 @@ import {
   Check,
   Clipboard,
   AlertTriangle,
+  Square,
 } from 'lucide-react';
 import { buildSceneGenerationPrompt, PromptVideoStyle } from '../engine/aiPromptBuilder';
 import { choreographFromTranscript } from '../engine/autoChoreographer';
@@ -38,7 +39,11 @@ import {
   RESOLUTION_OPTIONS,
   resolveMp4EncodingParams,
 } from '../engine/mp4Config';
-import { exportProjectToServerDisk, exportProjectToVideo } from '../engine/mp4Exporter';
+import {
+  ExportAbortedError,
+  exportProjectToServerDisk,
+  exportProjectToVideo,
+} from '../engine/mp4Exporter';
 import { parseScenePlanJson, scenePlanToProject } from '../engine/scenePlanAdapter';
 import { parseTranscriptAuto } from '../engine/transcriptParser';
 import {
@@ -180,12 +185,38 @@ export const BatchQueueModal: React.FC<BatchQueueModalProps> = ({
   const [localExportSettings, setLocalExportSettings] = useState<Mp4ExportSettings>(
     mp4Settings ?? DEFAULT_MP4_EXPORT_SETTINGS,
   );
+  const [outputFilesState, setOutputFilesState] = useState<{
+    outputDir: string;
+    files: Array<{ name: string; relativePath: string; bytes: number }>;
+  }>({ outputDir: 'output', files: [] });
+  const [showOutputList, setShowOutputList] = useState(false);
+  const [openFolderMsg, setOpenFolderMsg] = useState<string | null>(null);
+
   const stopFlagRef = useRef(false);
+  const batchAbortControllerRef = useRef<AbortController | null>(null);
+  const customSaveInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const jsonOnlyInputRef = useRef<HTMLInputElement>(null);
   const bgImageInputRef = useRef<HTMLInputElement>(null);
 
-  // Check server health on mount
+  const refreshOutputFiles = async () => {
+    try {
+      const res = await fetch('/api/output/files');
+      if (!res.ok) return;
+      const data = (await res.json()) as {
+        outputDir?: string;
+        files?: Array<{ name: string; relativePath: string; bytes: number }>;
+      };
+      setOutputFilesState({
+        outputDir: data.outputDir || 'output',
+        files: Array.isArray(data.files) ? data.files : [],
+      });
+    } catch {
+      // ignore offline
+    }
+  };
+
+  // Check server health & output folder on mount / modal open
   useEffect(() => {
     fetch('/api/health')
       .then((res) => res.json())
@@ -196,6 +227,12 @@ export const BatchQueueModal: React.FC<BatchQueueModalProps> = ({
       })
       .catch(() => undefined);
   }, []);
+
+  useEffect(() => {
+    if (isOpen) {
+      void refreshOutputFiles();
+    }
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -298,20 +335,45 @@ export const BatchQueueModal: React.FC<BatchQueueModalProps> = ({
         const handle = await (window as any).showDirectoryPicker({ mode: 'readwrite' });
         setOutputDirHandle(handle);
         setOutputDirName(handle.name);
+        setOpenFolderMsg(`Đã chọn thư mục trên máy: ${handle.name}`);
       } else {
-        const manual = prompt(
-          'Nhập đường dẫn thư mục lưu trên máy (hoặc đường dẫn máy chủ):',
-          customSavePath || 'batch_output',
+        setOpenFolderMsg(
+          'Trình duyệt/iframe không hỗ trợ hộp thoại chọn thư mục trực tiếp — hãy nhập tên thư mục con ở ô đường dẫn server bên cạnh (mặc định: output).',
         );
-        if (manual) {
-          setCustomSavePath(manual);
-          setOutputDirName(manual);
-        }
+        customSaveInputRef.current?.focus();
       }
     } catch (err: any) {
       if (err?.name !== 'AbortError') {
         console.warn('Directory picker cancelled or error:', err);
       }
+    }
+  };
+
+  const handleOpenOutputFolder = async () => {
+    try {
+      const subPath = customSavePath.trim() && customSavePath.trim() !== 'output'
+        ? customSavePath.trim()
+        : undefined;
+      const res = await fetch('/api/output/open', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subPath }),
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        opened?: boolean;
+        path?: string;
+        error?: string;
+      };
+      if (data.opened) {
+        setOpenFolderMsg(`Đã mở thư mục: ${data.path}`);
+      } else {
+        setOpenFolderMsg(
+          `Đường dẫn Output trên server: ${data.path || outputFilesState.outputDir} (Môi trường web/cloud không thể mở Finder/Explorer — bạn có thể xem/tải từng file ở danh sách bên dưới).`,
+        );
+        setShowOutputList(true);
+      }
+    } catch {
+      setShowOutputList(true);
     }
   };
 
@@ -682,15 +744,22 @@ export const BatchQueueModal: React.FC<BatchQueueModalProps> = ({
   };
 
   // ── RENDER batch ──────────────────────────────────────────────────────────
+  const handleCancelBatchImmediately = () => {
+    stopFlagRef.current = true;
+    batchAbortControllerRef.current?.abort();
+  };
+
   const handleStartBatch = async () => {
     if (isRunning) return;
     stopFlagRef.current = false;
+    const controller = new AbortController();
+    batchAbortControllerRef.current = controller;
     setIsRunning(true);
 
     const queueSnapshot = [...items];
     for (let idx = 0; idx < queueSnapshot.length; idx++) {
       const item = queueSnapshot[idx];
-      if (stopFlagRef.current) break;
+      if (stopFlagRef.current || controller.signal.aborted) break;
       if (item.status === 'done') continue;
 
       try {
@@ -736,6 +805,10 @@ export const BatchQueueModal: React.FC<BatchQueueModalProps> = ({
             activeSettings,
             fileBase,
             effectivePath,
+            {
+              signal: controller.signal,
+              directoryHandle: outputDirHandle,
+            },
           );
           const mb = (saved.byteLength / (1024 * 1024)).toFixed(2);
           updateItem(item.id, {
@@ -744,6 +817,7 @@ export const BatchQueueModal: React.FC<BatchQueueModalProps> = ({
             detail: `Đã lưu (${mb} MB · ${encoding.width}×${encoding.height} @ ${encoding.fps}fps)`,
             outputInfo: saved.savedPath,
           });
+          void refreshOutputFiles();
         } else {
           const exported = await exportProjectToVideo(
             { ...builtProject, id: fileBase },
@@ -756,15 +830,30 @@ export const BatchQueueModal: React.FC<BatchQueueModalProps> = ({
               });
             },
             activeSettings,
+            {
+              signal: controller.signal,
+              alsoSaveToServerOutput: true,
+              savePath: customSavePath.trim() || undefined,
+            },
           );
           const mb = (exported.byteLength / (1024 * 1024)).toFixed(2);
           updateItem(item.id, {
             status: 'done',
             progress: 1,
             detail: `Đã tải ${exported.fileName} (${mb} MB)`,
+            outputInfo: exported.savedPath,
           });
+          void refreshOutputFiles();
         }
       } catch (err) {
+        if (err instanceof ExportAbortedError || controller.signal.aborted) {
+          updateItem(item.id, {
+            status: 'pending',
+            progress: 0,
+            detail: 'Đã hủy render giữa chừng',
+          });
+          break;
+        }
         updateItem(item.id, {
           status: 'error',
           progress: 0,
@@ -773,12 +862,14 @@ export const BatchQueueModal: React.FC<BatchQueueModalProps> = ({
       }
 
       // Short pause between items to free RAM/GC
-      if (idx < queueSnapshot.length - 1 && !stopFlagRef.current) {
+      if (idx < queueSnapshot.length - 1 && !stopFlagRef.current && !controller.signal.aborted) {
         await new Promise((r) => setTimeout(r, 400));
       }
     }
 
+    batchAbortControllerRef.current = null;
     setIsRunning(false);
+    void refreshOutputFiles();
   };
 
   // ── Handle Save Pasted JSON for a specific item ───────────────────────────
@@ -1178,6 +1269,7 @@ export const BatchQueueModal: React.FC<BatchQueueModalProps> = ({
                     <div className="flex items-center gap-2">
                       <FolderSearch className="w-4 h-4 text-slate-500 shrink-0" />
                       <input
+                        ref={customSaveInputRef}
                         type="text"
                         disabled={isRunning}
                         value={customSavePath}
@@ -1194,6 +1286,97 @@ export const BatchQueueModal: React.FC<BatchQueueModalProps> = ({
                   )}
                 </div>
               </div>
+
+              {/* Output status summary bar */}
+              <div className="p-2.5 rounded-xl bg-emerald-50/70 border border-emerald-200 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                <div className="min-w-0">
+                  <div className="font-semibold text-emerald-900">
+                    Thư mục Output: đã lưu <strong>{outputFilesState.files.length}</strong> file
+                    {outputDirName ? ` · Máy cục bộ: ${outputDirName}` : ''}
+                  </div>
+                  <div className="text-[10px] text-emerald-700 font-mono truncate">
+                    Đường dẫn: {outputFilesState.outputDir}
+                  </div>
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void refreshOutputFiles();
+                      setShowOutputList((v) => !v);
+                    }}
+                    className="px-2.5 py-1 text-[10px] font-semibold bg-white border border-emerald-300 text-emerald-800 rounded-md hover:bg-emerald-100"
+                  >
+                    {showOutputList ? 'Ẩn danh sách' : `Xem file (${outputFilesState.files.length})`}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleOpenOutputFolder()}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 text-[10px] font-semibold bg-emerald-600 text-white rounded-md hover:bg-emerald-700"
+                  >
+                    <FolderOpen className="w-3 h-3" />
+                    <span>Mở thư mục Output</span>
+                  </button>
+                </div>
+              </div>
+
+              {openFolderMsg && (
+                <div className="px-3 py-1.5 rounded-lg bg-slate-100 border border-slate-200 text-[11px] text-slate-700 flex items-center justify-between gap-2">
+                  <span>{openFolderMsg}</span>
+                  <button
+                    type="button"
+                    onClick={() => setOpenFolderMsg(null)}
+                    className="text-slate-400 hover:text-slate-700"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                </div>
+              )}
+
+              {showOutputList && (
+                <div className="max-h-32 overflow-y-auto bg-white border border-slate-200 rounded-lg divide-y divide-slate-100">
+                  {outputFilesState.files.length === 0 ? (
+                    <div className="p-2.5 text-[11px] text-slate-500 text-center">
+                      Chưa có file video nào trong thư mục output trên server.
+                    </div>
+                  ) : (
+                    outputFilesState.files.map((f) => (
+                      <div
+                        key={f.relativePath}
+                        className="px-3 py-1.5 flex items-center justify-between gap-2 text-[11px]"
+                      >
+                        <span className="font-mono text-slate-800 truncate">{f.relativePath}</span>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span className="text-slate-400 tabular-nums">
+                            {(f.bytes / (1024 * 1024)).toFixed(2)} MB
+                          </span>
+                          <a
+                            href={`/api/output/download?path=${encodeURIComponent(f.relativePath)}`}
+                            download={f.name}
+                            className="text-indigo-600 hover:text-indigo-800 font-semibold"
+                          >
+                            Tải
+                          </a>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              await fetch(
+                                `/api/output/file?path=${encodeURIComponent(f.relativePath)}`,
+                                { method: 'DELETE' },
+                              );
+                              void refreshOutputFiles();
+                            }}
+                            className="text-rose-500 hover:text-rose-700"
+                            title="Xóa file"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
 
               {/* Quality & Resolution */}
               <div className="grid grid-cols-1 sm:grid-cols-12 gap-2.5 items-end pt-1">
@@ -1586,15 +1769,25 @@ export const BatchQueueModal: React.FC<BatchQueueModalProps> = ({
             )}
 
             {isRunning ? (
-              <button
-                type="button"
-                onClick={() => {
-                  stopFlagRef.current = true;
-                }}
-                className="px-4 py-2 text-xs font-semibold text-white bg-red-600 rounded-lg hover:bg-red-700"
-              >
-                Dừng sau bài hiện tại
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleCancelBatchImmediately}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-rose-600 rounded-lg hover:bg-rose-700 shadow-xs"
+                >
+                  <Square className="w-3 h-3 fill-current" />
+                  <span>Hủy render ngay</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    stopFlagRef.current = true;
+                  }}
+                  className="px-3 py-2 text-xs font-medium text-rose-700 bg-rose-50 border border-rose-200 rounded-lg hover:bg-rose-100"
+                >
+                  Dừng sau bài xong
+                </button>
+              </div>
             ) : batchMode === 'prompt-zip' ? (
               <div className="flex items-center gap-2">
                 <button

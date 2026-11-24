@@ -4,6 +4,7 @@ import { AudioSubtitleStudioModal } from './components/AudioSubtitleStudioModal'
 import { AutomationPipelinePanel, PresetId } from './components/AutomationPipelinePanel';
 import { BatchQueueModal } from './components/BatchQueueModal';
 import { ComponentDatabaseModal } from './components/ComponentDatabaseModal';
+import { EducationalStudioTab } from './components/EducationalStudioTab';
 import { EnglishReelsTab } from './components/EnglishReelsTab';
 import { PythonExportModal } from './components/PythonExportModal';
 import { StagePreview } from './components/StagePreview';
@@ -20,6 +21,7 @@ import {
   resolveMp4EncodingParams,
 } from './engine/mp4Config';
 import {
+  ExportAbortedError,
   ExportVideoResult,
   exportProjectToVideo,
 } from './engine/mp4Exporter';
@@ -45,7 +47,7 @@ import {
 } from './engine/types';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'studio' | 'reels'>('studio');
+  const [activeTab, setActiveTab] = useState<'studio' | 'reels' | 'edu-studio'>('studio');
   const [project, setProject] = useState<LessonProject>(() => PRESET_JP_EN_POLITE);
   const [currentTime, setCurrentTime] = useState<number>(4.8);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
@@ -64,12 +66,19 @@ export default function App() {
   const [exportProgress, setExportProgress] = useState<number>(0);
   const [exportStageLabel, setExportStageLabel] = useState<string>('');
   const [exportError, setExportError] = useState<string | null>(null);
+  const [lastExportSummary, setLastExportSummary] = useState<{
+    fileName: string;
+    savedPath?: string;
+    outputCount: number;
+    outputDir?: string;
+  } | null>(null);
   const [mp4Settings, setMp4Settings] = useState<Mp4ExportSettings>(DEFAULT_MP4_EXPORT_SETTINGS);
   const resolvedExport = resolveMp4EncodingParams(mp4Settings);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const rafRef = useRef<number | null>(null);
   const lastFrameTsRef = useRef<number | null>(null);
+  const exportAbortControllerRef = useRef<AbortController | null>(null);
 
   // Sync playback loop
   useEffect(() => {
@@ -441,10 +450,33 @@ export default function App() {
     [currentTime, project.duration],
   );
 
+  const handleCancelExportVideo = useCallback(() => {
+    exportAbortControllerRef.current?.abort();
+  }, []);
+
+  const handleOpenOutputFolder = useCallback(async () => {
+    try {
+      const res = await fetch('/api/output/open', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const data = (await res.json().catch(() => ({}))) as { opened?: boolean; path?: string };
+      if (!data.opened) {
+        setActiveTab('edu-studio');
+      }
+    } catch {
+      setActiveTab('edu-studio');
+    }
+  }, []);
+
   const handleExportVideo = useCallback(
     async (projectOverride?: LessonProject): Promise<ExportVideoResult | null> => {
       if (isExportingVideo) return null;
       const targetProject = projectOverride ?? project;
+      const controller = new AbortController();
+      exportAbortControllerRef.current = controller;
+
       setIsPlaying(false);
       setIsExportingVideo(true);
       setExportProgress(0);
@@ -460,13 +492,41 @@ export default function App() {
             setExportStageLabel(stageLabel);
           },
           mp4Settings,
+          {
+            signal: controller.signal,
+            alsoSaveToServerOutput: true,
+          },
         );
+        try {
+          const outRes = await fetch('/api/output/files');
+          const outData = (await outRes.json().catch(() => ({}))) as {
+            outputDir?: string;
+            files?: Array<unknown>;
+          };
+          setLastExportSummary({
+            fileName: result.fileName,
+            savedPath: result.savedPath,
+            outputCount: Array.isArray(outData.files) ? outData.files.length : 1,
+            outputDir: outData.outputDir,
+          });
+        } catch {
+          setLastExportSummary({
+            fileName: result.fileName,
+            savedPath: result.savedPath,
+            outputCount: 1,
+          });
+        }
         return result;
       } catch (err) {
+        if (err instanceof ExportAbortedError || controller.signal.aborted) {
+          setExportError('Đã hủy quá trình render video.');
+          return null;
+        }
         const msg = err instanceof Error ? err.message : 'Không thể render file video.';
         setExportError(msg);
         return null;
       } finally {
+        exportAbortControllerRef.current = null;
         setIsExportingVideo(false);
         setExportProgress(0);
         setExportStageLabel('');
@@ -540,6 +600,18 @@ export default function App() {
           >
             English Reels Studio
           </button>
+          <span aria-hidden="true" className="text-slate-300">·</span>
+          <button
+            type="button"
+            onClick={() => setActiveTab('edu-studio')}
+            className={`transition-colors whitespace-nowrap shrink-0 pb-0.5 ${
+              activeTab === 'edu-studio'
+                ? 'text-indigo-700 font-semibold border-b-2 border-indigo-600'
+                : 'hover:text-slate-900'
+            }`}
+          >
+            Edu Studio 1.19 &amp; Output
+          </button>
           <span aria-hidden="true" className="text-slate-300 hidden md:inline">·</span>
           <button
             type="button"
@@ -583,6 +655,15 @@ export default function App() {
       {activeTab === 'reels' ? (
         <main className="flex-1 w-full">
           <EnglishReelsTab onSendToStudio={handleReceiveFromReelsTab} />
+        </main>
+      ) : activeTab === 'edu-studio' ? (
+        <main className="flex-1 w-full">
+          <EducationalStudioTab
+            onSendAudioCuesToStudio={(incomingAudio, incomingCues, incomingTitle) => {
+              handleApplyGeneratedAudioAndCues(incomingAudio, incomingCues, incomingTitle);
+              setActiveTab('studio');
+            }}
+          />
         </main>
       ) : (
         /* Main Automated AI-First Workspace */
@@ -629,6 +710,7 @@ export default function App() {
                 onSeek={handleSeek}
                 onOpenAdvancedEditor={() => setIsAdvancedOpen(true)}
                 onOpenAudioSubtitleStudio={() => setIsAudioSubStudioOpen(true)}
+                onCancelExportVideo={handleCancelExportVideo}
               />
             </div>
 
@@ -641,6 +723,7 @@ export default function App() {
                 isExportingVideo={isExportingVideo}
                 exportProgress={exportProgress}
                 exportStageLabel={exportStageLabel}
+                lastExportSummary={lastExportSummary}
                 selectedElementId={isAdvancedOpen ? selectedElementId : null}
                 onChangeMp4Settings={setMp4Settings}
                 onChangeComposition={handleChangeComposition}
@@ -677,6 +760,8 @@ export default function App() {
                 onSelectElement={setSelectedElementId}
                 onMoveElement={handleMoveElement}
                 onExportVideo={() => void handleExportVideo()}
+                onCancelExportVideo={handleCancelExportVideo}
+                onOpenOutputFolder={() => void handleOpenOutputFolder()}
               />
             </div>
           </div>

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowDown,
   ArrowRight,
@@ -8,29 +8,58 @@ import {
   CheckCircle2,
   Copy,
   CopyPlus,
+  Download,
   ExternalLink,
+  Film,
   Globe,
   HelpCircle,
   Loader2,
+  Pause,
+  Play,
   Plus,
+  RotateCcw,
   Sparkles,
+  Square,
   Trash2,
   Volume2,
 } from 'lucide-react';
 import {
+  ensureProjectAssetsLoaded,
+  renderProjectFrame,
+  STAGE_HEIGHT,
+  STAGE_WIDTH,
+} from '../engine/canvasRenderer';
+import {
   buildEnglishReelsWebAiPrompt,
   buildReelCardsRuleBased,
   estimateCardSpeechDuration,
+  getQuizCardSpeechParts,
   parseEnglishReelsAiJson,
   ReelCard,
+  ReelCardTimingMeta,
   ReelCardType,
+  ReelCardVisualConfig,
   ReelMode,
   ReelScrapeResult,
   reelCardsToLessonProject,
+  sanitizeTtsSpeech,
 } from '../engine/englishReelsEngine';
 import { LAYOUT_COMPOSITIONS } from '../engine/illustrationLayouts';
+import { DEFAULT_MP4_EXPORT_SETTINGS } from '../engine/mp4Config';
+import { ExportAbortedError, exportProjectToVideo } from '../engine/mp4Exporter';
 import { FlexibleSceneDocument } from '../engine/scenePlanAdapter';
-import { CANVAS_THEMES, CanvasThemeId, LayoutCompositionId, LessonProject } from '../engine/types';
+import {
+  CANVAS_THEMES,
+  CanvasThemeId,
+  IllustrationSceneIcon,
+  IllustrationVariant,
+  LayoutCompositionId,
+  LessonProject,
+} from '../engine/types';
+import {
+  ALL_SCENE_ICONS,
+  getEffectiveVectorCatalog,
+} from '../engine/vectorComponentDb';
 import { TtsProviderInfo } from './AudioSubtitleStudioModal';
 
 interface EnglishReelsTabProps {
@@ -88,9 +117,10 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
   );
   const [activeCardIdx, setActiveCardIdx] = useState(0);
 
-  // ── 4. TTS Multi-Provider & Studio Export State ────────────────────────────
+  // ── 4. TTS Multi-Provider & Live Video Render State ────────────────────────
   const [ttsProviders, setTtsProviders] = useState<TtsProviderInfo[]>([]);
   const [hasGeminiKey, setHasGeminiKey] = useState(false);
+  const [hasElevenLabsKey, setHasElevenLabsKey] = useState(false);
   const [ttsProvider, setTtsProvider] = useState('auto');
   const [ttsVoice, setTtsVoice] = useState('en-US-JennyNeural');
   const [ttsRate, setTtsRate] = useState(1.0);
@@ -98,9 +128,29 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
   const [selectedComposition, setSelectedComposition] = useState<LayoutCompositionId>('story-scenes');
 
   const [isGeneratingAudio, setIsGeneratingAudio] = useState(false);
+  const [isGeneratingAiCards, setIsGeneratingAiCards] = useState(false);
   const [isPreviewingVoice, setIsPreviewingVoice] = useState(false);
   const [studioError, setStudioError] = useState<string | null>(null);
   const [previewAudioUrl, setPreviewAudioUrl] = useState<string | null>(null);
+
+  // Live Video 9:16 preview & direct MP4 export state
+  const [previewViewMode, setPreviewViewMode] = useState<'video' | 'cards'>('video');
+  const [generatedAudioFile, setGeneratedAudioFile] = useState<File | null>(null);
+  const [generatedAudioUrl, setGeneratedAudioUrl] = useState<string | null>(null);
+  const [generatedDurations, setGeneratedDurations] = useState<number[] | undefined>(undefined);
+  const [generatedTimings, setGeneratedTimings] = useState<ReelCardTimingMeta[] | undefined>(undefined);
+  const [isVideoPlaying, setIsVideoPlaying] = useState(false);
+  const [videoTime, setVideoTime] = useState(0.5);
+  const [isExportingVideo, setIsExportingVideo] = useState(false);
+  const [exportProgress, setExportProgress] = useState(0);
+  const [exportStageLabel, setExportStageLabel] = useState('');
+  const [exportNotice, setExportNotice] = useState<string | null>(null);
+
+  const videoCanvasRef = useRef<HTMLCanvasElement>(null);
+  const lessonAudioRef = useRef<HTMLAudioElement>(null);
+  const videoRafRef = useRef<number | null>(null);
+  const lastRafTsRef = useRef<number | null>(null);
+  const exportAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     fetch('/api/tts/voices')
@@ -109,6 +159,7 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
         if (Array.isArray(data?.providers)) {
           setTtsProviders(data.providers);
           setHasGeminiKey(Boolean(data?.hasGeminiKey));
+          setHasElevenLabsKey(Boolean(data?.hasElevenLabsKey));
         }
       })
       .catch(() => undefined);
@@ -120,20 +171,121 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
     };
   }, [previewAudioUrl]);
 
+  useEffect(() => {
+    return () => {
+      if (generatedAudioUrl) URL.revokeObjectURL(generatedAudioUrl);
+    };
+  }, [generatedAudioUrl]);
+
   const availableVoices = useMemo(() => {
     if (ttsProvider === 'auto') {
-      return ttsProviders.flatMap((p) =>
-        p.id === 'gemini' && !hasGeminiKey ? [] : p.voices,
-      );
+      return ttsProviders.flatMap((p) => {
+        if (p.id === 'gemini' && !hasGeminiKey) return [];
+        if (p.id === 'elevenlabs' && !hasElevenLabsKey) return [];
+        return p.voices;
+      });
     }
     return ttsProviders.find((p) => p.id === ttsProvider)?.voices ?? [];
-  }, [ttsProviders, ttsProvider, hasGeminiKey]);
+  }, [ttsProviders, ttsProvider, hasGeminiKey, hasElevenLabsKey]);
 
   useEffect(() => {
     if (availableVoices.length > 0 && !availableVoices.some((v) => v.id === ttsVoice)) {
       setTtsVoice(availableVoices[0].id);
     }
   }, [availableVoices, ttsVoice]);
+
+  const vectorCatalog = useMemo(() => getEffectiveVectorCatalog(), []);
+
+  const previewProject = useMemo(
+    () =>
+      reelCardsToLessonProject(cards, {
+        title: lessonTitle,
+        theme: selectedTheme,
+        compositionId: sceneJsonOverride ? undefined : selectedComposition,
+        cardDurationsSec:
+          generatedDurations && generatedDurations.length === cards.length
+            ? generatedDurations
+            : undefined,
+        cardTimings:
+          generatedTimings && generatedTimings.length === cards.length
+            ? generatedTimings
+            : undefined,
+        audioFileName: generatedAudioFile?.name,
+        sceneJsonOverride,
+      }),
+    [
+      cards,
+      lessonTitle,
+      selectedTheme,
+      selectedComposition,
+      generatedDurations,
+      generatedTimings,
+      generatedAudioFile?.name,
+      sceneJsonOverride,
+    ],
+  );
+
+  useEffect(() => {
+    setVideoTime((prev) => Math.min(prev, Math.max(0.1, previewProject.duration)));
+  }, [previewProject.duration]);
+
+  useEffect(() => {
+    if (previewViewMode !== 'video') return;
+    const canvas = videoCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    void ensureProjectAssetsLoaded(previewProject).then(() => {
+      renderProjectFrame(ctx, previewProject, videoTime, null);
+    });
+  }, [previewProject, videoTime, previewViewMode]);
+
+  useEffect(() => {
+    if (!isVideoPlaying) {
+      if (videoRafRef.current !== null) cancelAnimationFrame(videoRafRef.current);
+      lastRafTsRef.current = null;
+      if (lessonAudioRef.current && !lessonAudioRef.current.paused) {
+        lessonAudioRef.current.pause();
+      }
+      return;
+    }
+
+    if (lessonAudioRef.current && generatedAudioUrl) {
+      lessonAudioRef.current.currentTime = videoTime;
+      lessonAudioRef.current.play().catch(() => undefined);
+    }
+
+    const step = (now: number) => {
+      if (lessonAudioRef.current && generatedAudioUrl && !lessonAudioRef.current.paused) {
+        const nextT = lessonAudioRef.current.currentTime;
+        if (nextT >= previewProject.duration) {
+          setVideoTime(0);
+          setIsVideoPlaying(false);
+          return;
+        }
+        setVideoTime(nextT);
+      } else {
+        if (lastRafTsRef.current === null) lastRafTsRef.current = now;
+        const dt = (now - lastRafTsRef.current) / 1000;
+        lastRafTsRef.current = now;
+        setVideoTime((prev) => {
+          const next = prev + dt;
+          if (next >= previewProject.duration) {
+            setIsVideoPlaying(false);
+            return 0;
+          }
+          return next;
+        });
+      }
+      videoRafRef.current = requestAnimationFrame(step);
+    };
+
+    videoRafRef.current = requestAnimationFrame(step);
+    return () => {
+      if (videoRafRef.current !== null) cancelAnimationFrame(videoRafRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isVideoPlaying, previewProject.duration, generatedAudioUrl]);
 
   const webAiPrompt = useMemo(
     () =>
@@ -319,11 +471,34 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
 
   const selectedVoiceLang = availableVoices.find((v) => v.id === ttsVoice)?.lang || 'en-US';
 
+  const updateCardVisual = (index: number, patch: Partial<ReelCardVisualConfig>) => {
+    setCards((prev) =>
+      prev.map((c, idx) =>
+        idx === index ? { ...c, visual: { ...(c.visual || {}), ...patch } } : c,
+      ),
+    );
+  };
+
   const handlePreviewSingleCardVoice = async () => {
     if (!activeCard) return;
     setIsPreviewingVoice(true);
     setStudioError(null);
     try {
+      const segments: Array<{ id: string; text: string; pauseAfterSec?: number }> = [];
+      if (activeCard.type === 'quiz' && activeCard.options?.length) {
+        const { questionSpeech, answerSpeech, thinkSec } = getQuizCardSpeechParts(activeCard);
+        if (questionSpeech) {
+          segments.push({ id: `${activeCard.id}-q`, text: questionSpeech, pauseAfterSec: thinkSec });
+        }
+        if (answerSpeech) {
+          segments.push({ id: `${activeCard.id}-a`, text: answerSpeech, pauseAfterSec: 0 });
+        }
+      } else {
+        const cleanSpeech =
+          sanitizeTtsSpeech(activeCard.ttsText || activeCard.content || activeCard.title) ||
+          activeCard.content;
+        segments.push({ id: activeCard.id, text: cleanSpeech });
+      }
       const res = await fetch('/api/tts/synthesize', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -332,7 +507,7 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
           voice: ttsVoice,
           lang: selectedVoiceLang,
           rate: ttsRate,
-          segments: [{ id: activeCard.id, text: activeCard.ttsText || activeCard.content }],
+          segments,
         }),
       });
       const data = await res.json();
@@ -352,54 +527,227 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
     }
   };
 
+  const synthesizeLessonAudioBundle = async (): Promise<{
+    audioFile: File;
+    durations: number[] | undefined;
+    timings: ReelCardTimingMeta[] | undefined;
+    project: LessonProject;
+  }> => {
+    const segments: Array<{ id: string; text: string; pauseAfterSec?: number }> = [];
+    const cardMapping: Array<{ qIdx: number; aIdx: number | null; thinkSec: number }> = [];
+
+    for (const c of cards) {
+      if (c.type === 'quiz' && c.options && c.options.length > 0) {
+        const { questionSpeech, answerSpeech, thinkSec } = getQuizCardSpeechParts(c);
+        const qIdx = segments.length;
+        segments.push({
+          id: `${c.id}-q`,
+          text: questionSpeech || 'Quiz question.',
+          pauseAfterSec: thinkSec,
+        });
+        let aIdx: number | null = null;
+        if (answerSpeech) {
+          aIdx = segments.length;
+          segments.push({
+            id: `${c.id}-a`,
+            text: answerSpeech,
+            pauseAfterSec: 0,
+          });
+        }
+        cardMapping.push({ qIdx, aIdx, thinkSec });
+      } else {
+        const cleanSpeech =
+          sanitizeTtsSpeech(c.ttsText || c.content || c.title) || 'Next lesson point.';
+        const qIdx = segments.length;
+        segments.push({ id: c.id, text: cleanSpeech, pauseAfterSec: 0 });
+        cardMapping.push({ qIdx, aIdx: null, thinkSec: 0 });
+      }
+    }
+
+    const res = await fetch('/api/tts/synthesize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        provider: ttsProvider,
+        voice: ttsVoice,
+        lang: selectedVoiceLang,
+        rate: ttsRate,
+        segments,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data?.audioBase64) {
+      throw new Error(data?.error || 'Không thể tạo audio TTS từ server.');
+    }
+
+    const safeFileName = `${lessonTitle.replace(/[^a-zA-Z0-9-_]+/g, '_').slice(0, 32) || 'english_reels'}.mp3`;
+    const audioFile = base64ToMp3File(data.audioBase64, safeFileName);
+
+    const segDurs: number[] = Array.isArray(data.segmentDurations) ? data.segmentDurations : [];
+    const spokenDurs: number[] = Array.isArray(data.spokenDurations) ? data.spokenDurations : segDurs;
+    const pauseDurs: number[] = Array.isArray(data.pauseDurations) ? data.pauseDurations : [];
+
+    let timings: ReelCardTimingMeta[] | undefined;
+    let durations: number[] | undefined;
+    if (segDurs.length === segments.length) {
+      timings = cardMapping.map((m) => {
+        const qSpoken = spokenDurs[m.qIdx] ?? segDurs[m.qIdx] ?? 2.8;
+        const pDur = pauseDurs[m.qIdx] ?? 0;
+        const aSpoken = m.aIdx !== null ? segDurs[m.aIdx] ?? 2.6 : undefined;
+        const totalSec = Number((qSpoken + pDur + (aSpoken ?? 0)).toFixed(3));
+        return {
+          totalSec,
+          questionSec: m.aIdx !== null ? qSpoken : undefined,
+          thinkSec: m.aIdx !== null ? pDur : undefined,
+          answerSec: aSpoken,
+        };
+      });
+      durations = timings.map((t) => t.totalSec);
+    }
+
+    const nextAudioUrl = URL.createObjectURL(audioFile);
+    setGeneratedAudioUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return nextAudioUrl;
+    });
+    setGeneratedAudioFile(audioFile);
+    setGeneratedDurations(durations);
+    setGeneratedTimings(timings);
+
+    const proj = reelCardsToLessonProject(cards, {
+      title: lessonTitle,
+      theme: selectedTheme,
+      compositionId: sceneJsonOverride ? undefined : selectedComposition,
+      cardDurationsSec: durations,
+      cardTimings: timings,
+      audioFileName: safeFileName,
+      sceneJsonOverride,
+    });
+    return { audioFile, durations, timings, project: proj };
+  };
+
+  const handleGeneratePreviewVideoAudio = async () => {
+    if (cards.length === 0) return;
+    setStudioError(null);
+    setExportNotice(null);
+    setIsGeneratingAudio(true);
+    try {
+      await synthesizeLessonAudioBundle();
+      setPreviewViewMode('video');
+      setVideoTime(0);
+      setIsVideoPlaying(true);
+      setExportNotice('Đã tạo giọng đọc chuẩn & đồng bộ vào Video 9:16 xem thử!');
+    } catch (err) {
+      setStudioError(err instanceof Error ? err.message : 'Lỗi khi tạo Audio TTS.');
+    } finally {
+      setIsGeneratingAudio(false);
+    }
+  };
+
+  const handleDirectRenderVideo = async () => {
+    if (cards.length === 0 || isExportingVideo) return;
+    setIsVideoPlaying(false);
+    setStudioError(null);
+    setExportNotice(null);
+    setIsExportingVideo(true);
+    setExportProgress(0.02);
+    setExportStageLabel('Đang chuẩn bị âm thanh & cảnh 9:16...');
+
+    const controller = new AbortController();
+    exportAbortRef.current = controller;
+
+    try {
+      let targetProject = previewProject;
+      let targetAudio = generatedAudioFile;
+
+      if (!targetAudio) {
+        setExportStageLabel('Đang tạo giọng đọc bài học (TTS)...');
+        const bundled = await synthesizeLessonAudioBundle();
+        targetProject = bundled.project;
+        targetAudio = bundled.audioFile;
+      }
+
+      if (controller.signal.aborted) {
+        throw new ExportAbortedError();
+      }
+
+      const result = await exportProjectToVideo(
+        targetProject,
+        targetAudio,
+        ({ progress, stageLabel }) => {
+          setExportProgress(progress);
+          setExportStageLabel(stageLabel);
+        },
+        DEFAULT_MP4_EXPORT_SETTINGS,
+        {
+          signal: controller.signal,
+          alsoSaveToServerOutput: true,
+        },
+      );
+
+      setExportNotice(
+        `Đã xuất thành công ${result.fileName}${result.savedPath ? ` (lưu tại ${result.savedPath})` : ''}!`,
+      );
+    } catch (err) {
+      if (err instanceof ExportAbortedError || controller.signal.aborted) {
+        setExportNotice('Đã hủy quá trình render Video.');
+      } else {
+        setStudioError(err instanceof Error ? err.message : 'Không thể render Video MP4.');
+      }
+    } finally {
+      exportAbortRef.current = null;
+      setIsExportingVideo(false);
+      setExportProgress(0);
+      setExportStageLabel('');
+    }
+  };
+
+  const handleServerAiGenerateCards = async () => {
+    if (!hasGeminiKey || isGeneratingAiCards) return;
+    setIsGeneratingAiCards(true);
+    setAiJsonError(null);
+    setAiJsonNotice(null);
+    try {
+      const res = await fetch('/api/ai/generate-scene', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: webAiPrompt }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.text) {
+        throw new Error(data?.error || 'Gemini không trả về kết quả hợp lệ.');
+      }
+      setPastedAiJson(data.text);
+      const parsed = parseEnglishReelsAiJson(data.text);
+      if (!parsed) {
+        throw new Error('JSON AI trả về chưa khớp schema cards.');
+      }
+      setLessonTitle(parsed.title);
+      setMode(parsed.mode);
+      setCards(parsed.cards);
+      setSceneJsonOverride(parsed.sceneJson ?? null);
+      setActiveCardIdx(0);
+      setAiJsonNotice(`AI Server đã tạo ${parsed.cards.length} thẻ bài học kèm lời đọc tự nhiên!`);
+    } catch (err) {
+      setAiJsonError(err instanceof Error ? err.message : 'Lỗi gọi Gemini AI trên server.');
+    } finally {
+      setIsGeneratingAiCards(false);
+    }
+  };
+
   const handleGenerateAndSendToStudio = async (withTtsAudio: boolean) => {
     if (cards.length === 0) return;
     setStudioError(null);
 
     if (!withTtsAudio) {
-      const proj = reelCardsToLessonProject(cards, {
-        title: lessonTitle,
-        theme: selectedTheme,
-        compositionId: sceneJsonOverride ? undefined : selectedComposition,
-        sceneJsonOverride,
-      });
-      onSendToStudio(proj, null);
+      onSendToStudio(previewProject, generatedAudioFile);
       return;
     }
 
     setIsGeneratingAudio(true);
     try {
-      const segments = cards.map((c) => ({
-        id: c.id,
-        text: (c.ttsText || c.content || c.title).trim(),
-      }));
-      const res = await fetch('/api/tts/synthesize', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          provider: ttsProvider,
-          voice: ttsVoice,
-          lang: selectedVoiceLang,
-          rate: ttsRate,
-          segments,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok || !data?.audioBase64) {
-        throw new Error(data?.error || 'Không thể tạo audio TTS từ server.');
-      }
-
-      const safeFileName = `${lessonTitle.replace(/[^a-zA-Z0-9-_]+/g, '_').slice(0, 32) || 'english_reels'}.mp3`;
-      const audioFile = base64ToMp3File(data.audioBase64, safeFileName);
-      const proj = reelCardsToLessonProject(cards, {
-        title: lessonTitle,
-        theme: selectedTheme,
-        compositionId: sceneJsonOverride ? undefined : selectedComposition,
-        cardDurationsSec: Array.isArray(data.segmentDurations) ? data.segmentDurations : undefined,
-        audioFileName: safeFileName,
-        sceneJsonOverride,
-      });
-      onSendToStudio(proj, audioFile);
+      const bundled = await synthesizeLessonAudioBundle();
+      onSendToStudio(bundled.project, bundled.audioFile);
     } catch (err) {
       setStudioError(err instanceof Error ? err.message : 'Lỗi khi tạo Audio TTS.');
     } finally {
@@ -559,17 +907,34 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
             </div>
 
             <div>
-              <div className="flex items-center justify-between mb-1">
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
                 <label className="text-[11px] font-semibold text-slate-700">
                   Nội dung đã lọc sạch (hoặc dán văn bản bài đọc / từ vựng / câu hỏi)
                 </label>
-                <button
-                  type="button"
-                  onClick={handleQuickRuleExtract}
-                  className="text-[11px] font-semibold text-indigo-600 hover:text-indigo-700"
-                >
-                  Tách thẻ nhanh không cần AI →
-                </button>
+                <div className="flex items-center gap-3">
+                  {hasGeminiKey && (
+                    <button
+                      type="button"
+                      disabled={isGeneratingAiCards}
+                      onClick={() => void handleServerAiGenerateCards()}
+                      className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700 hover:text-emerald-800 disabled:opacity-50"
+                    >
+                      {isGeneratingAiCards ? (
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                      ) : (
+                        <Sparkles className="w-3 h-3" />
+                      )}
+                      <span>{isGeneratingAiCards ? 'AI đang soạn bài...' : 'AI Server soạn Thẻ chuẩn'}</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={handleQuickRuleExtract}
+                    className="text-[11px] font-semibold text-indigo-600 hover:text-indigo-700"
+                  >
+                    Tách thẻ nhanh không cần AI →
+                  </button>
+                </div>
               </div>
               <textarea
                 rows={5}
@@ -851,7 +1216,7 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
                   {activeCard.type === 'quiz' && (
                     <div className="pt-2 border-t border-slate-200 space-y-2">
                       <label className="block text-[11px] font-semibold text-amber-800">
-                        Lựa chọn đáp án Quiz (mỗi dòng 1 đáp án)
+                        Lựa chọn đáp án Quiz &amp; Đếm ngược suy nghĩ
                       </label>
                       <textarea
                         rows={3}
@@ -863,7 +1228,7 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
                         }
                         className="w-full p-2 text-xs bg-white border border-slate-200 rounded-lg"
                       />
-                      <div className="grid grid-cols-3 gap-2">
+                      <div className="grid grid-cols-4 gap-2">
                         <div>
                           <label className="block text-[10px] font-semibold text-slate-600 mb-1">
                             Đáp án đúng
@@ -877,14 +1242,31 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
                           >
                             {(activeCard.options || ['True', 'False']).map((opt, oIdx) => (
                               <option key={oIdx} value={oIdx}>
-                                {String.fromCharCode(65 + oIdx)}. {opt.slice(0, 18)}
+                                {String.fromCharCode(65 + oIdx)}. {opt.slice(0, 14)}
                               </option>
                             ))}
                           </select>
                         </div>
+                        <div>
+                          <label className="block text-[10px] font-semibold text-slate-600 mb-1">
+                            Suy nghĩ (giây)
+                          </label>
+                          <input
+                            type="number"
+                            min={0}
+                            max={10}
+                            value={activeCard.thinkSec ?? 5}
+                            onChange={(e) =>
+                              updateCard(safeActiveIdx, {
+                                thinkSec: Math.max(0, Math.min(10, Number(e.target.value) || 0)),
+                              })
+                            }
+                            className="w-full px-2 py-1 text-xs bg-white border border-slate-200 rounded-lg tabular-nums"
+                          />
+                        </div>
                         <div className="col-span-2">
                           <label className="block text-[10px] font-semibold text-slate-600 mb-1">
-                            Giải thích đáp án
+                            Giải thích đáp án (hiển thị)
                           </label>
                           <input
                             type="text"
@@ -896,119 +1278,333 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
                           />
                         </div>
                       </div>
+                      <div>
+                        <label className="block text-[10px] font-semibold text-slate-600 mb-1">
+                          Lời đọc công bố đáp án sau {activeCard.thinkSec ?? 5}s (tiếng Anh TTS)
+                        </label>
+                        <input
+                          type="text"
+                          value={activeCard.ttsAnswerText || ''}
+                          onChange={(e) =>
+                            updateCard(safeActiveIdx, { ttsAnswerText: e.target.value })
+                          }
+                          placeholder="Time is up! The correct answer is..."
+                          className="w-full px-2 py-1 text-xs bg-white border border-slate-200 rounded-lg"
+                        />
+                      </div>
                     </div>
                   )}
+
+                  {/* UI Component Customizer per Card */}
+                  <div className="pt-2 border-t border-slate-200 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <label className="text-[11px] font-semibold text-indigo-800">
+                        UI Component minh họa trên thẻ này
+                      </label>
+                      {activeCard.visual?.variant && (
+                        <button
+                          type="button"
+                          onClick={() => updateCard(safeActiveIdx, { visual: undefined })}
+                          className="text-[10px] text-slate-500 hover:text-indigo-600"
+                        >
+                          Đặt lại tự động
+                        </button>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-[10px] font-semibold text-slate-600 mb-1">
+                          Mẫu Component (Bootstrap / CSS / Kho)
+                        </label>
+                        <select
+                          value={activeCard.visual?.variant || ''}
+                          onChange={(e) =>
+                            updateCardVisual(safeActiveIdx, {
+                              variant: (e.target.value || undefined) as IllustrationVariant | undefined,
+                            })
+                          }
+                          className="w-full px-2 py-1 text-xs bg-white border border-slate-200 rounded-lg"
+                        >
+                          <option value="">Tự động theo ngữ cảnh</option>
+                          {vectorCatalog.map((item) => (
+                            <option key={item.variant} value={item.variant}>
+                              {item.label} ({item.variant})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-semibold text-slate-600 mb-1">
+                          Icon minh họa
+                        </label>
+                        <select
+                          value={activeCard.visual?.sceneIcon || ''}
+                          onChange={(e) =>
+                            updateCardVisual(safeActiveIdx, {
+                              sceneIcon: (e.target.value || undefined) as IllustrationSceneIcon | undefined,
+                            })
+                          }
+                          className="w-full px-2 py-1 text-xs bg-white border border-slate-200 rounded-lg"
+                        >
+                          <option value="">Tự chọn Icon</option>
+                          {ALL_SCENE_ICONS.map((ic) => (
+                            <option key={ic} value={ic}>
+                              {ic}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <input
+                        type="text"
+                        value={activeCard.visual?.title || ''}
+                        onChange={(e) => updateCardVisual(safeActiveIdx, { title: e.target.value })}
+                        placeholder="Tiêu đề trong Component..."
+                        className="w-full px-2 py-1 text-xs bg-white border border-slate-200 rounded-lg"
+                      />
+                      <input
+                        type="text"
+                        value={(activeCard.visual?.labels || []).join(', ')}
+                        onChange={(e) =>
+                          updateCardVisual(safeActiveIdx, {
+                            labels: e.target.value
+                              .split(',')
+                              .map((s) => s.trim())
+                              .filter(Boolean),
+                          })
+                        }
+                        placeholder="Các nhãn / bước (phẩy cách)..."
+                        className="w-full px-2 py-1 text-xs bg-white border border-slate-200 rounded-lg"
+                      />
+                    </div>
+                  </div>
                 </div>
               )}
             </div>
           </section>
         </div>
 
-        {/* Right: 9:16 Live Card Preview, Free TTS & Export to KineticSub Studio */}
-        <div className="lg:col-span-5 bg-white border border-slate-200 rounded-xl p-4 space-y-4 sticky top-4">
-          <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-slate-100">
-            <div className="flex items-center gap-2 text-xs font-bold text-slate-900">
-              <BookOpen className="w-4 h-4 text-indigo-600" />
-              <span>Xem trước Thẻ {safeActiveIdx + 1}/{cards.length}</span>
-            </div>
-            <div className="flex items-center gap-1.5">
+        {/* Right: 9:16 Live Video Player, TTS Audio & Direct MP4 Export */}
+        <div className="lg:col-span-5 bg-white border border-slate-200 rounded-xl p-4 space-y-3.5 sticky top-4">
+          {generatedAudioUrl && (
+            <audio
+              ref={lessonAudioRef}
+              src={generatedAudioUrl}
+              onEnded={() => setIsVideoPlaying(false)}
+            />
+          )}
+
+          {/* Mode Toggle: Video 9:16 Live Canvas vs Card Step View */}
+          <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-slate-100">
+            <div className="inline-flex rounded-lg bg-slate-100 p-0.5 border border-slate-200">
               <button
                 type="button"
-                disabled={safeActiveIdx === 0}
-                onClick={() => setActiveCardIdx((i) => Math.max(0, i - 1))}
-                className="px-2 py-1 text-xs font-medium bg-slate-100 rounded hover:bg-slate-200 disabled:opacity-40"
+                onClick={() => setPreviewViewMode('video')}
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold rounded-md transition-colors ${
+                  previewViewMode === 'video'
+                    ? 'bg-white text-indigo-700 shadow-xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
               >
-                ←
+                <Film className="w-3.5 h-3.5" />
+                <span>Video 9:16 Live</span>
               </button>
               <button
                 type="button"
-                disabled={safeActiveIdx >= cards.length - 1}
-                onClick={() => setActiveCardIdx((i) => Math.min(cards.length - 1, i + 1))}
-                className="px-2 py-1 text-xs font-medium bg-slate-100 rounded hover:bg-slate-200 disabled:opacity-40"
+                onClick={() => {
+                  setIsVideoPlaying(false);
+                  setPreviewViewMode('cards');
+                }}
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold rounded-md transition-colors ${
+                  previewViewMode === 'cards'
+                    ? 'bg-white text-indigo-700 shadow-xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
               >
-                →
+                <BookOpen className="w-3.5 h-3.5" />
+                <span>Xem từng Thẻ ({safeActiveIdx + 1}/{cards.length})</span>
               </button>
             </div>
-          </div>
 
-          {/* 9:16 Card Mockup Stage */}
-          {activeCard && (
-            <div
-              className="mx-auto w-full max-w-[300px] aspect-[9/16] rounded-[24px] p-5 flex flex-col justify-between border border-slate-200 shadow-sm"
-              style={{
-                background: `linear-gradient(180deg, ${CANVAS_THEMES[selectedTheme]?.bgTop || '#F5F3FF'} 0%, ${CANVAS_THEMES[selectedTheme]?.bgBottom || '#FFF5EB'} 100%)`,
-                color: CANVAS_THEMES[selectedTheme]?.isDark ? '#F8FAFC' : '#0F172A',
-              }}
-            >
-              <div className="flex justify-center pt-2">
-                <span className="px-3 py-1 text-[11px] font-bold tracking-wide bg-indigo-100 text-indigo-800 rounded-lg">
-                  {activeCard.badge || activeCard.type.toUpperCase()}
-                </span>
-              </div>
-
-              <div className="bg-white text-slate-900 rounded-2xl p-4 shadow-sm border border-slate-200/80 space-y-2.5 text-center">
-                {activeCard.type === 'vocab' && activeCard.title !== activeCard.content && (
-                  <div className="text-base font-extrabold text-indigo-700">{activeCard.title}</div>
-                )}
-                {activeCard.phonetic && (
-                  <div className="text-xs font-mono text-slate-500">{activeCard.phonetic}</div>
-                )}
-                <div className="text-sm font-bold leading-snug text-slate-900">
-                  {activeCard.content}
-                </div>
-                {activeCard.options && activeCard.options.length > 0 && (
-                  <div className="space-y-1.5 pt-1 text-left">
-                    {activeCard.options.map((opt, idx) => {
-                      const isCorrect = idx === (activeCard.answerIndex ?? 0);
-                      return (
-                        <div
-                          key={idx}
-                          className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border flex items-center justify-between ${
-                            isCorrect
-                              ? 'bg-emerald-50 border-emerald-300 text-emerald-900'
-                              : 'bg-slate-50 border-slate-200 text-slate-700'
-                          }`}
-                        >
-                          <span>
-                            {String.fromCharCode(65 + idx)}. {opt}
-                          </span>
-                          {isCorrect && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-                {activeCard.translation && (
-                  <div className="text-xs text-slate-600 pt-1 border-t border-slate-100">
-                    {activeCard.translation}
-                  </div>
-                )}
-                {activeCard.explanation && (
-                  <div className="text-[11px] text-emerald-700 font-medium">
-                    {activeCard.explanation}
-                  </div>
-                )}
-              </div>
-
-              <div className="flex flex-col items-center gap-2 pb-1">
+            {previewViewMode === 'cards' && (
+              <div className="flex items-center gap-1.5">
                 <button
                   type="button"
-                  disabled={isPreviewingVoice}
-                  onClick={() => void handlePreviewSingleCardVoice()}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-800 bg-white/95 border border-slate-200 rounded-lg hover:bg-white shadow-xs"
+                  disabled={safeActiveIdx === 0}
+                  onClick={() => setActiveCardIdx((i) => Math.max(0, i - 1))}
+                  className="px-2 py-1 text-xs font-medium bg-slate-100 rounded hover:bg-slate-200 disabled:opacity-40"
                 >
-                  {isPreviewingVoice ? (
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  ) : (
-                    <Volume2 className="w-3.5 h-3.5 text-indigo-600" />
-                  )}
-                  <span>Nghe thử thẻ này</span>
+                  ←
                 </button>
-                {previewAudioUrl && (
-                  <audio controls autoPlay src={previewAudioUrl} className="w-full h-8" />
+                <button
+                  type="button"
+                  disabled={safeActiveIdx >= cards.length - 1}
+                  onClick={() => setActiveCardIdx((i) => Math.min(cards.length - 1, i + 1))}
+                  className="px-2 py-1 text-xs font-medium bg-slate-100 rounded hover:bg-slate-200 disabled:opacity-40"
+                >
+                  →
+                </button>
+              </div>
+            )}
+          </div>
+
+          {previewViewMode === 'video' ? (
+            <div className="space-y-2.5">
+              <div className="relative mx-auto w-full max-w-[270px] aspect-[9/16] rounded-[24px] overflow-hidden border border-slate-200 shadow-sm bg-slate-100">
+                <canvas
+                  ref={videoCanvasRef}
+                  width={STAGE_WIDTH}
+                  height={STAGE_HEIGHT}
+                  className="w-full h-full block"
+                />
+                {isExportingVideo && (
+                  <div className="absolute inset-0 bg-slate-900/75 backdrop-blur-[2px] flex flex-col items-center justify-center text-white p-4 text-center">
+                    <p className="text-xs font-semibold mb-2">
+                      {exportStageLabel || 'Đang render MP4...'}
+                    </p>
+                    <div className="w-40 h-1.5 bg-white/25 rounded-full overflow-hidden mb-1">
+                      <div
+                        className="h-full bg-indigo-400 transition-all duration-150"
+                        style={{ width: `${Math.round(exportProgress * 100)}%` }}
+                      />
+                    </div>
+                    <span className="text-[11px] tabular-nums text-white/85 mb-3">
+                      {Math.round(exportProgress * 100)}%
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => exportAbortRef.current?.abort()}
+                      className="inline-flex items-center gap-1 px-3 py-1.5 text-[11px] font-semibold bg-rose-600 hover:bg-rose-700 rounded-lg"
+                    >
+                      <Square className="w-3 h-3 fill-current" />
+                      <span>Hủy render</span>
+                    </button>
+                  </div>
                 )}
               </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={isExportingVideo}
+                  onClick={() => setIsVideoPlaying((p) => !p)}
+                  className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-white bg-slate-900 rounded-lg hover:bg-slate-800 disabled:opacity-50"
+                >
+                  {isVideoPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
+                  <span>{isVideoPlaying ? 'Tạm dừng' : 'Xem Video'}</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={isExportingVideo}
+                  onClick={() => {
+                    setVideoTime(0);
+                    if (lessonAudioRef.current) lessonAudioRef.current.currentTime = 0;
+                    setIsVideoPlaying(true);
+                  }}
+                  title="Phát lại từ đầu"
+                  className="p-1.5 text-slate-600 hover:text-slate-900 border border-slate-200 rounded-lg"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                </button>
+                <input
+                  type="range"
+                  aria-label="Tua thời gian video preview"
+                  min={0}
+                  max={previewProject.duration}
+                  step={0.05}
+                  value={videoTime}
+                  onChange={(e) => {
+                    const nextT = Number(e.target.value);
+                    setVideoTime(nextT);
+                    if (lessonAudioRef.current) lessonAudioRef.current.currentTime = nextT;
+                  }}
+                  className="flex-1 accent-indigo-600 h-1.5"
+                />
+                <span className="text-[11px] font-mono text-slate-500 tabular-nums">
+                  {videoTime.toFixed(1)}s / {previewProject.duration.toFixed(1)}s
+                </span>
+              </div>
             </div>
+          ) : (
+            activeCard && (
+              <div
+                className="mx-auto w-full max-w-[290px] aspect-[9/16] rounded-[24px] p-5 flex flex-col justify-between border border-slate-200 shadow-sm"
+                style={{
+                  background: `linear-gradient(180deg, ${CANVAS_THEMES[selectedTheme]?.bgTop || '#F5F3FF'} 0%, ${CANVAS_THEMES[selectedTheme]?.bgBottom || '#FFF5EB'} 100%)`,
+                  color: CANVAS_THEMES[selectedTheme]?.isDark ? '#F8FAFC' : '#0F172A',
+                }}
+              >
+                <div className="flex justify-center pt-2">
+                  <span className="px-3 py-1 text-[11px] font-bold tracking-wide bg-indigo-100 text-indigo-800 rounded-lg">
+                    {activeCard.badge || activeCard.type.toUpperCase()}
+                  </span>
+                </div>
+
+                <div className="bg-white text-slate-900 rounded-2xl p-4 shadow-sm border border-slate-200/80 space-y-2.5 text-center">
+                  {activeCard.type === 'vocab' && activeCard.title !== activeCard.content && (
+                    <div className="text-base font-extrabold text-indigo-700">{activeCard.title}</div>
+                  )}
+                  {activeCard.phonetic && (
+                    <div className="text-xs font-mono text-slate-500">{activeCard.phonetic}</div>
+                  )}
+                  <div className="text-sm font-bold leading-snug text-slate-900">
+                    {activeCard.content}
+                  </div>
+                  {activeCard.options && activeCard.options.length > 0 && (
+                    <div className="space-y-1.5 pt-1 text-left">
+                      {activeCard.options.map((opt, idx) => {
+                        const isCorrect = idx === (activeCard.answerIndex ?? 0);
+                        return (
+                          <div
+                            key={idx}
+                            className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border flex items-center justify-between ${
+                              isCorrect
+                                ? 'bg-emerald-50 border-emerald-300 text-emerald-900'
+                                : 'bg-slate-50 border-slate-200 text-slate-700'
+                            }`}
+                          >
+                            <span>
+                              {String.fromCharCode(65 + idx)}. {opt}
+                            </span>
+                            {isCorrect && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {activeCard.translation && (
+                    <div className="text-xs text-slate-600 pt-1 border-t border-slate-100">
+                      {activeCard.translation}
+                    </div>
+                  )}
+                  {activeCard.explanation && (
+                    <div className="text-[11px] text-emerald-700 font-medium">
+                      {activeCard.explanation}
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex flex-col items-center gap-2 pb-1">
+                  <button
+                    type="button"
+                    disabled={isPreviewingVoice}
+                    onClick={() => void handlePreviewSingleCardVoice()}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-800 bg-white/95 border border-slate-200 rounded-lg hover:bg-white shadow-xs"
+                  >
+                    {isPreviewingVoice ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Volume2 className="w-3.5 h-3.5 text-indigo-600" />
+                    )}
+                    <span>Nghe thử thẻ này</span>
+                  </button>
+                  {previewAudioUrl && (
+                    <audio controls autoPlay src={previewAudioUrl} className="w-full h-8" />
+                  )}
+                </div>
+              </div>
+            )
           )}
 
           {/* Audio Engine & Video Output Settings */}
@@ -1016,19 +1612,24 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
             <div className="grid grid-cols-2 gap-2">
               <div>
                 <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                  API Giọng đọc miễn phí
+                  Nhà cung cấp TTS
                 </label>
                 <select
                   value={ttsProvider}
                   onChange={(e) => setTtsProvider(e.target.value)}
                   className="w-full px-2 py-1.5 text-xs bg-white border border-slate-200 rounded-lg"
                 >
-                  <option value="auto">Tự động (Edge → Google → Polly)</option>
-                  {ttsProviders.map((p) => (
-                    <option key={p.id} value={p.id} disabled={p.id === 'gemini' && !hasGeminiKey}>
-                      {p.id.toUpperCase()}
-                    </option>
-                  ))}
+                  <option value="auto">Tự động miễn phí (Edge → Google → Polly)</option>
+                  {ttsProviders.map((p) => {
+                    const disabled =
+                      (p.id === 'gemini' && !hasGeminiKey) ||
+                      (p.id === 'elevenlabs' && !hasElevenLabsKey);
+                    return (
+                      <option key={p.id} value={p.id} disabled={disabled}>
+                        {p.name}
+                      </option>
+                    );
+                  })}
                 </select>
               </div>
               <div>
@@ -1103,33 +1704,58 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
               {studioError}
             </p>
           )}
+          {exportNotice && (
+            <p className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg p-2.5 font-medium">
+              {exportNotice}
+            </p>
+          )}
 
           <div className="space-y-2">
-            <button
-              type="button"
-              disabled={isGeneratingAudio || cards.length === 0}
-              onClick={() => void handleGenerateAndSendToStudio(true)}
-              className="w-full inline-flex items-center justify-center gap-2 px-4 py-3 text-xs font-bold text-white bg-indigo-600 rounded-xl hover:bg-indigo-700 disabled:opacity-50"
-            >
-              {isGeneratingAudio ? (
-                <Loader2 className="w-4 h-4 animate-spin" />
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                disabled={isGeneratingAudio || isExportingVideo || cards.length === 0}
+                onClick={() => void handleGeneratePreviewVideoAudio()}
+                className="inline-flex items-center justify-center gap-1.5 px-3 py-2.5 text-xs font-semibold text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-xl hover:bg-indigo-100 disabled:opacity-50"
+              >
+                {isGeneratingAudio ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Volume2 className="w-3.5 h-3.5" />
+                )}
+                <span>{generatedAudioFile ? 'Tạo lại Audio & Xem' : 'Tạo Audio & Xem Video'}</span>
+              </button>
+
+              {isExportingVideo ? (
+                <button
+                  type="button"
+                  onClick={() => exportAbortRef.current?.abort()}
+                  className="inline-flex items-center justify-center gap-1.5 px-3 py-2.5 text-xs font-bold text-white bg-rose-600 rounded-xl hover:bg-rose-700"
+                >
+                  <Square className="w-3.5 h-3.5 fill-current" />
+                  <span>Hủy render</span>
+                </button>
               ) : (
-                <Sparkles className="w-4 h-4" />
+                <button
+                  type="button"
+                  disabled={isGeneratingAudio || cards.length === 0}
+                  onClick={() => void handleDirectRenderVideo()}
+                  className="inline-flex items-center justify-center gap-1.5 px-3 py-2.5 text-xs font-bold text-white bg-indigo-600 rounded-xl hover:bg-indigo-700 disabled:opacity-50"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Render &amp; Tải MP4</span>
+                </button>
               )}
-              <span>
-                {isGeneratingAudio
-                  ? 'Đang tạo Audio MP3 & đồng bộ timeline...'
-                  : 'Tạo Audio & Chuyển sang KineticSub Studio'}
-              </span>
-              <ArrowRight className="w-4 h-4" />
-            </button>
+            </div>
+
             <button
               type="button"
-              disabled={isGeneratingAudio || cards.length === 0}
+              disabled={isGeneratingAudio || isExportingVideo || cards.length === 0}
               onClick={() => void handleGenerateAndSendToStudio(false)}
-              className="w-full py-2 text-xs font-medium text-slate-600 hover:text-slate-900 bg-slate-100 rounded-lg hover:bg-slate-200"
+              className="w-full inline-flex items-center justify-center gap-1.5 py-2 text-xs font-medium text-slate-700 hover:text-slate-900 bg-slate-100 rounded-lg hover:bg-slate-200"
             >
-              Chuyển nhanh thẻ sang Studio (tự thêm Audio sau)
+              <span>Chuyển sang KineticSub Studio (sửa timeline chi tiết)</span>
+              <ArrowRight className="w-3.5 h-3.5" />
             </button>
           </div>
         </div>

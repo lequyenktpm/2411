@@ -1,3 +1,5 @@
+import { normalizeCustomComponent } from './customComponentStore';
+import type { VectorPrimitive } from './customComponentTypes';
 import { matchIllustrationForCue } from './illustrationLayouts';
 import { resolveProjectOverlaps } from './layoutSolver';
 import { parseTimeToken } from './transcriptParser';
@@ -123,6 +125,7 @@ export interface FlexibleAiElement {
   highlightWord?: string;
   dynamicScene?: DynamicSceneSpec;
   dynamic_scene?: DynamicSceneSpec;
+  customPrimitives?: VectorPrimitive[];
   // sentence_card
   subtext?: string;
   badge?: 'check' | 'cross' | 'question' | 'none';
@@ -377,6 +380,19 @@ function convertFlexibleElements(
             ? pickContextualSceneIcon(`${cueRef?.text ?? ''} ${el.text ?? el.speechText ?? ''}`, 'sparkles')
             : undefined);
 
+        const rawPrimitives = el.data?.customPrimitives ?? el.customPrimitives;
+        let normalizedPrimitives: VectorPrimitive[] | undefined;
+        if (Array.isArray(rawPrimitives) && rawPrimitives.length > 0) {
+          const norm = normalizeCustomComponent({
+            variant: mappedVariant || 'custom-inline',
+            label: el.title || el.text || 'Custom',
+            primitives: rawPrimitives,
+          });
+          if (norm && norm.primitives.length > 0) {
+            normalizedPrimitives = norm.primitives;
+          }
+        }
+
         const mergedData: IllustrationPropData | undefined =
           el.data ||
           el.nodes ||
@@ -390,7 +406,8 @@ function convertFlexibleElements(
           el.speechText ||
           resolvedDynamic ||
           resolvedIcon ||
-          el.highlightWord
+          el.highlightWord ||
+          normalizedPrimitives
             ? {
                 ...(el.data ?? {}),
                 title: el.data?.title ?? el.title,
@@ -409,6 +426,7 @@ function convertFlexibleElements(
                 sceneIcon: resolvedIcon,
                 highlightWord: el.data?.highlightWord ?? el.highlightWord,
                 dynamicScene: resolvedDynamic,
+                customPrimitives: normalizedPrimitives,
               }
             : undefined;
 

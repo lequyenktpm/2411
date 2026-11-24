@@ -70,7 +70,7 @@ Quy tắc chọn (ưu tiên từ trên xuống):
 
 Cách "tạo phong cách mới" AN TOÀN (không được linh tinh):
 - KHÔNG invent type, variant, hay toạ độ ngoài 5 vùng.
-- Được phép ghép linh hoạt kho 34+ vector variants, 42 \`sceneIcon\`, hoặc schema \`"dynamic_scene"\` để minh họa khớp từng câu nói.
+- Được phép ghép linh hoạt kho 50+ vector & Bootstrap 5 / Modern CSS variants, 42 \`sceneIcon\`, schema \`"dynamic_scene"\`, hoặc tự vẽ component mới qua \`"customPrimitives"\` để minh họa khớp từng câu nói.
 - 1 bài = 1 signature illustration chủ đạo hoặc mỗi câu 1 cảnh đúng ngữ cảnh. Không chồng 2 sơ đồ khác nhau trong cùng 1 mốc giờ.
 
 Sau khi chọn:
@@ -81,7 +81,7 @@ Sau khi chọn:
   } else {
     styleGuide = `PHONG CÁCH TIKTOK GIẢNG DẠY (@englishpracticing168)${compMeta ? ` — KIỂU PHỐI: ${compMeta.name}` : ''}:
 - Đặt "theme": "${options?.theme ?? compMeta?.recommendedTheme ?? 'pastel-sunrise'}" (hoặc "soft-lavender" / "mint-breeze" / "warm-paper").
-- Kết hợp thanh đối chiếu trên cùng ("comparison_strip"), nhãn ngữ cảnh ("topic_pill"), hình minh họa/sơ đồ sát ngữ cảnh (${compMeta ? `ưu tiên "${compMeta.signatureVariant}"` : 'đa dạng từ kho 34+ vector hoặc dynamic_scene'}), thẻ câu nổi bật ("sentence_card"), bậc thang 3D ("staircase_3d"), và thanh sắc thái ("tone_meter").`;
+- Kết hợp thanh đối chiếu trên cùng ("comparison_strip"), nhãn ngữ cảnh ("topic_pill"), hình minh họa/sơ đồ sát ngữ cảnh (${compMeta ? `ưu tiên "${compMeta.signatureVariant}"` : 'đa dạng từ kho 50+ vector & Bootstrap 5 / Modern CSS hoặc dynamic_scene'}), thẻ câu nổi bật ("sentence_card"), bậc thang 3D ("staircase_3d"), và thanh sắc thái ("tone_meter").`;
   }
 
   const transcriptLines = cues
@@ -124,12 +124,12 @@ Khung hình rộng 1080 × cao 1920. Mọi phần tử chỉ được đặt đ�
 2. \`topic_pill\`:
    \`{ "type": "topic_pill", "start": "...", "end": "...", "y": 335, "text": "...", "bgColor": "#DDD6FE", "textColor": "#4338CA" }\`
 3. \`illustration\` (CHỌN \`variant\` SÁT NGHĨA VỚI CÂU THOẠI TẠI MỐC ĐÓ, không chọn bừa):
-   Kho 34+ vector & infographic chuẩn @englishpracticing168:
+   Kho 50+ vector, Bootstrap 5 & Modern CSS chuẩn @englishpracticing168:
 ${variantsListText}
    + \`"dynamic-scene"\`: Bố cục tự ghép bất kỳ chủ đề nào từ 42 icon + bảng so sánh / công thức / thẻ 3 cột.
    Kho 42 \`sceneIcon\` cho \`phrase-icon-split\` và \`dynamic-scene\`:
    ${sceneIconsListText}
-   Ví dụ: \`{ "type": "illustration", "variant": "cafe-water", "start": "...", "end": "...", "y": 635 }\`
+   Ví dụ: \`{ "type": "illustration", "variant": "css-sticky-note", "start": "...", "end": "...", "y": 635, "title": "QUICK RULE", "subtitle": "Could I + V?", "labels": ["Polite", "Natural"] }\`
    Hoặc \`dynamic_scene\` tự ghép cho chủ đề mới:
    \`{ "type": "dynamic_scene", "start": "...", "end": "...", "y": 635, "dynamicScene": { "layout": "split-compare"|"hero-icon-formula"|"triple-card-grid", "badgeText": "UPGRADE", "connector": "arrow"|"vs", "headline": "...", "motifs": [{ "icon": "airplane", "label": "Boarding pass", "sublabel": "Gate B4", "accent": "#2563EB", "status": "check" }] } }\`
 4. \`sentence_card\`:
@@ -142,6 +142,38 @@ ${variantsListText}
 7. \`tone_meter\`: Thanh trượt sắc thái:
    \`{ "type": "tone_meter", "start": "...", "end": "...", "y": 1245, "title": "TONE", "leftLabel": "rude", "rightLabel": "polite", "valueStart": 0.5, "valueEnd": 0.14 }\`
 8. \`card_3d\` / \`pill_3d\` / \`cube_3d\`: Khối 3D nổi có chữ (\`text\`, \`fill\`, \`textColor\`, \`depth\`).
+
+# CÁCH TỰ TÙY BIẾN & THIẾT KẾ COMPONENT MỚI (BOOTSTRAP 5 / MODERN CSS + \`customPrimitives\`)
+Bạn có **2 cách tùy biến component** thay vì xuất thẻ lặp lại nhàm chán:
+1. **Tùy biến tham số trực tiếp trên mọi \`illustration\` (\`bs-*\`, \`css-*\`, vector)**:
+   Truyền \`title\`, \`subtitle\`, \`labels\` (mảng 2–4 nhãn), \`formula\`, \`value\` (0..1), \`highlightWord\`, \`sceneIcon\` (từ kho 42 icon) ngay trên element \`illustration\` để đổi nội dung bên trong Bootstrap card / Sticky Note / Magnifying Glass / Badge Cluster / Modal Quiz.
+2. **Tự thiết kế component UI mới hoàn toàn qua \`customPrimitives[]\`**:
+   Đặt trên element: \`{ "type": "illustration", "variant": "custom-ui", "start": "...", "end": "...", "y": 635, "customPrimitives": [...] }\`.
+   - Hệ tọa độ tương đối quanh tâm \`(0, 0)\`, vùng an toàn: \`x: -380..380\`, \`y: -145..145\`.
+   - 9 hình cơ bản được engine vẽ sắc nét lên Canvas:
+     + \`{ "shape": "rect", "x": -340, "y": -130, "w": 680, "h": 260, "radius": 24, "fill": "#FFFFFF", "stroke": "#E2E8F0", "lineWidth": 2, "shadow": true }\`
+     + \`{ "shape": "pill", "x": -120, "y": -108, "w": 240, "h": 42, "fill": "#EFF6FF", "stroke": "#93C5FD" }\`
+     + \`{ "shape": "circle", "x": -220, "y": 15, "r": 46, "fill": "#FEF3C7", "stroke": "#F59E0B" }\`
+     + \`{ "shape": "ellipse", "x": 0, "y": 95, "rx": 160, "ry": 20, "fill": "rgba(15,23,42,0.08)", "opacity": 0.8 }\`
+     + \`{ "shape": "line", "x": -300, "y": -42, "x2": 300, "y2": -42, "stroke": "#E2E8F0", "lineWidth": 2 }\`
+     + \`{ "shape": "arrow", "x": -60, "y": 25, "x2": 60, "y2": 25, "stroke": "#2563EB", "lineWidth": 5 }\`
+     + \`{ "shape": "polygon", "points": [{"x":0,"y":-40},{"x":40,"y":20},{"x":-40,"y":20}], "fill": "#4F46E5" }\`
+     + \`{ "shape": "icon", "icon": "sparkles", "x": -220, "y": 15 }\` (chọn \`icon\` trong kho 42 \`sceneIcon\`)
+     + \`{ "shape": "text", "x": 40, "y": -4, "text": "PRO TIP", "fill": "#0F172A", "fontSize": 28, "fontWeight": 800, "align": "center" }\`
+   - **Mẫu công thức Bootstrap 5 & Modern CSS chuẩn đẹp (tham khảo phối màu \`#2563EB\`, \`#4F46E5\`, \`#16A34A\`, \`#D97706\`, \`#E11D48\`)**:
+     + *Left-Border Callout Card*: card trắng \`shadow: true\` + thanh nhấn dọc \`w: 12\` bên trái \`x: -334\` + badge \`pill\` + \`text\` tiêu đề đậm.
+     + *Bootstrap Colored Header + Divider*: \`rect\` nền trắng + \`rect\` header màu phía trên + \`line\` ngăn cách + 2–3 \`pill\` bên dưới.
+     + *Modern CSS Sticky Note*: nền vàng pastel \`#FEF3C7\` viền \`#F59E0B\` + đinh ghim \`circle\` đỏ \`#EF4444\` phía trên + chữ viết tay nổi bật.
+     + *Glassmorphism / Bento 2x2*: các ô \`rect\` dùng \`fill: "rgba(255,255,255,0.86)"\` xếp lưới cân đối + \`icon\` mỗi ô.
+     + *macOS Browser / Badge Cluster*: 3 chấm \`circle\` đỏ-vàng-xanh ở góc trên trái + cụm \`pill\` phân loại màu khác nhau.
+
+# LUẬT CHỐNG ĐỤNG HÀNG (CHỌN COMPONENT ĐA DẠNG MỖI VIDEO)
+1. **KHÔNG lặp nguyên mẫu**: Tuyệt đối KHÔNG dùng trùng một \`variant\` hoặc cùng \`dynamicScene.layout\` cho 2 cue liên tiếp nhau.
+2. **Phối hợp ít nhất 3–4 họ thị giác trong cùng 1 video**:
+   - Họ cảnh đời sống (\`cafe-water\`, \`hotel-desk\`, \`airport-travel\`, \`shopping-price\`, \`restaurant-order\`, \`doctor-health\`...)
+   - Họ UI Bootstrap 5 & Modern CSS (\`css-sticky-note\`, \`bs-badge-cluster\`, \`css-magnifying-word\`, \`bs-modal-quiz\`, \`bs-card-header\`, \`bs-pricing-tier\`, \`css-bento-stats\`, \`css-toggle-switch\`, \`css-chat-thread\`...)
+   - Họ sơ đồ / 3D / \`dynamic_scene\` (\`staircase_3d\`, \`word_stack\`, \`phrase-icon-split\`, \`split-compare\`, \`triple-card-grid\`)
+   - Họ tự thiết kế \`customPrimitives\` (nên tạo ít nhất 1–2 element dùng \`customPrimitives\` may đo riêng cho từ khóa/ngữ cảnh bài học để video không giống khuôn đúc sẵn).
 
 # QUY TẮC DÀN CẢNH TỰ ĐỘNG BẮT BUỘC
 1. **Phủ kín 100% thời lượng**: Từ \`${totalStart}\` đến \`${totalEnd}\`, luôn có ít nhất 1–2 thành phần thị giác đang hiển thị phù hợp với nội dung đang nói (không để màn hình trống > 1.5s).

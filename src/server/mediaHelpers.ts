@@ -12,9 +12,94 @@ export interface WhisperTranscribeResult {
   text: string;
   segments: Array<{ start: number; end: number; text: string }>;
   words: WhisperWordChunk[];
+  modelUsed?: string;
+  backendUsed?: string;
 }
 
 const whisperPipelines = new Map<string, Promise<any>>();
+let cachedFasterWhisperAvailable: boolean | null = null;
+
+export async function isFasterWhisperPythonAvailable(): Promise<boolean> {
+  if (cachedFasterWhisperAvailable !== null) return cachedFasterWhisperAvailable;
+  const check = async (pyCmd: string): Promise<boolean> =>
+    new Promise((resolve) => {
+      const proc = spawn(pyCmd, ['-c', 'import faster_whisper'], { shell: false });
+      proc.on('error', () => resolve(false));
+      proc.on('close', (code) => resolve(code === 0));
+    });
+  cachedFasterWhisperAvailable = (await check('python3')) || (await check('python'));
+  return cachedFasterWhisperAvailable;
+}
+
+async function runFasterWhisperPython(
+  wavPath: string,
+  modelName: string,
+  sourceLang?: string,
+  wordLevel?: boolean,
+): Promise<WhisperTranscribeResult | null> {
+  if (!(await isFasterWhisperPythonAvailable())) return null;
+  const whisperLang = mapLanguageToIsoCode(sourceLang || 'auto');
+  const script = `
+import json, sys
+from faster_whisper import WhisperModel
+wav_path, model_name, lang, word_ts = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4] == "1"
+model = WhisperModel(model_name, device="auto", compute_type="int8")
+kwargs = {"word_timestamps": word_ts, "vad_filter": True}
+if lang:
+    kwargs["language"] = lang
+segs_gen, info = model.transcribe(wav_path, **kwargs)
+segs = []
+words = []
+texts = []
+for s in segs_gen:
+    txt = (s.text or "").strip()
+    if txt:
+        segs.append({"start": round(float(s.start), 3), "end": round(float(s.end), 3), "text": txt})
+        texts.append(txt)
+    if word_ts and getattr(s, "words", None):
+        for w in s.words:
+            wt = (w.word or "").strip()
+            if wt:
+                words.append({"text": wt, "start": round(float(w.start), 3), "end": round(float(w.end), 3)})
+print(json.dumps({"text": " ".join(texts), "segments": segs, "words": words}, ensure_ascii=False))
+`;
+
+  const runPy = (pyCmd: string) =>
+    new Promise<string>((resolve, reject) => {
+      const proc = spawn(
+        pyCmd,
+        ['-c', script, wavPath, modelName, whisperLang || '', wordLevel ? '1' : '0'],
+        { shell: false },
+      );
+      let stdout = '';
+      let stderr = '';
+      proc.stdout?.on('data', (c: Buffer) => {
+        stdout += c.toString('utf8');
+      });
+      proc.stderr?.on('data', (c: Buffer) => {
+        stderr += c.toString('utf8');
+      });
+      proc.on('error', reject);
+      proc.on('close', (code) => {
+        if (code === 0) resolve(stdout);
+        else reject(new Error(stderr.slice(-500) || `python exit ${code}`));
+      });
+    });
+
+  try {
+    const out = await runPy('python3').catch(() => runPy('python'));
+    const parsed = JSON.parse(out.trim()) as WhisperTranscribeResult;
+    return {
+      text: parsed.text || '',
+      segments: Array.isArray(parsed.segments) ? parsed.segments : [],
+      words: Array.isArray(parsed.words) ? parsed.words : [],
+      modelUsed: modelName,
+      backendUsed: 'faster-whisper',
+    };
+  } catch {
+    return null;
+  }
+}
 
 export function parseWavToFloat32Mono16k(wavBuffer: Buffer): Float32Array {
   if (wavBuffer.length < 44 || wavBuffer.toString('ascii', 0, 4) !== 'RIFF') {
@@ -45,6 +130,19 @@ export function parseWavToFloat32Mono16k(wavBuffer: Buffer): Float32Array {
     floatData[i] = wavBuffer.readInt16LE(dataOffset + i * 2) / 32768.0;
   }
   return floatData;
+}
+
+function mapLanguageToIsoCode(lang: string): string | undefined {
+  const low = (lang || '').trim().toLowerCase();
+  if (!low || low === 'auto') return undefined;
+  if (low.startsWith('en')) return 'en';
+  if (low.startsWith('vi') || low.includes('tiếng việt')) return 'vi';
+  if (low.startsWith('ja') || low.includes('japan')) return 'ja';
+  if (low.startsWith('zh') || low.includes('chin')) return 'zh';
+  if (low.startsWith('ko') || low.includes('kor')) return 'ko';
+  if (low.startsWith('fr')) return 'fr';
+  if (low.startsWith('es') || low.includes('span')) return 'es';
+  return undefined;
 }
 
 function mapLanguageToWhisper(lang: string): string | undefined {
@@ -79,25 +177,79 @@ async function getWhisperPipeline(modelId: string) {
   }
 }
 
+function resolveOnnxModelCandidates(requestedModel: string): string[] {
+  const clean = (requestedModel || '').trim();
+  const mapped =
+    clean === 'large-v3-turbo' || clean === 'whisper-large-v3-turbo'
+      ? 'onnx-community/whisper-large-v3-turbo'
+      : clean === 'small'
+        ? 'Xenova/whisper-small'
+        : clean === 'base'
+          ? 'Xenova/whisper-base'
+          : clean === 'tiny'
+            ? 'Xenova/whisper-tiny'
+            : clean || 'onnx-community/whisper-large-v3-turbo';
+
+  const candidates = [mapped];
+  if (mapped !== 'Xenova/whisper-small') candidates.push('Xenova/whisper-small');
+  if (mapped !== 'Xenova/whisper-tiny') candidates.push('Xenova/whisper-tiny');
+  return candidates;
+}
+
 export async function runLocalWhisperOnWav(
   wavPath: string,
   options?: {
     sourceLang?: string;
     modelId?: string;
     wordLevel?: boolean;
+    preferFasterWhisper?: boolean;
   },
 ): Promise<WhisperTranscribeResult> {
+  const requestedModel =
+    options?.modelId?.trim() ||
+    process.env.WHISPER_MODEL?.trim() ||
+    'large-v3-turbo';
+
+  // 1. Try native faster-whisper Python library if installed on the machine
+  if (options?.preferFasterWhisper !== false) {
+    const fwModel = requestedModel
+      .replace(/^onnx-community\/whisper-/i, '')
+      .replace(/^Xenova\/whisper-/i, '');
+    const fwRes = await runFasterWhisperPython(
+      wavPath,
+      fwModel || 'large-v3-turbo',
+      options?.sourceLang,
+      options?.wordLevel,
+    );
+    if (fwRes && (fwRes.segments.length > 0 || fwRes.text)) {
+      return fwRes;
+    }
+  }
+
+  // 2. Built-in zero-dependency ONNX Whisper via @huggingface/transformers (works everywhere)
   const wavBuf = await fs.promises.readFile(wavPath);
   const audioFloat = parseWavToFloat32Mono16k(wavBuf);
   if (audioFloat.length < 160) {
-    return { text: '', segments: [], words: [] };
+    return { text: '', segments: [], words: [], modelUsed: requestedModel, backendUsed: 'whisper-onnx' };
   }
 
-  const modelId =
-    options?.modelId?.trim() ||
-    process.env.WHISPER_MODEL?.trim() ||
-    'Xenova/whisper-tiny';
-  const transcriber = await getWhisperPipeline(modelId);
+  const candidates = resolveOnnxModelCandidates(requestedModel);
+  let transcriber: any = null;
+  let modelUsed = candidates[0];
+  let lastLoadErr: unknown = null;
+
+  for (const candidate of candidates) {
+    try {
+      transcriber = await getWhisperPipeline(candidate);
+      modelUsed = candidate;
+      break;
+    } catch (err) {
+      lastLoadErr = err;
+    }
+  }
+  if (!transcriber) {
+    throw lastLoadErr instanceof Error ? lastLoadErr : new Error('Không thể tải mô hình Whisper local.');
+  }
 
   const whisperLang = mapLanguageToWhisper(options?.sourceLang || 'auto');
   const result = await transcriber(audioFloat, {
@@ -162,6 +314,8 @@ export async function runLocalWhisperOnWav(
     text: String(result?.text || segments.map((s) => s.text).join(' ')).trim(),
     segments,
     words: rawWords,
+    modelUsed,
+    backendUsed: 'faster-whisper-built-in (ONNX)',
   };
 }
 

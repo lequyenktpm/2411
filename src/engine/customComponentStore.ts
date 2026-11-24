@@ -343,31 +343,43 @@ export function buildVectorComponentAiPrompt(
   options?: {
     category?: VectorCategory;
     availableIcons?: string[];
+    baseVariant?: string;
+    baseLabel?: string;
+    baseDescription?: string;
   },
 ): string {
   const iconsList =
     options?.availableIcons?.join(', ') ||
     'tv, eye, watch, listen, walk, phone, airplane, luggage, menu, cup, shopping-bag, price-tag, stethoscope, sun, rain, umbrella, snowflake, book, pencil, graduation, laptop, calendar, briefcase, clock, car, bus, home, dumbbell, music, mic, camera, heart, sparkles, brain, lightning, scale, gift, wallet, map-pin, globe, handshake, chat';
 
+  const baseSection = options?.baseVariant
+    ? [
+        '',
+        '# COMPONENT NỀN TẢNG CẦN TÙY BIẾN / NÂNG CẤP TỪ KHO CÓ SẴN',
+        `- Dựa trên mẫu có sẵn: \`${options.baseVariant}\`${options.baseLabel ? ` (${options.baseLabel})` : ''}${options.baseDescription ? ` — ${options.baseDescription}` : ''}`,
+        `- Hãy giữ tinh thần bố cục đẹp (Bootstrap 5 / Modern CSS / Thẻ học @englishpracticing168) của mẫu "${options.baseVariant}" nhưng tùy biến màu sắc, bố cục, icon và chữ tiếng Anh bên trong cho khớp đúng ý tưởng mới (và đặt mã \`"variant"\` mới dạng \`custom-...\`, KHÔNG ghi đè trùng tên trừ khi muốn sửa trực tiếp mẫu gốc).`,
+      ].join('\n')
+    : '';
+
   return `# VAI TRÒ
-Bạn là Chuyên gia thiết kế minh họa Vector 2D theo phong cách thẻ học tiếng Anh hiện đại @englishpracticing168 (màu pastel tươi sáng, khối bo tròn rõ nét, biểu tượng trực quan, dễ đọc trên video dọc 9:16).
+Bạn là Chuyên gia thiết kế UI & Minh họa Vector 2D theo phong cách Bootstrap 5 / Modern CSS & thẻ học tiếng Anh hiện đại @englishpracticing168 (màu pastel/tươi sáng, khối bo tròn rõ nét, biểu tượng trực quan, dễ đọc trên video dọc 9:16).
 
 # NHIỆM VỤ
 Hãy vẽ component minh họa vector cho ý tưởng: **"${conceptIdea.trim()}"**
-(Nhóm gợi ý: \`${options?.category || 'life'}\`)
+(Nhóm gợi ý: \`${options?.category || 'life'}\`)${baseSection}
 
 Trả về **DUY NHẤT 1 KHỐI JSON HỢP LỆ** (không viết thêm giải thích ngoài JSON) đúng schema dưới đây để KineticSub Studio nạp trực tiếp vào Kho Component & tự động dùng cho mọi video mới.
 
 # HỆ TOẠ ĐỘ CANVAS CỦA COMPONENT
 - Tâm component là \`(0, 0)\`.
-- Vùng vẽ an toàn: chiều ngang \`x\` từ \`-360\` đến \`360\` (rộng tối đa ~720px), chiều dọc \`y\` từ \`-155\` đến \`155\` (cao tối đa ~310px).
+- Vùng vẽ an toàn: chiều ngang \`x\` từ \`-380\` đến \`380\` (rộng tối đa ~760px), chiều dọc \`y\` từ \`-155\` đến \`155\` (cao tối đa ~310px).
 - Đối với \`rect\` / \`pill\`: \`x, y\` là **toạ độ góc trên-trái**, \`w, h\` là chiều rộng và cao.
 - Đối với \`circle\` / \`ellipse\` / \`text\` / \`icon\`: \`x, y\` là **toạ độ tâm**.
 - Đối với \`line\` / \`arrow\`: \`x, y\` là điểm đầu, \`x2, y2\` là điểm cuối.
 - Đối với \`polygon\`: \`points\` là mảng \`[[x1, y1], [x2, y2], ...]\`.
 
 # CÁC LOẠI HÌNH VẼ (\`shape\`) ĐƯỢC HỖ TRỢ
-1. \`"rect"\`: \`{ "shape": "rect", "x": -300, "y": -130, "w": 600, "h": 260, "radius": 28, "fill": "#FFFFFF", "stroke": "#E2E8F0", "lineWidth": 3, "shadow": true }\`
+1. \`"rect"\`: \`{ "shape": "rect", "x": -340, "y": -130, "w": 680, "h": 260, "radius": 28, "fill": "#FFFFFF", "stroke": "#E2E8F0", "lineWidth": 3, "shadow": true }\`
 2. \`"pill"\`: \`{ "shape": "pill", "x": -110, "y": -110, "w": 220, "h": 44, "fill": "#EEF2FF", "stroke": "#C7D2FE", "lineWidth": 2 }\`
 3. \`"circle"\`: \`{ "shape": "circle", "x": 0, "y": 0, "r": 54, "fill": "#DBEAFE", "stroke": "#2563EB", "lineWidth": 4 }\`
 4. \`"ellipse"\`: \`{ "shape": "ellipse", "x": 0, "y": 90, "rx": 180, "ry": 26, "fill": "#E2E8F0", "opacity": 0.6 }\`
@@ -377,7 +389,7 @@ Trả về **DUY NHẤT 1 KHỐI JSON HỢP LỆ** (không viết thêm giải t
 8. \`"text"\`: \`{ "shape": "text", "x": 0, "y": -88, "text": "KEY PHRASE", "fill": "#4338CA", "fontSize": 26, "fontWeight": 800, "align": "center" }\`
 
 # YÊU CẦU THẨM MỸ BẮT BUỘC
-- Luôn có ít nhất 8–16 primitives phân lớp rõ ràng: nền thẻ bo tròn có bóng (\`shadow: true\`), nhãn tiêu đề \`pill\` + \`text\`, 1–2 khối minh họa trực quan (ghép hình vector + \`icon\`), chữ ngắn rõ nghĩa, mũi tên hoặc dấu nhấn màu hài hòa (#2563EB, #16A34A, #F59E0B, #7C3AED, #DC2626).
+- Luôn có ít nhất 8–16 primitives phân lớp rõ ràng: nền thẻ bo tròn có bóng (\`shadow: true\`), nhãn tiêu đề \`pill\` + \`text\` hoặc header bar giống Bootstrap Card, 1–2 khối minh họa trực quan (ghép hình vector + \`icon\`), chữ ngắn rõ nghĩa, mũi tên hoặc dấu nhấn màu hài hòa (#2563EB, #16A34A, #F59E0B, #7C3AED, #DC2626).
 - Điền \`keywords\` (6–12 từ khóa tiếng Anh/Việt viết thường) để hệ thống tự khớp chính xác khi tạo video mới!
 
 # MẪU JSON ĐẦU RA
@@ -390,7 +402,7 @@ Trả về **DUY NHẤT 1 KHỐI JSON HỢP LỆ** (không viết thêm giải t
   "keywords": ["interview", "resume", "cv", "hire", "job", "hr", "candidate", "phỏng vấn"],
   "defaultIcon": "briefcase",
   "primitives": [
-    { "shape": "rect", "x": -330, "y": -145, "w": 660, "h": 290, "radius": 32, "fill": "#FFFFFF", "stroke": "#E2E8F0", "lineWidth": 2, "shadow": true },
+    { "shape": "rect", "x": -340, "y": -145, "w": 680, "h": 290, "radius": 32, "fill": "#FFFFFF", "stroke": "#E2E8F0", "lineWidth": 2, "shadow": true },
     { "shape": "pill", "x": -120, "y": -122, "w": 240, "h": 42, "fill": "#EEF2FF" },
     { "shape": "text", "x": 0, "y": -101, "text": "JOB INTERVIEW", "fill": "#4338CA", "fontSize": 22, "fontWeight": 800, "align": "center" },
     { "shape": "rect", "x": -280, "y": -55, "w": 240, "h": 170, "radius": 24, "fill": "#F8FAFC", "stroke": "#CBD5E1", "lineWidth": 2 },

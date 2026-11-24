@@ -349,6 +349,168 @@ export const VECTOR_COMPONENT_CATALOG: VectorComponentMeta[] = [
     keywords: /\b(wave|phonetic|ipa|vowel|consonant|silent letter)\b/i,
     defaultIcon: 'music',
   },
+
+  // ── Bootstrap 5 UI & Modern CSS Card Components ──────────────────────────
+  {
+    variant: 'bs-alert-tip',
+    category: 'grammar',
+    label: 'Bootstrap Alert Callout',
+    description: 'Thẻ cảnh báo Bootstrap với thanh viền trái, pill HEADS UP và nội dung chú ý',
+    keywords: /\b(warning|caution|alert|avoid saying|careful|watch out|common error|attention)\b/i,
+    defaultIcon: 'lightning',
+  },
+  {
+    variant: 'bs-card-header',
+    category: 'grammar',
+    label: 'Bootstrap Header Card',
+    description: 'Thẻ Bootstrap có thanh tiêu đề màu nổi, nội dung chính và footer checkmark',
+    keywords: /\b(summary|lesson card|rule|structure|template|overview|pattern)\b/i,
+    defaultIcon: 'book',
+  },
+  {
+    variant: 'bs-progress-meter',
+    category: 'vocab',
+    label: 'Bootstrap Progress Bar',
+    description: 'Thanh tiến độ sọc chuyển động kèm huy hiệu % (Fluency / Goal / Level)',
+    keywords: /\b(progress|percent|fluency|milestone|goal|level up|confidence|mastery)\b/i,
+    defaultIcon: 'sparkles',
+  },
+  {
+    variant: 'bs-toast-notify',
+    category: 'dialogue',
+    label: 'Bootstrap Toast Notification',
+    description: 'Thẻ thông báo Toast nổi kèm trạng thái verified và câu thoại gợi ý',
+    keywords: /\b(notification|toast|unlocked|new phrase|daily challenge|reminder|just now)\b/i,
+    defaultIcon: 'chat',
+  },
+  {
+    variant: 'bs-list-group',
+    category: 'vocab',
+    label: 'Bootstrap List Group',
+    description: 'Danh sách thẻ 3 dòng đánh số 1-2-3 kèm trạng thái Active & badge',
+    keywords: /\b(list|top 3|three ways|reasons|options|alternatives|checklist items)\b/i,
+    defaultIcon: 'book',
+  },
+  {
+    variant: 'bs-pricing-tier',
+    category: 'dialogue',
+    label: 'Bootstrap 2-Column Compare Tier',
+    description: 'So sánh 2 cột Basic vs Recommended chuẩn giao diện bảng giá Bootstrap',
+    keywords: /\b(basic vs|pro|recommended|tier|compare styles|textbook vs native)\b/i,
+    defaultIcon: 'scale',
+  },
+  {
+    variant: 'bs-accordion-faq',
+    category: 'grammar',
+    label: 'Bootstrap Q&A Accordion',
+    description: 'Thẻ hỏi đáp đóng/mở Q&A giải thích thắc mắc ngữ pháp nhanh',
+    keywords: /\b(faq|why do natives|frequently asked|question and answer|wonder why)\b/i,
+    defaultIcon: 'brain',
+  },
+  {
+    variant: 'bs-breadcrumb-path',
+    category: 'grammar',
+    label: 'Bootstrap Breadcrumb Path',
+    description: 'Thanh điều hướng từng chặng (Context › Pattern › Fluent)',
+    keywords: /\b(pathway|roadmap|breadcrumb|stage|journey|from beginner to)\b/i,
+    defaultIcon: 'walk',
+  },
+  {
+    variant: 'css-bento-stats',
+    category: 'vocab',
+    label: 'CSS Bento Grid 2×2',
+    description: 'Lưới 4 ô Bento hiện đại tổng hợp từ vựng, sắc thái, phát âm & ví dụ',
+    keywords: /\b(bento|dashboard|breakdown|all-in-one|four parts|key takeaways)\b/i,
+    defaultIcon: 'sparkles',
+  },
+  {
+    variant: 'css-glass-quote',
+    category: 'dialogue',
+    label: 'CSS Glassmorphism Quote',
+    description: 'Thẻ trích dẫn hiệu ứng kính mờ gradient tinh tế kèm pill tác giả',
+    keywords: /\b(quote|motto|proverb|saying|mindset|takeaway|wisdom)\b/i,
+    defaultIcon: 'heart',
+  },
+  {
+    variant: 'css-chat-thread',
+    category: 'dialogue',
+    label: 'CSS Modern Chat Thread',
+    description: 'Khung tin nhắn 2 bong bóng hỏi-đáp hiện đại kiểu iMessage / Messenger',
+    keywords: /\b(dialogue|replying|texting|conversation exchange|ask and answer|respond with)\b/i,
+    defaultIcon: 'chat',
+  },
+  {
+    variant: 'css-roadmap-steps',
+    category: 'grammar',
+    label: 'CSS 3-Step Horizontal Roadmap',
+    description: 'Sơ đồ 3 bước đánh số 01-02-03 nối đường ngang thanh thoát',
+    keywords: /\b(three steps|step 1|step 2|step 3|process|method|how to say)\b/i,
+    defaultIcon: 'walk',
+  },
+  {
+    variant: 'css-toggle-switch',
+    category: 'dialogue',
+    label: 'CSS Toggle Switch (OFF → ON)',
+    description: 'Công tắc bật/tắt so sánh chế độ Basic (OFF) sang Native (ON)',
+    keywords: /\b(switch|toggle|turn on|mindset shift|mode|upgrade your english)\b/i,
+    defaultIcon: 'lightning',
+  },
+  {
+    variant: 'css-browser-mockup',
+    category: 'life',
+    label: 'CSS Browser Window Card',
+    description: 'Cửa sổ trình duyệt macOS 3 nút màu, thanh URL và thẻ nội dung trung tâm',
+    keywords: /\b(website|browser|online search|google|article|blog|link|url|reading online)\b/i,
+    defaultIcon: 'laptop',
+  },
+  {
+    variant: 'css-grammar-equation',
+    category: 'grammar',
+    label: 'CSS Grammar Token Equation',
+    description: 'Công thức ghép khối màu: [Modal] + [Verb] = [Polite Request]',
+    keywords: /\b(formula|equation|combine|plus|grammar rule|syntax|verb pattern)\b/i,
+    defaultIcon: 'brain',
+  },
+  {
+    variant: 'css-flashcard-flip',
+    category: 'vocab',
+    label: 'CSS Layered Flip Flashcard',
+    description: 'Thẻ Flashcard xếp lớp 2 tầng hiển thị từ vựng, phiên âm IPA và nghĩa',
+    keywords: /\b(flashcard|new word|vocab|definition|meaning|memorize|anki)\b/i,
+    defaultIcon: 'book',
+  },
+  {
+    variant: 'css-sticky-note',
+    category: 'grammar',
+    label: 'CSS Sticky Note Rule',
+    description: 'Giấy ghi chú dán tường kèm đinh ghim & quy tắc cần nhớ kiểu @englishpracticing168',
+    keywords: /\b(sticky note|rule of thumb|golden rule|quick note|reminder|don't forget)\b/i,
+    defaultIcon: 'pencil',
+  },
+  {
+    variant: 'bs-badge-cluster',
+    category: 'vocab',
+    label: 'Bootstrap Pill Badge Cluster',
+    description: 'Cụm pill đa màu liệt kê 3-4 từ đồng nghĩa / collocation / sắc thái thay thế',
+    keywords: /\b(synonym|other ways to say|alternatives|collocation|phrases|instead of)\b/i,
+    defaultIcon: 'sparkles',
+  },
+  {
+    variant: 'css-magnifying-word',
+    category: 'vocab',
+    label: 'CSS Spotlight Word Zoom',
+    description: 'Kính lúp phóng đại cụm từ trọng tâm và sắc thái sử dụng',
+    keywords: /\b(zoom in|focus on|closer look|nuance|keyword|meaning behind|spotlight)\b/i,
+    defaultIcon: 'eye',
+  },
+  {
+    variant: 'bs-modal-quiz',
+    category: 'dialogue',
+    label: 'Bootstrap Mini Quiz Modal',
+    description: 'Cửa sổ Modal Bootstrap đặt câu hỏi tương tác với 2 nút lựa chọn',
+    keywords: /\b(quick check|pop quiz|choose one|pick the best|mini test)\b/i,
+    defaultIcon: 'brain',
+  },
 ];
 
 export const ALL_SCENE_ICONS: IllustrationSceneIcon[] = SCENE_ICON_KEYWORDS.map((s) => s.icon);
@@ -722,6 +884,64 @@ export function resolveContextualVisualForCue(
     }
   }
 
+  // 2b. High-specificity multi-word Bootstrap / Modern CSS UI matches before broad single-word fallbacks
+  if (/\b(golden rule|don't forget|quick note|sticky note|rule of thumb)\b/.test(t)) {
+    return {
+      variant: 'css-sticky-note',
+      sceneIcon: 'pencil',
+      category: 'grammar',
+      matchedRule: 'css-sticky-note',
+      data: {
+        title: cleanSnippet(cardText || cueText, 28),
+        subtitle: cleanSnippet(cueText, 36),
+        speechText: cleanSnippet(cardText || cueText, 36),
+        sceneIcon: 'pencil',
+      },
+    };
+  }
+  if (/\b(quick check|pop quiz|pick the best|choose one|mini test)\b/.test(t)) {
+    return {
+      variant: 'bs-modal-quiz',
+      sceneIcon: 'brain',
+      category: 'dialogue',
+      matchedRule: 'bs-modal-quiz',
+      data: {
+        title: cleanSnippet(cardText || cueText, 28),
+        subtitle: cleanSnippet(cueText, 36),
+        speechText: cleanSnippet(cardText || cueText, 36),
+        sceneIcon: 'brain',
+      },
+    };
+  }
+  if (/\b(zoom in|closer look|nuance|focus on|spotlight)\b/.test(t)) {
+    return {
+      variant: 'css-magnifying-word',
+      sceneIcon: 'eye',
+      category: 'vocab',
+      matchedRule: 'css-magnifying-word',
+      data: {
+        title: cleanSnippet(cardText || cueText, 28),
+        subtitle: cleanSnippet(cueText, 36),
+        speechText: cleanSnippet(cardText || cueText, 36),
+        sceneIcon: 'eye',
+      },
+    };
+  }
+  if (/\b(synonym|other ways|instead of|alternatives|collocation)\b/.test(t)) {
+    return {
+      variant: 'bs-badge-cluster',
+      sceneIcon: 'sparkles',
+      category: 'vocab',
+      matchedRule: 'bs-badge-cluster',
+      data: {
+        title: cleanSnippet(cardText || cueText, 28),
+        subtitle: cleanSnippet(cueText, 36),
+        speechText: cleanSnippet(cardText || cueText, 36),
+        sceneIcon: 'sparkles',
+      },
+    };
+  }
+
   // 3. Expanded Grammar / Vocab / Pronunciation visuals
   if (/(ladder|stair|step|level|stage|past|present|future|階段|段)/.test(t)) {
     return {
@@ -746,7 +966,7 @@ export function resolveContextualVisualForCue(
       },
     };
   }
-  if (/(ear|listen|quiz|check|sound|pronounc|耳|チェック|聞こえ)/.test(t)) {
+  if (/(\bear\b|listen|quiz|check|sound|pronounc|耳|チェック|聞こえ)/.test(t)) {
     return {
       variant: 'ear-listen',
       sceneIcon: 'listen',
@@ -888,6 +1108,130 @@ export function resolveContextualVisualForCue(
         speechText: cleanSnippet(cardText || cueText, 24),
       },
     };
+  }
+
+  // 4b. Bootstrap & Modern CSS Infographic Matches
+  const uiChecks: Array<{
+    variant: IllustrationVariant;
+    re: RegExp;
+    category: VectorCategory;
+    icon: IllustrationSceneIcon;
+    rule: string;
+  }> = [
+    {
+      variant: 'css-grammar-equation',
+      re: /\b(formula|equation|grammar rule|syntax|verb pattern)\b/,
+      category: 'grammar',
+      icon: 'brain',
+      rule: 'css-grammar-equation',
+    },
+    {
+      variant: 'css-flashcard-flip',
+      re: /\b(flashcard|vocab|definition|memorize|new word)\b/,
+      category: 'vocab',
+      icon: 'book',
+      rule: 'css-flashcard-flip',
+    },
+    {
+      variant: 'css-browser-mockup',
+      re: /\b(website|browser|article|blog|online|url)\b/,
+      category: 'life',
+      icon: 'laptop',
+      rule: 'css-browser-mockup',
+    },
+    {
+      variant: 'bs-progress-meter',
+      re: /\b(progress|percent|fluency|milestone|goal|mastery)\b/,
+      category: 'vocab',
+      icon: 'sparkles',
+      rule: 'bs-progress-meter',
+    },
+    {
+      variant: 'bs-alert-tip',
+      re: /\b(warning|caution|avoid|careful|watch out|mistake)\b/,
+      category: 'grammar',
+      icon: 'lightning',
+      rule: 'bs-alert-tip',
+    },
+    {
+      variant: 'bs-accordion-faq',
+      re: /\b(faq|why do|frequently asked|question)\b/,
+      category: 'grammar',
+      icon: 'brain',
+      rule: 'bs-accordion-faq',
+    },
+    {
+      variant: 'css-toggle-switch',
+      re: /\b(switch|toggle|mode|upgrade)\b/,
+      category: 'dialogue',
+      icon: 'lightning',
+      rule: 'css-toggle-switch',
+    },
+    {
+      variant: 'css-glass-quote',
+      re: /\b(quote|motto|proverb|takeaway|wisdom)\b/,
+      category: 'dialogue',
+      icon: 'heart',
+      rule: 'css-glass-quote',
+    },
+    {
+      variant: 'css-roadmap-steps',
+      re: /\b(three steps|step 1|method|process)\b/,
+      category: 'grammar',
+      icon: 'walk',
+      rule: 'css-roadmap-steps',
+    },
+    {
+      variant: 'css-bento-stats',
+      re: /\b(bento|breakdown|summary|overview)\b/,
+      category: 'vocab',
+      icon: 'sparkles',
+      rule: 'css-bento-stats',
+    },
+    {
+      variant: 'css-sticky-note',
+      re: /\b(golden rule|don't forget|quick note|sticky note|rule of thumb)\b/,
+      category: 'grammar',
+      icon: 'pencil',
+      rule: 'css-sticky-note',
+    },
+    {
+      variant: 'bs-badge-cluster',
+      re: /\b(synonym|other ways|instead of|alternatives|collocation)\b/,
+      category: 'vocab',
+      icon: 'sparkles',
+      rule: 'bs-badge-cluster',
+    },
+    {
+      variant: 'css-magnifying-word',
+      re: /\b(closer look|nuance|focus on|spotlight)\b/,
+      category: 'vocab',
+      icon: 'eye',
+      rule: 'css-magnifying-word',
+    },
+    {
+      variant: 'bs-modal-quiz',
+      re: /\b(quick check|pop quiz|pick the best|choose one)\b/,
+      category: 'dialogue',
+      icon: 'brain',
+      rule: 'bs-modal-quiz',
+    },
+  ];
+  for (const chk of uiChecks) {
+    if (chk.re.test(t)) {
+      return {
+        variant: chk.variant,
+        sceneIcon: chk.icon,
+        category: chk.category,
+        matchedRule: chk.rule,
+        data: {
+          title: cleanSnippet(cardText || cueText, 28),
+          subtitle: cleanSnippet(cueText, 36),
+          speechText: cleanSnippet(cardText || cueText, 36),
+          sceneIcon: chk.icon,
+        },
+      };
+    }
   }
 
   // 5. General fallback still picks a context-matched dynamic-scene hero when meaningful icon matched

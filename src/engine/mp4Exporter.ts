@@ -27,6 +27,7 @@ export interface ExportVideoResult {
   fps: number;
   qualityLabel: string;
   blob?: Blob;
+  savedPath?: string;
 }
 
 export class ExportAbortedError extends Error {
@@ -472,7 +473,9 @@ async function postBinaryWithRetry(
         // plain text response
       }
       lastError = new Error(
-        `${label} (HTTP ${res.status}${detail ? `: ${detail.slice(0, 140)}` : ''})`,
+        res.status === 404 && url.includes('/api/render/')
+          ? `${label} (HTTP 404: Render job trên server không còn tồn tại — có thể server vừa khởi động lại. Hãy thử Render lại).`
+          : `${label} (HTTP ${res.status}${detail ? `: ${detail.slice(0, 140)}` : ''})`,
       );
 
       if (res.status !== 429 && res.status < 500) {
@@ -794,7 +797,13 @@ export async function exportProjectToVideo(
   audioFile: File | null,
   onProgress: (info: ExportVideoProgress) => void,
   settings: Mp4ExportSettings = DEFAULT_MP4_EXPORT_SETTINGS,
-  options?: { signal?: AbortSignal; skipDownload?: boolean; customFileBase?: string },
+  options?: {
+    signal?: AbortSignal;
+    skipDownload?: boolean;
+    customFileBase?: string;
+    alsoSaveToServerOutput?: boolean;
+    savePath?: string;
+  },
 ): Promise<ExportVideoResult> {
   const encoding = resolveMp4EncodingParams(settings);
   checkAborted(options?.signal);
@@ -803,11 +812,33 @@ export async function exportProjectToVideo(
     stageLabel: `Đang khởi tạo bộ dựng MP4 (${encoding.width}×${encoding.height} @ ${encoding.fps}fps)...`,
   });
 
+  const finalizeArchive = async (res: ExportVideoResult): Promise<ExportVideoResult> => {
+    if (options?.alsoSaveToServerOutput && res.blob && !options?.signal?.aborted) {
+      try {
+        onProgress({ progress: 0.98, stageLabel: 'Đang lưu thêm bản sao vào thư mục output...' });
+        const saved = await exportBlobToServerOutput(
+          res.blob,
+          res.fileName,
+          options.savePath,
+          options.signal,
+        );
+        onProgress({ progress: 1, stageLabel: `Hoàn tất! Đã lưu: ${saved.savedPath}` });
+        return { ...res, savedPath: saved.savedPath };
+      } catch (err) {
+        if (err instanceof ExportAbortedError || options?.signal?.aborted) {
+          throw new ExportAbortedError();
+        }
+        // Keep browser download result even if server archive fails
+      }
+    }
+    return res;
+  };
+
   // 1. Primary path: 100% browser-native WebCodecs + mp4-muxer (zero server state, immune to multi-instance 404)
   try {
     const webCodecsResult = await exportWithWebCodecsMp4(project, audioFile, encoding, onProgress, options);
     if (webCodecsResult) {
-      return webCodecsResult;
+      return await finalizeArchive(webCodecsResult);
     }
   } catch (err) {
     if (err instanceof ExportAbortedError || options?.signal?.aborted) {
@@ -818,12 +849,14 @@ export async function exportProjectToVideo(
 
   // 2. Fallback path: Server FFmpeg or WebM MediaRecorder
   try {
-    return await exportWithServerFfmpeg(project, audioFile, encoding, onProgress, options?.signal);
+    const serverRes = await exportWithServerFfmpeg(project, audioFile, encoding, onProgress, options?.signal);
+    return await finalizeArchive(serverRes);
   } catch (err) {
     if (err instanceof ExportAbortedError || options?.signal?.aborted) {
       throw new ExportAbortedError();
     }
-    return exportProjectToWebmFallback(project, audioFile, encoding, onProgress, options?.signal);
+    const webmRes = await exportProjectToWebmFallback(project, audioFile, encoding, onProgress, options?.signal);
+    return await finalizeArchive(webmRes);
   }
 }
 

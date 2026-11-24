@@ -1,13 +1,18 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Check,
+  Code2,
   Copy,
+  CopyPlus,
   Database,
   Eye,
+  LayoutTemplate,
+  Palette,
   Plus,
   RotateCcw,
   Save,
   Search,
+  Sliders,
   Sparkles,
   Trash2,
   X,
@@ -36,6 +41,15 @@ import {
   getEffectiveVectorCatalog,
   VECTOR_COMPONENT_CATALOG,
 } from '../engine/vectorComponentDb';
+import {
+  compileVisualBuilderToPrimitives,
+  createDefaultVisualBuilderConfig,
+  inferPresetForVariant,
+  VISUAL_COLOR_PALETTES,
+  VISUAL_LAYOUT_PRESETS,
+  VisualBuilderConfig,
+  VisualColorPalette,
+} from '../engine/visualComponentBuilder';
 
 interface ComponentDatabaseModalProps {
   isOpen: boolean;
@@ -50,65 +64,15 @@ const CATEGORY_LABELS: Record<VectorCategory, string> = {
   dialogue: 'Hội thoại',
 };
 
-const DEFAULT_STARTER_PRIMITIVES: VectorPrimitive[] = [
-  {
-    shape: 'rect',
-    x: -330,
-    y: -140,
-    w: 660,
-    h: 280,
-    radius: 30,
-    fill: '#FFFFFF',
-    stroke: '#E2E8F0',
-    lineWidth: 2,
-    shadow: true,
-  },
-  { shape: 'pill', x: -115, y: -118, w: 230, h: 40, fill: '#EEF2FF' },
-  {
-    shape: 'text',
-    x: 0,
-    y: -98,
-    text: 'CUSTOM SCENE',
-    fill: '#4338CA',
-    fontSize: 20,
-    fontWeight: 800,
-    align: 'center',
-  },
-  { shape: 'circle', x: -145, y: 20, r: 58, fill: '#DBEAFE', stroke: '#3B82F6', lineWidth: 3 },
-  { shape: 'icon', icon: 'sparkles', x: -145, y: 20 },
-  { shape: 'arrow', x: -60, y: 20, x2: 15, y2: 20, stroke: '#16A34A', lineWidth: 6 },
-  {
-    shape: 'rect',
-    x: 35,
-    y: -48,
-    w: 255,
-    h: 140,
-    radius: 22,
-    fill: '#ECFDF5',
-    stroke: '#86EFAC',
-    lineWidth: 2,
-  },
-  {
-    shape: 'text',
-    x: 162,
-    y: 8,
-    text: 'Key Expression',
-    fill: '#15803D',
-    fontSize: 24,
-    fontWeight: 800,
-    align: 'center',
-  },
-  {
-    shape: 'text',
-    x: 162,
-    y: 48,
-    text: 'Context Match',
-    fill: '#475569',
-    fontSize: 18,
-    fontWeight: 600,
-    align: 'center',
-  },
-];
+const PALETTE_DOT_CLASS: Record<string, string> = {
+  indigo: 'bg-indigo-600',
+  primary: 'bg-blue-600',
+  success: 'bg-emerald-500',
+  danger: 'bg-rose-600',
+  warning: 'bg-amber-600',
+  violet: 'bg-violet-600',
+  slate: 'bg-slate-900',
+};
 
 const ComponentMiniCanvas: React.FC<{
   variant: string;
@@ -144,24 +108,30 @@ export const ComponentDatabaseModal: React.FC<ComponentDatabaseModalProps> = ({
   const [version, setVersion] = useState(0);
   const [activeTab, setActiveTab] = useState<'browse' | 'ai-prompt'>('browse');
   const [searchQuery, setSearchQuery] = useState('');
-  const [categoryFilter, setCategoryFilter] = useState<VectorCategory | 'all'>('all');
+  const [categoryFilter, setCategoryFilter] = useState<VectorCategory | 'all' | 'ui-kit'>('all');
   const [showDeleted, setShowDeleted] = useState(false);
 
   // Selected / Editor state
   const [isCreatingNew, setIsCreatingNew] = useState(false);
-  const [editVariant, setEditVariant] = useState('cafe-water');
+  const [visualModeEnabled, setVisualModeEnabled] = useState(false);
+  const [visualCfg, setVisualCfg] = useState<VisualBuilderConfig>(() =>
+    createDefaultVisualBuilderConfig(),
+  );
+
+  const [editVariant, setEditVariant] = useState('bs-card-header');
   const [editLabel, setEditLabel] = useState('');
-  const [editCategory, setEditCategory] = useState<VectorCategory>('life');
+  const [editCategory, setEditCategory] = useState<VectorCategory>('grammar');
   const [editDescription, setEditDescription] = useState('');
   const [editKeywords, setEditKeywords] = useState('');
-  const [editIcon, setEditIcon] = useState<IllustrationSceneIcon>('sparkles');
+  const [editIcon, setEditIcon] = useState<IllustrationSceneIcon>('book');
   const [editPrimitivesJson, setEditPrimitivesJson] = useState('[]');
   const [editorStatus, setEditorStatus] = useState<string | null>(null);
   const [editorError, setEditorError] = useState<string | null>(null);
 
   // AI Web Prompt Builder tab state
-  const [aiConcept, setAiConcept] = useState('Đặt đồ ăn tại nhà hàng chay hoặc hỏi thành phần món');
-  const [aiCategory, setAiCategory] = useState<VectorCategory>('life');
+  const [aiConcept, setAiConcept] = useState('Thẻ thông báo Bootstrap nhắc lỗi ngữ pháp hay gặp');
+  const [aiCategory, setAiCategory] = useState<VectorCategory>('grammar');
+  const [aiBaseVariant, setAiBaseVariant] = useState<string>('bs-card-header');
   const [copiedPrompt, setCopiedPrompt] = useState(false);
   const [pastedAiJson, setPastedAiJson] = useState('');
   const [aiParseError, setAiParseError] = useState<string | null>(null);
@@ -184,7 +154,11 @@ export const ComponentDatabaseModal: React.FC<ComponentDatabaseModalProps> = ({
   const filteredItems = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return catalog.filter((item) => {
-      if (categoryFilter !== 'all' && item.category !== categoryFilter) return false;
+      if (categoryFilter === 'ui-kit') {
+        if (!item.variant.startsWith('bs-') && !item.variant.startsWith('css-')) return false;
+      } else if (categoryFilter !== 'all' && item.category !== categoryFilter) {
+        return false;
+      }
       if (!q) return true;
       return (
         item.variant.toLowerCase().includes(q) ||
@@ -200,6 +174,12 @@ export const ComponentDatabaseModal: React.FC<ComponentDatabaseModalProps> = ({
     [deletedBuiltIns],
   );
 
+  const uiKitCount = useMemo(
+    () =>
+      catalog.filter((c) => c.variant.startsWith('bs-') || c.variant.startsWith('css-')).length,
+    [catalog],
+  );
+
   const loadVariantIntoEditor = (variant: string) => {
     setIsCreatingNew(false);
     setEditorError(null);
@@ -208,21 +188,38 @@ export const ComponentDatabaseModal: React.FC<ComponentDatabaseModalProps> = ({
     const builtIn = VECTOR_COMPONENT_CATALOG.find((b) => b.variant === variant);
     const catalogEntry = catalog.find((c) => c.variant === variant);
 
+    const resolvedLabel = custom?.label ?? catalogEntry?.label ?? builtIn?.label ?? variant;
+    const resolvedDesc =
+      custom?.description ?? catalogEntry?.description ?? builtIn?.description ?? '';
+    const resolvedIcon = custom?.defaultIcon ?? builtIn?.defaultIcon ?? 'sparkles';
+    const hasCustomPrimitives = Boolean(custom && custom.primitives.length > 0);
+
     setEditVariant(variant);
-    setEditLabel(custom?.label ?? catalogEntry?.label ?? builtIn?.label ?? variant);
+    setEditLabel(resolvedLabel);
     setEditCategory(custom?.category ?? catalogEntry?.category ?? builtIn?.category ?? 'life');
-    setEditDescription(
-      custom?.description ?? catalogEntry?.description ?? builtIn?.description ?? '',
-    );
+    setEditDescription(resolvedDesc);
     setEditKeywords(
       custom?.keywords.join(', ') ??
         (builtIn ? builtIn.keywords.source.replace(/\\b|\(|\)/g, '').replace(/\|/g, ', ') : ''),
     );
-    setEditIcon(custom?.defaultIcon ?? builtIn?.defaultIcon ?? 'sparkles');
+    setEditIcon(resolvedIcon);
     setEditPrimitivesJson(
-      custom && custom.primitives.length > 0
-        ? JSON.stringify(custom.primitives, null, 2)
-        : '[]',
+      hasCustomPrimitives && custom ? JSON.stringify(custom.primitives, null, 2) : '[]',
+    );
+    setVisualModeEnabled(hasCustomPrimitives);
+
+    const texts = (custom?.primitives ?? [])
+      .filter((p) => p.shape === 'text' && p.text)
+      .map((p) => p.text!.trim());
+
+    setVisualCfg(
+      createDefaultVisualBuilderConfig({
+        preset: inferPresetForVariant(variant),
+        badgeText: texts[0]?.slice(0, 18) || resolvedLabel.slice(0, 18).toUpperCase(),
+        headline: texts[1] || resolvedLabel,
+        subtext: texts[2] || resolvedDesc.slice(0, 48) || 'Everyday spoken English pattern',
+        icon: resolvedIcon,
+      }),
     );
   };
 
@@ -232,6 +229,27 @@ export const ComponentDatabaseModal: React.FC<ComponentDatabaseModalProps> = ({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
+
+  const updateVisualBuilder = (patch: Partial<VisualBuilderConfig>) => {
+    setVisualModeEnabled(true);
+    setVisualCfg((prev) => {
+      const next = { ...prev, ...patch };
+      if (patch.icon) setEditIcon(patch.icon);
+      const compiled = compileVisualBuilderToPrimitives(next);
+      setEditPrimitivesJson(JSON.stringify(compiled, null, 2));
+      return next;
+    });
+  };
+
+  const applyColorPalette = (pal: VisualColorPalette) => {
+    updateVisualBuilder({
+      bgColor: pal.bgColor,
+      accentColor: pal.accentColor,
+      softColor: pal.softColor,
+      borderColor: pal.borderColor,
+      textColor: pal.textColor,
+    });
+  };
 
   const parsedEditorPrimitives = useMemo((): {
     primitives: VectorPrimitive[];
@@ -253,13 +271,21 @@ export const ComponentDatabaseModal: React.FC<ComponentDatabaseModalProps> = ({
     }
   }, [editPrimitivesJson, editVariant, editLabel]);
 
+  const aiBaseMeta = useMemo(
+    () => catalog.find((c) => c.variant === aiBaseVariant),
+    [catalog, aiBaseVariant],
+  );
+
   const aiGeneratedPrompt = useMemo(
     () =>
       buildVectorComponentAiPrompt(aiConcept || 'Thẻ minh họa giao tiếp tiếng Anh', {
         category: aiCategory,
         availableIcons: ALL_SCENE_ICONS,
+        baseVariant: aiBaseMeta?.variant,
+        baseLabel: aiBaseMeta?.label,
+        baseDescription: aiBaseMeta?.description,
       }),
-    [aiConcept, aiCategory],
+    [aiConcept, aiCategory, aiBaseMeta],
   );
 
   const parsedAiComponents = useMemo(() => {
@@ -276,17 +302,47 @@ export const ComponentDatabaseModal: React.FC<ComponentDatabaseModalProps> = ({
   const isSelectedBuiltIn = VECTOR_COMPONENT_CATALOG.some((b) => b.variant === editVariant);
   const hasCustomOverride = Boolean(getCustomComponentByVariant(editVariant));
 
-  const handleStartNewComponent = () => {
+  const handleStartNewComponent = (presetId?: VisualBuilderConfig['preset']) => {
     setIsCreatingNew(true);
+    setVisualModeEnabled(true);
     setEditorError(null);
     setEditorStatus(null);
-    setEditVariant(`custom-scene-${Date.now().toString(36).slice(-4)}`);
-    setEditLabel('Cảnh minh họa mới');
-    setEditCategory('life');
-    setEditDescription('Minh họa thẻ học tiếng Anh 2D pastel');
-    setEditKeywords('example, phrase, conversation, practice');
-    setEditIcon('sparkles');
-    setEditPrimitivesJson(JSON.stringify(DEFAULT_STARTER_PRIMITIVES, null, 2));
+    const slugSuffix = Date.now().toString(36).slice(-4);
+    const nextCfg = createDefaultVisualBuilderConfig({
+      preset: presetId ?? 'bs-card',
+      badgeText: 'KEY TIP',
+      headline: 'Could you pass me the menu?',
+      subtext: 'Lịch sự hơn hẳn "Give me menu"',
+      icon: 'sparkles',
+    });
+    setVisualCfg(nextCfg);
+    setEditVariant(`custom-ui-${slugSuffix}`);
+    setEditLabel('Thẻ UI Tùy Chỉnh Mới');
+    setEditCategory('dialogue');
+    setEditDescription('Thẻ minh họa thiết kế trực quan theo mẫu Bootstrap / CSS');
+    setEditKeywords('example, phrase, polite, speaking');
+    setEditIcon(nextCfg.icon);
+    setEditPrimitivesJson(JSON.stringify(compileVisualBuilderToPrimitives(nextCfg), null, 2));
+  };
+
+  const handleDuplicateAsNew = () => {
+    setIsCreatingNew(true);
+    setVisualModeEnabled(true);
+    setEditorError(null);
+    setEditorStatus(null);
+    const slugSuffix = Date.now().toString(36).slice(-4);
+    const baseSlug = sanitizeVariantSlug(editVariant).slice(0, 28);
+    const nextCfg = {
+      ...visualCfg,
+      headline: visualCfg.headline || editLabel || 'New Phrase',
+      subtext: visualCfg.subtext || editDescription || 'Custom remix card',
+    };
+    setVisualCfg(nextCfg);
+    setEditVariant(`${baseSlug}-${slugSuffix}`);
+    setEditLabel(`${editLabel || baseSlug} (Bản sao)`);
+    if (!parsedEditorPrimitives.primitives.length) {
+      setEditPrimitivesJson(JSON.stringify(compileVisualBuilderToPrimitives(nextCfg), null, 2));
+    }
   };
 
   const handleSaveEditor = async () => {
@@ -308,8 +364,6 @@ export const ComponentDatabaseModal: React.FC<ComponentDatabaseModalProps> = ({
       .map((s) => s.trim())
       .filter(Boolean);
 
-    // If editing built-in metadata without primitives JSON, seed starter primitives ONLY if user explicitly added primitives;
-    // otherwise save metadata + existing custom primitives or starter
     const def: CustomComponentDefinition = {
       variant: isSelectedBuiltIn && !isCreatingNew ? editVariant : slug,
       label: editLabel.trim() || slug,
@@ -326,7 +380,7 @@ export const ComponentDatabaseModal: React.FC<ComponentDatabaseModalProps> = ({
       setIsCreatingNew(false);
       setEditVariant(saved.variant);
       setEditorStatus(
-        `Đã lưu "${saved.variant}" vào Kho Component! Các video và prompt mới sẽ tự nhận diện component này.`,
+        `Đã lưu "${saved.variant}" vào Kho Component! Các video và prompt mới sẽ tự động sử dụng.`,
       );
     } catch (err) {
       setEditorError(err instanceof Error ? err.message : 'Không thể lưu component.');
@@ -395,7 +449,7 @@ export const ComponentDatabaseModal: React.FC<ComponentDatabaseModalProps> = ({
       aria-labelledby="component-db-title"
       className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/55 backdrop-blur-[2px] p-4"
     >
-      <div className="bg-white border border-slate-200 rounded-2xl shadow-xl w-full max-w-6xl h-[90vh] flex flex-col overflow-hidden">
+      <div className="bg-white border border-slate-200 rounded-2xl shadow-xl w-full max-w-6xl h-[92vh] flex flex-col overflow-hidden">
         {/* Header */}
         <div className="px-6 py-3.5 border-b border-slate-200 flex flex-wrap items-center justify-between gap-4 bg-slate-50/70">
           <div className="flex items-center gap-3 min-w-0">
@@ -404,11 +458,10 @@ export const ComponentDatabaseModal: React.FC<ComponentDatabaseModalProps> = ({
             </div>
             <div className="min-w-0">
               <h2 id="component-db-title" className="text-base font-bold text-slate-900 truncate">
-                Kho Component Minh Họa Vector (@168 &amp; Custom AI)
+                Kho Component Vector &amp; Bộ Tùy Chỉnh Giao Diện (Bootstrap / CSS UI)
               </h2>
               <p className="text-xs text-slate-500 truncate tabular-nums">
-                Đang kích hoạt: {catalog.length} component · Tùy chỉnh/AI:{' '}
-                {catalog.filter((c) => c.isCustom || c.isOverride).length} · Tự động đồng bộ vào Video &amp; Prompt mới
+                Đang kích hoạt: {catalog.length} mẫu ({uiKitCount} Bootstrap &amp; CSS UI) · Tự động đồng bộ Video &amp; Prompt
               </p>
             </div>
           </div>
@@ -424,7 +477,7 @@ export const ComponentDatabaseModal: React.FC<ComponentDatabaseModalProps> = ({
                     : 'text-slate-600 hover:text-slate-900'
                 }`}
               >
-                Xem · Sửa · Xóa ({catalog.length})
+                Kho &amp; Thiết Kế UI ({catalog.length})
               </button>
               <button
                 type="button"
@@ -436,7 +489,7 @@ export const ComponentDatabaseModal: React.FC<ComponentDatabaseModalProps> = ({
                 }`}
               >
                 <Sparkles className="w-3.5 h-3.5" />
-                <span>Tạo Prompt cho AI Web vẽ Component</span>
+                <span>Tạo bằng AI Web</span>
               </button>
             </div>
 
@@ -455,39 +508,56 @@ export const ComponentDatabaseModal: React.FC<ComponentDatabaseModalProps> = ({
         {activeTab === 'browse' ? (
           <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-12 overflow-hidden">
             {/* Left Catalog Grid */}
-            <div className="lg:col-span-7 flex flex-col min-h-0 border-b lg:border-b-0 lg:border-r border-slate-200">
-              <div className="p-3.5 bg-slate-50/60 border-b border-slate-200 flex flex-wrap items-center gap-2">
-                <div className="relative flex-1 min-w-[180px]">
-                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
-                  <input
-                    type="text"
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Tìm tên, variant, keyword..."
-                    className="w-full pl-8 pr-3 py-1.5 text-xs bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                  />
+            <div className="lg:col-span-6 flex flex-col min-h-0 border-b lg:border-b-0 lg:border-r border-slate-200">
+              <div className="p-3 bg-slate-50/60 border-b border-slate-200 space-y-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="relative flex-1 min-w-[160px]">
+                    <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      placeholder="Tìm tên, bootstrap, css, keyword..."
+                      className="w-full pl-8 pr-3 py-1.5 text-xs bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => handleStartNewComponent('bs-card')}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 whitespace-nowrap shadow-xs"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Tạo UI Mới</span>
+                  </button>
                 </div>
-                <select
-                  aria-label="Lọc nhóm component"
-                  value={categoryFilter}
-                  onChange={(e) => setCategoryFilter(e.target.value as VectorCategory | 'all')}
-                  className="px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                >
-                  <option value="all">Tất cả nhóm</option>
-                  {(Object.keys(CATEGORY_LABELS) as VectorCategory[]).map((cat) => (
-                    <option key={cat} value={cat}>
-                      {CATEGORY_LABELS[cat]}
-                    </option>
+
+                {/* Quick Filter Pills */}
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {[
+                    { id: 'all', label: `Tất cả (${catalog.length})` },
+                    { id: 'ui-kit', label: `Bootstrap / CSS (${uiKitCount})` },
+                    { id: 'life', label: 'Đời sống' },
+                    { id: 'grammar', label: 'Ngữ pháp' },
+                    { id: 'vocab', label: 'Từ vựng' },
+                    { id: 'dialogue', label: 'Hội thoại' },
+                    { id: 'pronunciation', label: 'Phát âm' },
+                  ].map((tab) => (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      onClick={() =>
+                        setCategoryFilter(tab.id as VectorCategory | 'all' | 'ui-kit')
+                      }
+                      className={`px-2 py-1 text-[11px] font-semibold rounded-md transition-colors ${
+                        categoryFilter === tab.id
+                          ? 'bg-indigo-600 text-white'
+                          : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'
+                      }`}
+                    >
+                      {tab.label}
+                    </button>
                   ))}
-                </select>
-                <button
-                  type="button"
-                  onClick={handleStartNewComponent}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 whitespace-nowrap"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>Thêm mới</span>
-                </button>
+                </div>
               </div>
 
               {hiddenBuiltInItems.length > 0 && (
@@ -499,15 +569,17 @@ export const ComponentDatabaseModal: React.FC<ComponentDatabaseModalProps> = ({
                       onChange={(e) => setShowDeleted(e.target.checked)}
                       className="rounded border-amber-300 text-amber-600"
                     />
-                    <span>Hiện {hiddenBuiltInItems.length} component mặc định đã ẩn</span>
+                    <span>Hiện {hiddenBuiltInItems.length} mẫu mặc định đã ẩn</span>
                   </label>
                 </div>
               )}
 
-              <div className="flex-1 overflow-y-auto p-3.5 grid grid-cols-1 sm:grid-cols-2 gap-3 content-start">
+              <div className="flex-1 overflow-y-auto p-3 grid grid-cols-1 sm:grid-cols-2 gap-2.5 content-start">
                 {filteredItems.map((item) => {
                   const customDef = getCustomComponentByVariant(item.variant);
                   const active = !isCreatingNew && editVariant === item.variant;
+                  const isUiKit =
+                    item.variant.startsWith('bs-') || item.variant.startsWith('css-');
                   return (
                     <button
                       key={item.variant}
@@ -537,10 +609,18 @@ export const ComponentDatabaseModal: React.FC<ComponentDatabaseModalProps> = ({
                                 ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
                                 : item.isOverride
                                   ? 'bg-amber-50 text-amber-700 border border-amber-200'
-                                  : 'bg-slate-100 text-slate-600'
+                                  : isUiKit
+                                    ? 'bg-indigo-50 text-indigo-700 border border-indigo-200'
+                                    : 'bg-slate-100 text-slate-600'
                             }`}
                           >
-                            {item.isCustom ? 'Tùy chỉnh' : item.isOverride ? 'Đã sửa' : CATEGORY_LABELS[item.category]}
+                            {item.isCustom
+                              ? 'Tùy chỉnh'
+                              : item.isOverride
+                                ? 'Đã sửa'
+                                : isUiKit
+                                  ? 'CSS / BS5'
+                                  : CATEGORY_LABELS[item.category]}
                           </span>
                         </div>
                         <div className="text-[11px] font-mono text-indigo-600 truncate mt-0.5">
@@ -559,7 +639,9 @@ export const ComponentDatabaseModal: React.FC<ComponentDatabaseModalProps> = ({
                     >
                       <div>
                         <div className="text-xs font-bold text-slate-700">{b.label}</div>
-                        <div className="text-[11px] font-mono text-slate-500">{b.variant} (đã ẩn)</div>
+                        <div className="text-[11px] font-mono text-slate-500">
+                          {b.variant} (đã ẩn)
+                        </div>
                       </div>
                       <button
                         type="button"
@@ -574,26 +656,39 @@ export const ComponentDatabaseModal: React.FC<ComponentDatabaseModalProps> = ({
               </div>
             </div>
 
-            {/* Right Inspector / Editor */}
-            <div className="lg:col-span-5 flex flex-col min-h-0 overflow-y-auto p-4 bg-slate-50/40 space-y-3">
-              <div className="flex items-center justify-between gap-2">
+            {/* Right No-Code Visual Customizer Panel */}
+            <div className="lg:col-span-6 flex flex-col min-h-0 overflow-y-auto p-4 bg-slate-50/40 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <h3 className="text-xs font-bold text-slate-900">
                   {isCreatingNew
-                    ? 'Tạo Component Vector Mới'
-                    : `Chi tiết & Chỉnh sửa: ${editVariant}`}
+                    ? 'Thiết Kế Component Mới (Không cần viết code)'
+                    : `Tùy Chỉnh Component: ${editVariant}`}
                 </h3>
-                {!isCreatingNew && isSelectedBuiltIn && hasCustomOverride && (
-                  <button
-                    type="button"
-                    onClick={() => void handleRestoreBuiltIn(editVariant)}
-                    className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded-md hover:bg-amber-100"
-                  >
-                    <RotateCcw className="w-3 h-3" />
-                    <span>Khôi phục gốc</span>
-                  </button>
-                )}
+                <div className="flex items-center gap-1.5">
+                  {!isCreatingNew && (
+                    <button
+                      type="button"
+                      onClick={handleDuplicateAsNew}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-md hover:bg-indigo-100"
+                    >
+                      <CopyPlus className="w-3 h-3" />
+                      <span>Nhân bản thành mới</span>
+                    </button>
+                  )}
+                  {!isCreatingNew && isSelectedBuiltIn && hasCustomOverride && (
+                    <button
+                      type="button"
+                      onClick={() => void handleRestoreBuiltIn(editVariant)}
+                      className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded-md hover:bg-amber-100"
+                    >
+                      <RotateCcw className="w-3 h-3" />
+                      <span>Khôi phục gốc</span>
+                    </button>
+                  )}
+                </div>
               </div>
 
+              {/* Live Canvas Preview */}
               <ComponentMiniCanvas
                 variant={editVariant}
                 primitives={
@@ -601,122 +696,446 @@ export const ComponentDatabaseModal: React.FC<ComponentDatabaseModalProps> = ({
                     ? parsedEditorPrimitives.primitives
                     : undefined
                 }
-                width={460}
-                height={200}
-                className="w-full h-auto bg-white"
+                width={500}
+                height={196}
+                className="w-full h-auto bg-white shadow-xs"
               />
 
-              <div className="grid grid-cols-2 gap-2.5">
-                <div>
-                  <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                    Mã variant (slug)
-                  </label>
-                  <input
-                    type="text"
-                    disabled={!isCreatingNew && isSelectedBuiltIn}
-                    value={editVariant}
-                    onChange={(e) => setEditVariant(e.target.value)}
-                    className="w-full px-2.5 py-1.5 text-xs font-mono bg-white border border-slate-200 rounded-lg disabled:bg-slate-100 disabled:text-slate-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                    Nhóm ngữ cảnh
-                  </label>
-                  <select
-                    value={editCategory}
-                    onChange={(e) => setEditCategory(e.target.value as VectorCategory)}
-                    className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-lg"
-                  >
-                    {(Object.keys(CATEGORY_LABELS) as VectorCategory[]).map((cat) => (
-                      <option key={cat} value={cat}>
-                        {CATEGORY_LABELS[cat]}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-3 gap-2.5">
-                <div className="col-span-2">
-                  <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                    Tên hiển thị
-                  </label>
-                  <input
-                    type="text"
-                    value={editLabel}
-                    onChange={(e) => setEditLabel(e.target.value)}
-                    className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-lg"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                    Icon mặc định
-                  </label>
-                  <select
-                    value={editIcon}
-                    onChange={(e) => setEditIcon(e.target.value as IllustrationSceneIcon)}
-                    className="w-full px-2 py-1.5 text-xs bg-white border border-slate-200 rounded-lg"
-                  >
-                    {ALL_SCENE_ICONS.map((icon) => (
-                      <option key={icon} value={icon}>
-                        {icon}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                  Mô tả (để AI hiểu khi tạo kịch bản video mới)
-                </label>
-                <input
-                  type="text"
-                  value={editDescription}
-                  onChange={(e) => setEditDescription(e.target.value)}
-                  className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-lg"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                  Từ khóa tự động khớp lời thoại (cách nhau dấu phẩy)
-                </label>
-                <input
-                  type="text"
-                  value={editKeywords}
-                  onChange={(e) => setEditKeywords(e.target.value)}
-                  placeholder="interview, resume, job, phỏng vấn"
-                  className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-lg"
-                />
-              </div>
-
-              <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label className="text-[11px] font-semibold text-slate-700">
-                    Định nghĩa hình vẽ Vector (<code>primitives[]</code>)
-                  </label>
+              {/* Toggle to enable Visual UI Builder if editing an un-customized built-in */}
+              {!visualModeEnabled && isSelectedBuiltIn && !isCreatingNew && (
+                <div className="p-3 bg-indigo-50/80 border border-indigo-200 rounded-xl flex items-center justify-between gap-3">
+                  <div className="text-[11px] text-indigo-950 leading-relaxed">
+                    Đang hiển thị đồ họa gốc hệ thống. Muốn đổi màu, chữ, bo góc hoặc chuyển sang khung Bootstrap / CSS?
+                  </div>
                   <button
                     type="button"
-                    onClick={() =>
-                      setEditPrimitivesJson(JSON.stringify(DEFAULT_STARTER_PRIMITIVES, null, 2))
-                    }
-                    className="text-[11px] font-medium text-indigo-600 hover:text-indigo-700"
+                    onClick={() => updateVisualBuilder({})}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 shrink-0"
                   >
-                    Nạp khung vẽ mẫu
+                    <Sliders className="w-3.5 h-3.5" />
+                    <span>Mở UI Tùy Chỉnh</span>
                   </button>
                 </div>
-                <textarea
-                  rows={6}
-                  value={editPrimitivesJson}
-                  onChange={(e) => setEditPrimitivesJson(e.target.value)}
-                  className="w-full p-2.5 text-[11px] font-mono bg-white border border-slate-200 rounded-lg leading-relaxed focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                />
-                <p className="text-[10px] text-slate-500 mt-1">
-                  Để <code>[]</code> nếu là component mặc định muốn giữ hình gốc của hệ thống và chỉ sửa từ khóa/tên.
-                </p>
+              )}
+
+              {/* Visual No-Code UI Builder Controls */}
+              {visualModeEnabled && (
+                <div className="p-3.5 bg-white border border-slate-200 rounded-xl space-y-3.5 shadow-2xs">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1.5 text-xs font-bold text-slate-900">
+                      <LayoutTemplate className="w-3.5 h-3.5 text-indigo-600" />
+                      <span>1. Chọn khung giao diện Bootstrap &amp; CSS</span>
+                    </div>
+                    {isSelectedBuiltIn && !isCreatingNew && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setVisualModeEnabled(false);
+                          setEditPrimitivesJson('[]');
+                        }}
+                        className="text-[11px] font-medium text-slate-500 hover:text-slate-800"
+                      >
+                        Dùng lại hình vẽ gốc
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5">
+                    {VISUAL_LAYOUT_PRESETS.map((p) => {
+                      const active = visualCfg.preset === p.id;
+                      return (
+                        <button
+                          key={p.id}
+                          type="button"
+                          title={p.hint}
+                          onClick={() => updateVisualBuilder({ preset: p.id })}
+                          className={`p-2 rounded-lg border text-left transition-all ${
+                            active
+                              ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs'
+                              : 'bg-slate-50 text-slate-800 border-slate-200 hover:bg-slate-100'
+                          }`}
+                        >
+                          <div className="text-[10px] font-bold truncate">{p.name}</div>
+                          <div
+                            className={`text-[9px] truncate ${
+                              active ? 'text-indigo-100' : 'text-slate-500'
+                            }`}
+                          >
+                            {p.sourceTag}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {/* Content Fields */}
+                  <div className="space-y-2">
+                    <div className="text-[11px] font-bold text-slate-800">
+                      2. Sửa nội dung hiển thị trên thẻ
+                    </div>
+                    <div className="grid grid-cols-3 gap-2">
+                      <div>
+                        <label className="block text-[10px] font-semibold text-slate-600 mb-0.5">
+                          Nhãn / Badge
+                        </label>
+                        <input
+                          type="text"
+                          value={visualCfg.badgeText}
+                          onChange={(e) => updateVisualBuilder({ badgeText: e.target.value })}
+                          className="w-full px-2.5 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:bg-white"
+                        />
+                      </div>
+                      <div className="col-span-2">
+                        <label className="block text-[10px] font-semibold text-slate-600 mb-0.5">
+                          Tiêu đề chính (Headline)
+                        </label>
+                        <input
+                          type="text"
+                          value={visualCfg.headline}
+                          onChange={(e) => updateVisualBuilder({ headline: e.target.value })}
+                          className="w-full px-2.5 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:bg-white"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-600 mb-0.5">
+                        Dòng giải thích / Ghi chú phụ
+                      </label>
+                      <input
+                        type="text"
+                        value={visualCfg.subtext}
+                        onChange={(e) => updateVisualBuilder({ subtext: e.target.value })}
+                        className="w-full px-2.5 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:bg-white"
+                      />
+                    </div>
+
+                    {(visualCfg.preset === 'css-roadmap' ||
+                      visualCfg.preset === 'css-equation' ||
+                      visualCfg.preset === 'css-compare') && (
+                      <div className="grid grid-cols-3 gap-2">
+                        <div>
+                          <label className="block text-[10px] font-semibold text-slate-600 mb-0.5">
+                            {visualCfg.preset === 'css-compare' ? 'Cột Trái (Basic)' : 'Mục 1'}
+                          </label>
+                          <input
+                            type="text"
+                            value={visualCfg.stepLabels[0]}
+                            onChange={(e) =>
+                              updateVisualBuilder({
+                                stepLabels: [
+                                  e.target.value,
+                                  visualCfg.stepLabels[1],
+                                  visualCfg.stepLabels[2],
+                                ],
+                              })
+                            }
+                            className="w-full px-2 py-1 text-xs bg-slate-50 border border-slate-200 rounded-md"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] font-semibold text-slate-600 mb-0.5">
+                            {visualCfg.preset === 'css-compare' ? 'Cột Phải (Pro)' : 'Mục 2'}
+                          </label>
+                          <input
+                            type="text"
+                            value={visualCfg.stepLabels[1]}
+                            onChange={(e) =>
+                              updateVisualBuilder({
+                                stepLabels: [
+                                  visualCfg.stepLabels[0],
+                                  e.target.value,
+                                  visualCfg.stepLabels[2],
+                                ],
+                              })
+                            }
+                            className="w-full px-2 py-1 text-xs bg-slate-50 border border-slate-200 rounded-md"
+                          />
+                        </div>
+                        {visualCfg.preset !== 'css-compare' && (
+                          <div>
+                            <label className="block text-[10px] font-semibold text-slate-600 mb-0.5">
+                              Mục 3
+                            </label>
+                            <input
+                              type="text"
+                              value={visualCfg.stepLabels[2]}
+                              onChange={(e) =>
+                                updateVisualBuilder({
+                                  stepLabels: [
+                                    visualCfg.stepLabels[0],
+                                    visualCfg.stepLabels[1],
+                                    e.target.value,
+                                  ],
+                                })
+                              }
+                              className="w-full px-2 py-1 text-xs bg-slate-50 border border-slate-200 rounded-md"
+                            />
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {visualCfg.preset === 'bs-progress' && (
+                      <div>
+                        <label className="block text-[10px] font-semibold text-slate-600 mb-0.5 tabular-nums">
+                          Mức % thanh tiến độ ({visualCfg.progressPercent}%)
+                        </label>
+                        <input
+                          type="range"
+                          min={10}
+                          max={100}
+                          value={visualCfg.progressPercent}
+                          onChange={(e) =>
+                            updateVisualBuilder({ progressPercent: Number(e.target.value) })
+                          }
+                          className="w-full accent-indigo-600"
+                        />
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Theme Palettes & CSS Controls */}
+                  <div className="space-y-2 pt-2 border-t border-slate-100">
+                    <div className="flex items-center gap-1.5 text-[11px] font-bold text-slate-800">
+                      <Palette className="w-3.5 h-3.5 text-indigo-600" />
+                      <span>3. Màu sắc, Bo góc &amp; Đổ bóng CSS</span>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {VISUAL_COLOR_PALETTES.map((pal) => (
+                        <button
+                          key={pal.id}
+                          type="button"
+                          onClick={() => applyColorPalette(pal)}
+                          className="inline-flex items-center gap-1.5 px-2 py-1 text-[11px] font-medium bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md"
+                        >
+                          <span
+                            className={`w-2.5 h-2.5 rounded-full ${PALETTE_DOT_CLASS[pal.id] || 'bg-indigo-600'}`}
+                          />
+                          <span>{pal.label}</span>
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-2 pt-1">
+                      <label className="flex items-center justify-between gap-2 px-2 py-1 bg-slate-50 border border-slate-200 rounded-lg text-[11px]">
+                        <span className="text-slate-600 font-medium">Màu nhấn</span>
+                        <input
+                          type="color"
+                          value={visualCfg.accentColor}
+                          onChange={(e) => updateVisualBuilder({ accentColor: e.target.value })}
+                          className="w-6 h-5 cursor-pointer bg-transparent border-0 p-0"
+                        />
+                      </label>
+                      <label className="flex items-center justify-between gap-2 px-2 py-1 bg-slate-50 border border-slate-200 rounded-lg text-[11px]">
+                        <span className="text-slate-600 font-medium">Nền thẻ</span>
+                        <input
+                          type="color"
+                          value={visualCfg.bgColor}
+                          onChange={(e) => updateVisualBuilder({ bgColor: e.target.value })}
+                          className="w-6 h-5 cursor-pointer bg-transparent border-0 p-0"
+                        />
+                      </label>
+                      <label className="flex items-center justify-between gap-2 px-2 py-1 bg-slate-50 border border-slate-200 rounded-lg text-[11px]">
+                        <span className="text-slate-600 font-medium">Màu chữ</span>
+                        <input
+                          type="color"
+                          value={visualCfg.textColor}
+                          onChange={(e) => updateVisualBuilder({ textColor: e.target.value })}
+                          className="w-6 h-5 cursor-pointer bg-transparent border-0 p-0"
+                        />
+                      </label>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3 pt-1 items-center">
+                      <div>
+                        <label className="block text-[10px] font-semibold text-slate-600 tabular-nums">
+                          Bo góc (border-radius: {visualCfg.radius}px)
+                        </label>
+                        <input
+                          type="range"
+                          min={8}
+                          max={38}
+                          value={visualCfg.radius}
+                          onChange={(e) => updateVisualBuilder({ radius: Number(e.target.value) })}
+                          className="w-full accent-indigo-600"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-semibold text-slate-600 tabular-nums">
+                          Cỡ chữ tiêu đề ({visualCfg.headlineSize}px)
+                        </label>
+                        <input
+                          type="range"
+                          min={24}
+                          max={42}
+                          value={visualCfg.headlineSize}
+                          onChange={(e) =>
+                            updateVisualBuilder({ headlineSize: Number(e.target.value) })
+                          }
+                          className="w-full accent-indigo-600"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-4 text-xs text-slate-700">
+                      <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={visualCfg.showShadow}
+                          onChange={(e) => updateVisualBuilder({ showShadow: e.target.checked })}
+                          className="rounded border-slate-300 text-indigo-600"
+                        />
+                        <span>Đổ bóng (Box Shadow)</span>
+                      </label>
+                      <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={visualCfg.showBorder}
+                          onChange={(e) => updateVisualBuilder({ showBorder: e.target.checked })}
+                          className="rounded border-slate-300 text-indigo-600"
+                        />
+                        <span>Viền thẻ (Border)</span>
+                      </label>
+                    </div>
+
+                    {/* Visual Icon Grid */}
+                    <div>
+                      <div className="text-[10px] font-semibold text-slate-600 mb-1">
+                        Icon minh họa (click chọn nhanh):
+                      </div>
+                      <div className="flex flex-wrap gap-1 max-h-20 overflow-y-auto p-1.5 bg-slate-50 border border-slate-200 rounded-lg">
+                        {ALL_SCENE_ICONS.map((icon) => (
+                          <button
+                            key={icon}
+                            type="button"
+                            onClick={() => updateVisualBuilder({ icon })}
+                            className={`px-2 py-0.5 text-[10px] font-medium rounded border transition-colors ${
+                              visualCfg.icon === icon
+                                ? 'bg-indigo-600 text-white border-indigo-600'
+                                : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
+                            }`}
+                          >
+                            {icon}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Component Identity & Semantic Trigger Metadata */}
+              <div className="p-3 bg-white border border-slate-200 rounded-xl space-y-2.5">
+                <div className="text-[11px] font-bold text-slate-800">
+                  Thông tin &amp; Tự động nhận diện theo lời thoại
+                </div>
+                <div className="grid grid-cols-2 gap-2.5">
+                  <div>
+                    <label className="block text-[10px] font-semibold text-slate-600 mb-0.5">
+                      Mã variant (slug)
+                    </label>
+                    <input
+                      type="text"
+                      disabled={!isCreatingNew && isSelectedBuiltIn}
+                      value={editVariant}
+                      onChange={(e) => setEditVariant(e.target.value)}
+                      className="w-full px-2.5 py-1.5 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg disabled:bg-slate-100 disabled:text-slate-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-semibold text-slate-600 mb-0.5">
+                      Nhóm ngữ cảnh
+                    </label>
+                    <select
+                      value={editCategory}
+                      onChange={(e) => setEditCategory(e.target.value as VectorCategory)}
+                      className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-lg"
+                    >
+                      {(Object.keys(CATEGORY_LABELS) as VectorCategory[]).map((cat) => (
+                        <option key={cat} value={cat}>
+                          {CATEGORY_LABELS[cat]}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-3 gap-2.5">
+                  <div className="col-span-2">
+                    <label className="block text-[10px] font-semibold text-slate-600 mb-0.5">
+                      Tên hiển thị trong Kho
+                    </label>
+                    <input
+                      type="text"
+                      value={editLabel}
+                      onChange={(e) => setEditLabel(e.target.value)}
+                      className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-lg"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-semibold text-slate-600 mb-0.5">
+                      Icon mặc định
+                    </label>
+                    <select
+                      value={editIcon}
+                      onChange={(e) => setEditIcon(e.target.value as IllustrationSceneIcon)}
+                      className="w-full px-2 py-1.5 text-xs bg-white border border-slate-200 rounded-lg"
+                    >
+                      {ALL_SCENE_ICONS.map((icon) => (
+                        <option key={icon} value={icon}>
+                          {icon}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-semibold text-slate-600 mb-0.5">
+                    Mô tả (giúp AI chọn đúng cảnh khi tạo kịch bản)
+                  </label>
+                  <input
+                    type="text"
+                    value={editDescription}
+                    onChange={(e) => setEditDescription(e.target.value)}
+                    className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-lg"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-semibold text-slate-600 mb-0.5">
+                    Từ khóa tự động khớp câu nói (cách nhau dấu phẩy)
+                  </label>
+                  <input
+                    type="text"
+                    value={editKeywords}
+                    onChange={(e) => setEditKeywords(e.target.value)}
+                    placeholder="interview, resume, job, phỏng vấn"
+                    className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-lg"
+                  />
+                </div>
               </div>
+
+              {/* Optional Collapsible Advanced Raw JSON */}
+              <details className="bg-white border border-slate-200 rounded-xl px-3 py-2">
+                <summary className="text-[11px] font-semibold text-slate-600 cursor-pointer inline-flex items-center gap-1.5 select-none">
+                  <Code2 className="w-3.5 h-3.5" />
+                  <span>Nâng cao: Xem / Sửa JSON tọa độ Canvas (tự sinh từ UI Builder)</span>
+                </summary>
+                <div className="mt-2 space-y-1.5">
+                  <textarea
+                    rows={5}
+                    value={editPrimitivesJson}
+                    onChange={(e) => setEditPrimitivesJson(e.target.value)}
+                    className="w-full p-2 text-[11px] font-mono bg-slate-50 border border-slate-200 rounded-lg leading-relaxed focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                  <p className="text-[10px] text-slate-500">
+                    Để <code>[]</code> nếu muốn giữ nguyên hình vẽ gốc của hệ thống và chỉ sửa tên/từ khóa.
+                  </p>
+                </div>
+              </details>
 
               {(editorError || parsedEditorPrimitives.error) && (
                 <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg p-2">
@@ -747,7 +1166,7 @@ export const ComponentDatabaseModal: React.FC<ComponentDatabaseModalProps> = ({
                 <button
                   type="button"
                   onClick={() => void handleSaveEditor()}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-indigo-600 rounded-lg hover:bg-indigo-700"
+                  className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 shadow-xs"
                 >
                   <Save className="w-3.5 h-3.5" />
                   <span>Lưu vào Database</span>
@@ -768,8 +1187,8 @@ export const ComponentDatabaseModal: React.FC<ComponentDatabaseModalProps> = ({
                 </p>
               </div>
 
-              <div className="grid grid-cols-3 gap-2.5">
-                <div className="col-span-2">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                <div className="sm:col-span-2">
                   <label className="block text-[11px] font-semibold text-slate-700 mb-1">
                     Ý tưởng / Cảnh cần AI vẽ
                   </label>
@@ -777,7 +1196,7 @@ export const ComponentDatabaseModal: React.FC<ComponentDatabaseModalProps> = ({
                     type="text"
                     value={aiConcept}
                     onChange={(e) => setAiConcept(e.target.value)}
-                    placeholder="VD: Gửi bưu kiện ở bưu điện, Phỏng vấn online qua Zoom..."
+                    placeholder="VD: Thẻ Bootstrap so sánh 2 thì quá khứ..."
                     className="w-full px-3 py-2 text-xs bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   />
                 </div>
@@ -797,6 +1216,24 @@ export const ComponentDatabaseModal: React.FC<ComponentDatabaseModalProps> = ({
                     ))}
                   </select>
                 </div>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                  Dựa theo mẫu UI có sẵn để AI tùy biến (tùy chọn)
+                </label>
+                <select
+                  value={aiBaseVariant}
+                  onChange={(e) => setAiBaseVariant(e.target.value)}
+                  className="w-full px-2.5 py-2 text-xs bg-white border border-slate-200 rounded-lg"
+                >
+                  <option value="">Tự do thiết kế từ đầu</option>
+                  {catalog.map((item) => (
+                    <option key={item.variant} value={item.variant}>
+                      {item.label} ({item.variant}) — {item.description}
+                    </option>
+                  ))}
+                </select>
               </div>
 
               <textarea
@@ -823,7 +1260,7 @@ export const ComponentDatabaseModal: React.FC<ComponentDatabaseModalProps> = ({
                   Bước 2: Dán JSON từ AI Web &amp; Xem trước Live
                 </h3>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Hỗ trợ cả 1 object hoặc mảng nhiều component cùng lúc. Sau khi thêm, các video mới &amp; AI Prompt Video sẽ tự động có thêm các component này.
+                  Hỗ trợ cả 1 object hoặc mảng nhiều component cùng lúc. Sau khi thêm, bạn vẫn có thể chỉnh sửa lại bằng Visual UI Builder.
                 </p>
               </div>
 

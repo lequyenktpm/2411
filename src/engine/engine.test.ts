@@ -78,8 +78,14 @@ import {
   detectReelMode,
   parseEnglishReelsAiJson,
   reelCardsToLessonProject,
+  sanitizeTtsSpeech,
   splitMultipleExercisesFromText,
 } from './englishReelsEngine';
+import {
+  compileVisualBuilderToPrimitives,
+  createDefaultVisualBuilderConfig,
+  VISUAL_LAYOUT_PRESETS,
+} from './visualComponentBuilder';
 
 test('interpolateWordTimings distributes word timestamps across cue duration', () => {
   const words = interpolateWordTimings('Give me water please', 1.0, 3.0);
@@ -968,7 +974,216 @@ Answer: A`;
   assert.equal(findVisualOverlaps(project.elements).length, 0);
 });
 
+test('Bootstrap & Modern CSS component variants and Visual No-Code Builder compile cleanly', () => {
+  assert.ok(ALL_ILLUSTRATION_VARIANTS.includes('bs-alert-tip'));
+  assert.ok(ALL_ILLUSTRATION_VARIANTS.includes('bs-card-header'));
+  assert.ok(ALL_ILLUSTRATION_VARIANTS.includes('bs-progress-meter'));
+  assert.ok(ALL_ILLUSTRATION_VARIANTS.includes('css-bento-stats'));
+  assert.ok(ALL_ILLUSTRATION_VARIANTS.includes('css-browser-mockup'));
+  assert.ok(ALL_ILLUSTRATION_VARIANTS.includes('css-flashcard-flip'));
+  assert.ok(ALL_ILLUSTRATION_VARIANTS.length >= 46);
 
+  assert.equal(
+    resolveContextualVisualForCue('Apply the grammar rule formula for passive voice').variant,
+    'css-grammar-equation',
+  );
+  assert.equal(
+    resolveContextualVisualForCue('Track your fluency progress goal this month').variant,
+    'bs-progress-meter',
+  );
+  assert.equal(
+    resolveContextualVisualForCue('Reading an online article in your web browser').variant,
+    'css-browser-mockup',
+  );
+
+  for (const preset of VISUAL_LAYOUT_PRESETS) {
+    const cfg = createDefaultVisualBuilderConfig({
+      preset: preset.id,
+      badgeText: 'PRO TIP',
+      headline: 'Could you pass the salt?',
+      subtext: 'Polite everyday request',
+    });
+    const primitives = compileVisualBuilderToPrimitives(cfg);
+    assert.ok(primitives.length >= 4, `Preset ${preset.id} produced too few primitives`);
+    assert.ok(
+      primitives.some((p) => p.shape === 'text'),
+      `Preset ${preset.id} missing text primitive`,
+    );
+  }
+});
+
+test('sanitizeTtsSpeech strips headings, quiz metadata, IPA, emojis, and markdown while keeping clean English speech', () => {
+  const dirty = 'True/False Quiz\n1. **Commute** & travel /kəˈmjuːt/ 🎯 means going to work.\nAnswer: A';
+  const cleaned = sanitizeTtsSpeech(dirty);
+  assert.ok(!cleaned.includes('True/False'));
+  assert.ok(!cleaned.includes('/kəˈmjuːt/'));
+  assert.ok(!cleaned.includes('Answer:'));
+  assert.ok(!cleaned.includes('🎯'));
+  assert.ok(!cleaned.includes('**'));
+  assert.ok(!cleaned.includes('&'));
+  assert.ok(cleaned.includes('Commute and travel'));
+  assert.ok(cleaned.includes('going to work'));
+});
+
+test('English Reels Studio builds interactive 4-part lesson, preserves customized UI components & 5s quiz countdown without overlaps', () => {
+  const mixedLesson = `## Hotel Check-in & Polite Requests
+When checking in, polite requests sound warmer.
+1. Could we have a quiet room on a higher floor?
+
+True / False Quiz
+Q1. Saying Give me the key sounds friendlier than Could I have.
+(A) True
+(B) False
+Answer: B
+Explanation: Modal verbs like Could I soften requests politely.`;
+
+  const built = buildReelCardsRuleBased(mixedLesson, {
+    title: 'Hotel Check-in & Polite Requests',
+    mode: 'auto',
+    targetLang: 'Tiếng Việt',
+  });
+
+  assert.ok(built.cards.some((c) => c.type === 'intro' && c.visual?.variant === 'bs-card-header'));
+  assert.ok(built.cards.some((c) => c.type === 'vocab'));
+  const quizCard = built.cards.find((c) => c.type === 'quiz');
+  assert.ok(quizCard);
+  assert.equal(quizCard!.thinkSec, 5);
+  assert.ok(quizCard!.ttsAnswerText?.includes('False'));
+  assert.ok(built.cards.some((c) => c.type === 'outro' && c.visual?.variant === 'css-bento-stats'));
+
+  const prompt = buildEnglishReelsWebAiPrompt({
+    sourceText: mixedLesson,
+    mode: 'auto',
+    targetLang: 'Tiếng Việt',
+  });
+  assert.ok(prompt.includes('bs-card-header'));
+  assert.ok(prompt.includes('css-flashcard-flip'));
+  assert.ok(prompt.includes('"thinkSec": 5'));
+
+  const project = reelCardsToLessonProject(built.cards, {
+    title: built.title,
+    theme: 'pastel-sunrise',
+    compositionId: 'story-scenes',
+  });
+
+  // Ensure quiz 5s countdown pills, progress meter, quiz option comparison-strip, and custom UI components are preserved!
+  assert.ok(
+    project.elements.some(
+      (e) => e.type === 'topic-pill' && e.props.kind === 'topic-pill' && e.props.text.includes('5 GIÂY'),
+    ),
+  );
+  assert.ok(
+    project.elements.some(
+      (e) =>
+        e.type === 'illustration-prop' &&
+        e.props.kind === 'illustration-prop' &&
+        e.props.variant === 'bs-progress-meter',
+    ),
+  );
+  assert.ok(
+    project.elements.some(
+      (e) =>
+        e.type === 'comparison-strip' &&
+        e.id.startsWith('reel-quiz-opts-') &&
+        e.props.kind === 'comparison-strip' &&
+        e.props.items.length >= 2,
+    ),
+  );
+  assert.ok(
+    project.elements.some(
+      (e) =>
+        e.type === 'illustration-prop' &&
+        e.props.kind === 'illustration-prop' &&
+        e.props.variant === 'bs-card-header',
+    ),
+  );
+  assert.equal(findVisualOverlaps(project.elements).length, 0);
+});
+
+test('supports 50+ @englishpracticing168 Bootstrap/CSS variants, inline customPrimitives in scenePlanToProject, and anti-repetition prompts', () => {
+  assert.ok(ALL_ILLUSTRATION_VARIANTS.includes('css-sticky-note'));
+  assert.ok(ALL_ILLUSTRATION_VARIANTS.includes('bs-badge-cluster'));
+  assert.ok(ALL_ILLUSTRATION_VARIANTS.includes('css-magnifying-word'));
+  assert.ok(ALL_ILLUSTRATION_VARIANTS.includes('bs-modal-quiz'));
+  assert.ok(ALL_ILLUSTRATION_VARIANTS.length >= 50);
+
+  assert.equal(
+    resolveContextualVisualForCue('Golden rule sticky note reminder').variant,
+    'css-sticky-note',
+  );
+  assert.equal(
+    resolveContextualVisualForCue('Learn these collocation alternatives').variant,
+    'bs-badge-cluster',
+  );
+  assert.equal(
+    resolveContextualVisualForCue('Zoom in for a closer look at the nuance').variant,
+    'css-magnifying-word',
+  );
+  assert.equal(
+    resolveContextualVisualForCue('Time for a quick check pop quiz').variant,
+    'bs-modal-quiz',
+  );
+
+  // Verify inline customPrimitives in KineticSub AI JSON passes cleanly through scenePlanToProject
+  const cues = parseTranscriptAuto('00:00:00.000\nCheck this custom Bootstrap badge card.');
+  const customPlan = parseScenePlanJson(
+    JSON.stringify({
+      title: 'Custom Inline UI',
+      theme: 'pastel-sunrise',
+      scenes: [
+        {
+          id: 'sc1',
+          elements: [
+            {
+              type: 'illustration',
+              variant: 'custom-ui',
+              start: '00:00:00.000',
+              end: '00:00:04.000',
+              y: 635,
+              customPrimitives: [
+                { shape: 'rect', x: -320, y: -120, w: 640, h: 240, radius: 24, fill: '#FFFFFF', shadow: true },
+                { shape: 'pill', x: -110, y: -95, w: 220, h: 40, fill: '#DBEAFE' },
+                { shape: 'text', x: 0, y: 15, text: 'CUSTOM BOOTSTRAP UI', fill: '#1E3A8A', fontSize: 28, fontWeight: 800 },
+              ],
+            },
+          ],
+        },
+      ],
+    }),
+  );
+  assert.ok(customPlan !== null);
+  const adapted = scenePlanToProject(
+    cues.flatMap((c) => c.words),
+    customPlan!,
+    { cuesOverride: cues },
+  );
+  const illus = adapted.elements.find((e) => e.props.kind === 'illustration-prop');
+  assert.ok(illus && illus.props.kind === 'illustration-prop');
+  assert.ok(Array.isArray(illus.props.data?.customPrimitives));
+  assert.equal(illus.props.data!.customPrimitives!.length, 3);
+  assert.equal(findVisualOverlaps(adapted.elements).length, 0);
+
+  // Verify both Web AI prompts teach Bootstrap/CSS recipes, customPrimitives, and anti-repetition rules
+  const studioPrompt = buildSceneGenerationPrompt(cues, {
+    title: 'Custom Prompt Test',
+    style: 'tiktok-cards',
+    compositionId: 'ai-decide',
+  });
+  assert.ok(studioPrompt.includes('customPrimitives'));
+  assert.ok(studioPrompt.includes('BOOTSTRAP 5 / MODERN CSS'));
+  assert.ok(studioPrompt.includes('LUẬT CHỐNG ĐỤNG HÀNG'));
+  assert.ok(studioPrompt.includes('css-sticky-note'));
+
+  const reelsPrompt = buildEnglishReelsWebAiPrompt({
+    sourceText: 'Practice airport phrases politely.',
+    mode: 'auto',
+    targetLang: 'Tiếng Việt',
+  });
+  assert.ok(reelsPrompt.includes('customPrimitives'));
+  assert.ok(reelsPrompt.includes('BOOTSTRAP 5 / MODERN CSS'));
+  assert.ok(reelsPrompt.includes('LUẬT KHÔNG ĐỤNG HÀNG'));
+  assert.ok(reelsPrompt.includes('bs-badge-cluster'));
+});
 
 
 

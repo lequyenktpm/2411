@@ -898,6 +898,12 @@ function drawIllustrationProp(
   ctx.save();
   ctx.translate(0, floatOffset);
 
+  if (props.data?.customPrimitives && props.data.customPrimitives.length > 0) {
+    drawVectorPrimitives(ctx, props.data.customPrimitives, time, (icon) => drawSceneIcon(ctx, icon));
+    ctx.restore();
+    return;
+  }
+
   const customDef = getCustomComponentByVariant(props.variant);
   if (customDef && customDef.primitives && customDef.primitives.length > 0) {
     drawVectorPrimitives(ctx, customDef.primitives, time, (icon) => drawSceneIcon(ctx, icon));
@@ -2063,6 +2069,801 @@ function drawIllustrationProp(
     ctx.font = `700 28px ${FONT_DISPLAY}`;
     ctx.fillStyle = '#0F172A';
     ctx.fillText(props.data?.speechText || 'Watch the pitch flow!', 0, 76, 760);
+  } else if (props.variant === 'bs-alert-tip') {
+    // Bootstrap Callout / Alert Banner with left accent stripe, pill badge & icon
+    fillCardWithShadow(ctx, -420, -112, 840, 224, 24, '#EFF6FF', 0.08);
+    ctx.strokeStyle = '#BFDBFE';
+    ctx.lineWidth = 3;
+    drawRoundedRectPath(ctx, -420, -112, 840, 224, 24);
+    ctx.stroke();
+    // Left Bootstrap border-start accent bar
+    ctx.fillStyle = '#2563EB';
+    drawRoundedRectPath(ctx, -420, -112, 18, 224, 9);
+    ctx.fill();
+    // Icon circle
+    ctx.fillStyle = '#DBEAFE';
+    ctx.beginPath();
+    ctx.arc(-326, 0, 52, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.save();
+    ctx.translate(-326, 0);
+    ctx.scale(0.62, 0.62);
+    drawSceneIcon(ctx, props.data?.sceneIcon || 'lightning');
+    ctx.restore();
+    // Badge pill
+    ctx.fillStyle = '#2563EB';
+    drawRoundedRectPath(ctx, -245, -72, 168, 36, 18);
+    ctx.fill();
+    ctx.font = `800 17px ${FONT_SANS}`;
+    ctx.fillStyle = '#FFFFFF';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('HEADS UP!', -161, -54, 150);
+    // Title & Body
+    ctx.textAlign = 'left';
+    ctx.font = `800 33px ${FONT_DISPLAY}`;
+    ctx.fillStyle = '#1E3A8A';
+    ctx.fillText(props.data?.title || 'Quick Grammar Alert', -245, 0, 610);
+    ctx.font = `600 24px ${FONT_SANS}`;
+    ctx.fillStyle = '#334155';
+    ctx.fillText(
+      props.data?.speechText || props.data?.subtitle || 'Remember this polite pattern in daily English!',
+      -245,
+      54,
+      610,
+    );
+  } else if (props.variant === 'bs-card-header') {
+    // Bootstrap Card with Colored Header Bar + Body + Footer Pill
+    fillCardWithShadow(ctx, -415, -132, 830, 264, 26, '#FFFFFF', 0.1);
+    ctx.strokeStyle = '#E2E8F0';
+    ctx.lineWidth = 2.5;
+    drawRoundedRectPath(ctx, -415, -132, 830, 264, 26);
+    ctx.stroke();
+    // Top Header
+    ctx.fillStyle = '#4F46E5';
+    drawRoundedRectPath(ctx, -415, -132, 830, 68, 24);
+    ctx.fill();
+    ctx.fillRect(-415, -88, 830, 24);
+    ctx.font = `800 24px ${FONT_DISPLAY}`;
+    ctx.fillStyle = '#FFFFFF';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(props.data?.formula || 'FEATURED LESSON CARD', -382, -98, 560);
+    ctx.fillStyle = 'rgba(255,255,255,0.22)';
+    drawRoundedRectPath(ctx, 245, -114, 144, 34, 17);
+    ctx.fill();
+    ctx.font = `700 17px ${FONT_SANS}`;
+    ctx.fillStyle = '#FFFFFF';
+    ctx.textAlign = 'center';
+    ctx.fillText('BS5 CARD', 317, -97);
+    // Body
+    ctx.save();
+    ctx.translate(-328, 32);
+    ctx.scale(0.66, 0.66);
+    drawSceneIcon(ctx, props.data?.sceneIcon || 'book');
+    ctx.restore();
+    ctx.textAlign = 'left';
+    ctx.font = `800 34px ${FONT_DISPLAY}`;
+    ctx.fillStyle = '#0F172A';
+    ctx.fillText(props.data?.title || 'Key Sentence Structure', -240, 2, 620);
+    ctx.font = `600 24px ${FONT_SANS}`;
+    ctx.fillStyle = '#475569';
+    ctx.fillText(
+      props.data?.subtitle || props.data?.speechText || 'Clear, structured explanation for fast recall',
+      -240,
+      54,
+      620,
+    );
+    // Subtle footer divider & chip
+    ctx.strokeStyle = '#F1F5F9';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(-382, 92);
+    ctx.lineTo(382, 92);
+    ctx.stroke();
+    ctx.font = `700 18px ${FONT_SANS}`;
+    ctx.fillStyle = '#6366F1';
+    ctx.fillText('✓ Save this template for speaking', -382, 114, 720);
+  } else if (props.variant === 'bs-progress-meter') {
+    // Bootstrap Progress Bar with Milestone Badge & Striped Fill
+    const pct = clamp01(props.data?.value ?? 0.78);
+    const pctLabel = `${Math.round(pct * 100)}%`;
+    fillCardWithShadow(ctx, -420, -112, 840, 224, 28, '#FFFFFF', 0.09);
+    ctx.strokeStyle = '#E2E8F0';
+    ctx.lineWidth = 2;
+    drawRoundedRectPath(ctx, -420, -112, 840, 224, 28);
+    ctx.stroke();
+
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.font = `800 30px ${FONT_DISPLAY}`;
+    ctx.fillStyle = '#0F172A';
+    ctx.fillText(props.data?.title || 'Fluency Progress', -376, -54, 540);
+
+    // % Badge pill on right
+    ctx.fillStyle = '#DCFCE7';
+    drawRoundedRectPath(ctx, 250, -76, 126, 44, 22);
+    ctx.fill();
+    ctx.font = `800 24px ${FONT_DISPLAY}`;
+    ctx.fillStyle = '#15803D';
+    ctx.textAlign = 'center';
+    ctx.fillText(pctLabel, 313, -54);
+
+    // Track
+    const barX = -376;
+    const barW = 752;
+    const barY = -8;
+    const barH = 42;
+    ctx.fillStyle = '#E2E8F0';
+    drawRoundedRectPath(ctx, barX, barY, barW, barH, 21);
+    ctx.fill();
+
+    // Active Gradient Fill + Bootstrap stripes
+    const fillW = Math.max(48, barW * pct);
+    const grad = ctx.createLinearGradient(barX, 0, barX + fillW, 0);
+    grad.addColorStop(0, '#0D6EFD');
+    grad.addColorStop(1, '#10B981');
+    ctx.save();
+    drawRoundedRectPath(ctx, barX, barY, fillW, barH, 21);
+    ctx.clip();
+    ctx.fillStyle = grad;
+    ctx.fillRect(barX, barY, fillW, barH);
+    ctx.fillStyle = 'rgba(255,255,255,0.22)';
+    const offset = (time * 36) % 36;
+    for (let sx = barX - 40 + offset; sx < barX + fillW + 40; sx += 36) {
+      ctx.beginPath();
+      ctx.moveTo(sx, barY + barH);
+      ctx.lineTo(sx + 16, barY);
+      ctx.lineTo(sx + 30, barY);
+      ctx.lineTo(sx + 14, barY + barH);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.restore();
+
+    ctx.textAlign = 'left';
+    ctx.font = `600 22px ${FONT_SANS}`;
+    ctx.fillStyle = '#64748B';
+    ctx.fillText(
+      props.data?.subtitle || 'Step-by-step mastery · Keep practicing every day!',
+      -376,
+      68,
+      740,
+    );
+  } else if (props.variant === 'bs-toast-notify') {
+    // Bootstrap Floating Toast Notification
+    fillCardWithShadow(ctx, -400, -116, 800, 232, 26, '#FFFFFF', 0.12);
+    ctx.strokeStyle = '#CBD5E1';
+    ctx.lineWidth = 2;
+    drawRoundedRectPath(ctx, -400, -116, 800, 232, 26);
+    ctx.stroke();
+
+    // Header row inside Toast
+    ctx.fillStyle = '#F8FAFC';
+    drawRoundedRectPath(ctx, -400, -116, 800, 62, 24);
+    ctx.fill();
+    ctx.fillRect(-400, -76, 800, 22);
+    ctx.fillStyle = '#10B981';
+    drawRoundedRectPath(ctx, -366, -98, 28, 28, 8);
+    ctx.fill();
+    ctx.font = `800 22px ${FONT_DISPLAY}`;
+    ctx.fillStyle = '#0F172A';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('Native Coach', -324, -84);
+    ctx.font = `600 18px ${FONT_SANS}`;
+    ctx.fillStyle = '#64748B';
+    ctx.textAlign = 'right';
+    ctx.fillText('just now · ✓ verified', 366, -84);
+
+    // Divider
+    ctx.strokeStyle = '#E2E8F0';
+    ctx.beginPath();
+    ctx.moveTo(-400, -54);
+    ctx.lineTo(400, -54);
+    ctx.stroke();
+
+    // Body
+    ctx.save();
+    ctx.translate(-310, 30);
+    ctx.scale(0.6, 0.6);
+    drawSceneIcon(ctx, props.data?.sceneIcon || 'chat');
+    ctx.restore();
+    ctx.textAlign = 'left';
+    ctx.font = `800 32px ${FONT_DISPLAY}`;
+    ctx.fillStyle = '#0F172A';
+    ctx.fillText(props.data?.title || 'New Phrase Unlocked!', -225, 4, 590);
+    ctx.font = `600 24px ${FONT_SANS}`;
+    ctx.fillStyle = '#334155';
+    ctx.fillText(
+      props.data?.speechText || '"Sounds natural & friendly!"',
+      -225,
+      54,
+      590,
+    );
+  } else if (props.variant === 'bs-list-group') {
+    // Bootstrap Flush List Group with Numbered Badges
+    const items = props.data?.labels?.slice(0, 3) ?? [
+      '1. Listen to native rhythm',
+      '2. Repeat out loud 3 times',
+      '3. Use in a real sentence',
+    ];
+    fillCardWithShadow(ctx, -415, -132, 830, 264, 26, '#FFFFFF', 0.09);
+    ctx.strokeStyle = '#E2E8F0';
+    ctx.lineWidth = 2;
+    drawRoundedRectPath(ctx, -415, -132, 830, 264, 26);
+    ctx.stroke();
+
+    items.forEach((row, i) => {
+      const ry = -84 + i * 84;
+      if (i === 1) {
+        ctx.fillStyle = '#EFF6FF';
+        drawRoundedRectPath(ctx, -400, ry - 34, 800, 68, 16);
+        ctx.fill();
+      }
+      if (i > 0) {
+        ctx.strokeStyle = '#F1F5F9';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(-395, ry - 42);
+        ctx.lineTo(395, ry - 42);
+        ctx.stroke();
+      }
+      // Circle badge
+      ctx.fillStyle = i === 1 ? '#2563EB' : '#64748B';
+      ctx.beginPath();
+      ctx.arc(-352, ry, 20, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.font = `800 20px ${FONT_DISPLAY}`;
+      ctx.fillStyle = '#FFFFFF';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(`${i + 1}`, -352, ry + 1);
+
+      ctx.textAlign = 'left';
+      ctx.font = `${i === 1 ? 800 : 700} 26px ${FONT_DISPLAY}`;
+      ctx.fillStyle = i === 1 ? '#1D4ED8' : '#1E293B';
+      ctx.fillText(row, -310, ry + 1, 610);
+
+      // Right pill
+      ctx.fillStyle = i === 1 ? '#2563EB' : '#F1F5F9';
+      drawRoundedRectPath(ctx, 314, ry - 16, 74, 32, 16);
+      ctx.fill();
+      ctx.font = `700 16px ${FONT_SANS}`;
+      ctx.fillStyle = i === 1 ? '#FFFFFF' : '#64748B';
+      ctx.textAlign = 'center';
+      ctx.fillText(i === 1 ? 'ACTIVE' : 'KEY', 351, ry + 1);
+    });
+  } else if (props.variant === 'bs-pricing-tier') {
+    // Two-column Bootstrap Compare Tier Cards (Basic vs Recommended Pro)
+    const leftTxt = props.data?.labels?.[0] || 'Textbook Style';
+    const rightTxt = props.data?.labels?.[1] || 'Native Fluency';
+
+    // Left Basic Card
+    fillCardWithShadow(ctx, -420, -118, 392, 236, 26, '#FFFFFF', 0.07);
+    ctx.strokeStyle = '#E2E8F0';
+    ctx.lineWidth = 2;
+    drawRoundedRectPath(ctx, -420, -118, 392, 236, 26);
+    ctx.stroke();
+    ctx.fillStyle = '#F1F5F9';
+    drawRoundedRectPath(ctx, -386, -88, 120, 34, 17);
+    ctx.fill();
+    ctx.font = `700 17px ${FONT_SANS}`;
+    ctx.fillStyle = '#64748B';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('BASIC', -326, -71);
+    ctx.font = `800 30px ${FONT_DISPLAY}`;
+    ctx.fillStyle = '#334155';
+    ctx.fillText(leftTxt, -224, -4, 340);
+    ctx.font = `600 21px ${FONT_SANS}`;
+    ctx.fillStyle = '#94A3B8';
+    ctx.fillText('✗ Stiff / Word-for-word', -224, 58, 340);
+
+    // Right Recommended Highlighted Card
+    fillCardWithShadow(ctx, 28, -126, 392, 252, 26, '#EEF2FF', 0.14);
+    ctx.strokeStyle = '#4F46E5';
+    ctx.lineWidth = 4;
+    drawRoundedRectPath(ctx, 28, -126, 392, 252, 26);
+    ctx.stroke();
+    ctx.fillStyle = '#4F46E5';
+    drawRoundedRectPath(ctx, 62, -98, 196, 36, 18);
+    ctx.fill();
+    ctx.font = `800 17px ${FONT_SANS}`;
+    ctx.fillStyle = '#FFFFFF';
+    ctx.fillText('★ RECOMMENDED', 160, -80);
+    ctx.font = `800 31px ${FONT_DISPLAY}`;
+    ctx.fillStyle = '#312E81';
+    ctx.fillText(rightTxt, 224, -6, 340);
+    ctx.font = `700 22px ${FONT_SANS}`;
+    ctx.fillStyle = '#15803D';
+    ctx.fillText('✓ Sounds 100% Natural', 224, 60, 340);
+  } else if (props.variant === 'bs-accordion-faq') {
+    // Bootstrap Accordion Q&A Drawer
+    fillCardWithShadow(ctx, -420, -128, 840, 256, 26, '#FFFFFF', 0.09);
+    ctx.strokeStyle = '#CBD5E1';
+    ctx.lineWidth = 2;
+    drawRoundedRectPath(ctx, -420, -128, 840, 256, 26);
+    ctx.stroke();
+
+    // Expanded Question header
+    ctx.fillStyle = '#E0E7FF';
+    drawRoundedRectPath(ctx, -420, -128, 840, 74, 24);
+    ctx.fill();
+    ctx.fillRect(-420, -78, 840, 24);
+    ctx.font = `800 28px ${FONT_DISPLAY}`;
+    ctx.fillStyle = '#3730A3';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(`Q: ${props.data?.title || 'Why do natives say this?'}`, -386, -90, 700);
+    ctx.textAlign = 'right';
+    ctx.fillText('▲', 386, -90);
+
+    // Answer body
+    ctx.textAlign = 'left';
+    ctx.font = `600 25px ${FONT_SANS}`;
+    ctx.fillStyle = '#1E293B';
+    ctx.fillText(
+      props.data?.speechText || props.data?.subtitle || 'A: It softens requests and builds instant rapport.',
+      -386,
+      0,
+      768,
+    );
+
+    // Collapsed second drawer hint
+    ctx.strokeStyle = '#E2E8F0';
+    ctx.beginPath();
+    ctx.moveTo(-420, 56);
+    ctx.lineTo(420, 56);
+    ctx.stroke();
+    ctx.font = `700 22px ${FONT_SANS}`;
+    ctx.fillStyle = '#64748B';
+    ctx.fillText('Q: Common mistake to avoid?', -386, 92, 660);
+    ctx.textAlign = 'right';
+    ctx.fillText('▼', 386, 92);
+  } else if (props.variant === 'bs-breadcrumb-path') {
+    // Bootstrap Breadcrumb / Pill Nav Step Card
+    const crumbs = props.data?.labels?.slice(0, 3) ?? ['Context', 'Pattern', 'Fluent!'];
+    fillCardWithShadow(ctx, -425, -104, 850, 208, 28, '#FFFFFF', 0.09);
+    ctx.font = `700 20px ${FONT_SANS}`;
+    ctx.fillStyle = '#64748B';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(props.data?.title || 'LEARNING PATHWAY', 0, -64, 720);
+
+    const xs = [-260, 0, 260];
+    crumbs.forEach((c, i) => {
+      const cx = xs[i];
+      const active = i === crumbs.length - 1;
+      ctx.fillStyle = active ? '#0D6EFD' : '#F1F5F9';
+      drawRoundedRectPath(ctx, cx - 106, -24, 212, 66, 33);
+      ctx.fill();
+      ctx.font = `800 25px ${FONT_DISPLAY}`;
+      ctx.fillStyle = active ? '#FFFFFF' : '#334155';
+      ctx.fillText(c, cx, 10, 184);
+      if (i < crumbs.length - 1) {
+        ctx.font = `800 28px ${FONT_SANS}`;
+        ctx.fillStyle = '#94A3B8';
+        ctx.fillText('›', cx + 130, 10);
+      }
+    });
+  } else if (props.variant === 'css-bento-stats') {
+    // Modern 2x2 CSS Bento Grid
+    const tiles = [
+      { bg: '#EEF2FF', fg: '#4338CA', num: '01', lbl: props.data?.labels?.[0] || 'Core Word' },
+      { bg: '#ECFDF5', fg: '#047857', num: '02', lbl: props.data?.labels?.[1] || 'Tone Check' },
+      { bg: '#FFF7ED', fg: '#C2410C', num: '03', lbl: props.data?.labels?.[2] || 'Pronunciation' },
+      { bg: '#FDF2F8', fg: '#BE185D', num: '★', lbl: props.data?.title || 'Real Example' },
+    ];
+    const coords = [
+      [-420, -126],
+      [12, -126],
+      [-420, 8],
+      [12, 8],
+    ];
+    tiles.forEach((tile, i) => {
+      const [tx, ty] = coords[i];
+      fillCardWithShadow(ctx, tx, ty, 408, 118, 22, tile.bg, 0.06);
+      ctx.fillStyle = tile.fg;
+      drawRoundedRectPath(ctx, tx + 18, ty + 31, 56, 56, 16);
+      ctx.fill();
+      ctx.font = `800 24px ${FONT_DISPLAY}`;
+      ctx.fillStyle = '#FFFFFF';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(tile.num, tx + 46, ty + 60);
+      ctx.textAlign = 'left';
+      ctx.fillStyle = '#0F172A';
+      ctx.font = `800 26px ${FONT_DISPLAY}`;
+      ctx.fillText(tile.lbl, tx + 92, ty + 60, 294);
+    });
+  } else if (props.variant === 'css-glass-quote') {
+    // Modern Glassmorphism Quote Callout
+    const grad = ctx.createLinearGradient(-420, -124, 420, 124);
+    grad.addColorStop(0, 'rgba(99, 102, 241, 0.16)');
+    grad.addColorStop(1, 'rgba(236, 72, 153, 0.14)');
+    fillCardWithShadow(ctx, -420, -124, 840, 248, 32, 'rgba(255,255,255,0.86)', 0.12);
+    ctx.fillStyle = grad;
+    drawRoundedRectPath(ctx, -420, -124, 840, 248, 32);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.92)';
+    ctx.lineWidth = 4;
+    ctx.stroke();
+
+    // Big Quote Mark
+    ctx.font = `800 84px ${FONT_DISPLAY}`;
+    ctx.fillStyle = '#6366F1';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('“', -382, -52);
+
+    ctx.textAlign = 'center';
+    ctx.font = `800 34px ${FONT_DISPLAY}`;
+    ctx.fillStyle = '#0F172A';
+    ctx.fillText(
+      props.data?.speechText || props.data?.title || 'Speak clearly, connect naturally.',
+      0,
+      -8,
+      680,
+    );
+
+    // Author / Tag Pill
+    ctx.fillStyle = '#FFFFFF';
+    drawRoundedRectPath(ctx, -155, 48, 310, 44, 22);
+    ctx.fill();
+    ctx.font = `700 20px ${FONT_SANS}`;
+    ctx.fillStyle = '#4F46E5';
+    ctx.fillText(props.data?.subtitle || '✨ Native Takeaway', 0, 70, 280);
+  } else if (props.variant === 'css-chat-thread') {
+    // Modern 2-Bubble Dialogue Chat Thread
+    fillCardWithShadow(ctx, -420, -132, 840, 264, 30, '#F8FAFC', 0.08);
+    // Incoming left bubble
+    fillCardWithShadow(ctx, -382, -100, 540, 82, 24, '#FFFFFF', 0.06);
+    ctx.font = `600 25px ${FONT_SANS}`;
+    ctx.fillStyle = '#334155';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(props.data?.labels?.[0] || 'A: "Excuse me, is this seat taken?"', -352, -58, 480);
+
+    // Outgoing right indigo bubble
+    fillCardWithShadow(ctx, -160, 12, 542, 86, 24, '#4F46E5', 0.14);
+    ctx.font = `700 25px ${FONT_DISPLAY}`;
+    ctx.fillStyle = '#FFFFFF';
+    ctx.fillText(props.data?.labels?.[1] || 'B: "Not at all! Go right ahead."', -130, 56, 480);
+  } else if (props.variant === 'css-roadmap-steps') {
+    // Modern CSS 3-Step Horizontal Stepper
+    const steps = props.data?.labels?.slice(0, 3) ?? ['Spot It', 'Practice', 'Master'];
+    const cols = ['#2563EB', '#7C3AED', '#10B981'];
+    fillCardWithShadow(ctx, -425, -112, 850, 224, 30, '#FFFFFF', 0.09);
+    // Connector line
+    ctx.strokeStyle = '#E2E8F0';
+    ctx.lineWidth = 8;
+    ctx.beginPath();
+    ctx.moveTo(-260, -24);
+    ctx.lineTo(260, -24);
+    ctx.stroke();
+
+    const xs = [-260, 0, 260];
+    steps.forEach((lbl, i) => {
+      const sx = xs[i];
+      ctx.fillStyle = cols[i];
+      ctx.beginPath();
+      ctx.arc(sx, -24, 32, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.font = `800 26px ${FONT_DISPLAY}`;
+      ctx.fillStyle = '#FFFFFF';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(`0${i + 1}`, sx, -23);
+
+      ctx.font = `800 26px ${FONT_DISPLAY}`;
+      ctx.fillStyle = '#0F172A';
+      ctx.fillText(lbl, sx, 48, 220);
+    });
+  } else if (props.variant === 'css-toggle-switch') {
+    // Modern CSS Toggle Switch Comparison Card
+    const isOn = (props.data?.value ?? 1) >= 0.5;
+    fillCardWithShadow(ctx, -415, -112, 830, 224, 30, '#FFFFFF', 0.09);
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.font = `700 22px ${FONT_SANS}`;
+    ctx.fillStyle = '#94A3B8';
+    ctx.fillText(props.data?.labels?.[0] || 'OFF · Basic / Literal', -370, -48, 430);
+    ctx.font = `800 34px ${FONT_DISPLAY}`;
+    ctx.fillStyle = '#0F172A';
+    ctx.fillText(props.data?.title || 'ON · Native Mode', -370, 22, 460);
+
+    // Toggle track
+    const tx = 140;
+    const ty = -46;
+    ctx.fillStyle = isOn ? '#10B981' : '#CBD5E1';
+    drawRoundedRectPath(ctx, tx, ty, 224, 92, 46);
+    ctx.fill();
+    // Knob
+    ctx.save();
+    ctx.shadowColor = 'rgba(15, 23, 42, 0.25)';
+    ctx.shadowBlur = 12;
+    ctx.fillStyle = '#FFFFFF';
+    ctx.beginPath();
+    ctx.arc(isOn ? tx + 176 : tx + 48, ty + 46, 36, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    ctx.font = `800 24px ${FONT_DISPLAY}`;
+    ctx.fillStyle = '#FFFFFF';
+    ctx.textAlign = 'center';
+    ctx.fillText(isOn ? 'ON' : 'OFF', isOn ? tx + 86 : tx + 140, ty + 48);
+  } else if (props.variant === 'css-browser-mockup') {
+    // Modern Browser Window Card with macOS Dots + URL bar
+    fillCardWithShadow(ctx, -415, -132, 830, 264, 24, '#FFFFFF', 0.11);
+    ctx.strokeStyle = '#E2E8F0';
+    ctx.lineWidth = 2;
+    drawRoundedRectPath(ctx, -415, -132, 830, 264, 24);
+    ctx.stroke();
+
+    // Top chrome bar
+    ctx.fillStyle = '#F1F5F9';
+    drawRoundedRectPath(ctx, -415, -132, 830, 58, 22);
+    ctx.fill();
+    ctx.fillRect(-415, -96, 830, 22);
+
+    // Traffic lights
+    const dots = ['#EF4444', '#F59E0B', '#10B981'];
+    dots.forEach((col, i) => {
+      ctx.fillStyle = col;
+      ctx.beginPath();
+      ctx.arc(-374 + i * 26, -103, 8, 0, Math.PI * 2);
+      ctx.fill();
+    });
+
+    // URL pill
+    ctx.fillStyle = '#FFFFFF';
+    drawRoundedRectPath(ctx, -260, -120, 560, 34, 17);
+    ctx.fill();
+    ctx.font = `600 18px ${FONT_SANS}`;
+    ctx.fillStyle = '#64748B';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(props.data?.formula || 'https://english.practice/daily-tip', 20, -103, 520);
+
+    // Content area
+    ctx.font = `800 34px ${FONT_DISPLAY}`;
+    ctx.fillStyle = '#0F172A';
+    ctx.fillText(props.data?.title || 'Real-World English Context', 0, -4, 740);
+    ctx.font = `600 24px ${FONT_SANS}`;
+    ctx.fillStyle = '#4F46E5';
+    ctx.fillText(
+      props.data?.subtitle || props.data?.speechText || 'Search · Learn · Speak with confidence',
+      0,
+      56,
+      740,
+    );
+  } else if (props.variant === 'css-grammar-equation') {
+    // Grammar Token Pill Equation: [Part A] + [Part B] = [Result]
+    const parts = props.data?.labels?.slice(0, 3) ?? ['Could you', 'V-inf', 'Polite!'];
+    fillCardWithShadow(ctx, -430, -112, 860, 224, 30, '#FFFFFF', 0.09);
+    ctx.font = `700 20px ${FONT_SANS}`;
+    ctx.fillStyle = '#64748B';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(props.data?.title || 'GRAMMAR FORMULA', 0, -72, 720);
+
+    const boxes = [
+      { x: -395, w: 220, bg: '#DBEAFE', fg: '#1D4ED8', txt: parts[0] },
+      { x: -115, w: 220, bg: '#FEF3C7', fg: '#B45309', txt: parts[1] },
+      { x: 165, w: 230, bg: '#DCFCE7', fg: '#15803D', txt: parts[2] },
+    ];
+    boxes.forEach((b) => {
+      ctx.fillStyle = b.bg;
+      drawRoundedRectPath(ctx, b.x, -26, b.w, 86, 22);
+      ctx.fill();
+      ctx.font = `800 26px ${FONT_DISPLAY}`;
+      ctx.fillStyle = b.fg;
+      ctx.fillText(b.txt, b.x + b.w / 2, 17, b.w - 22);
+    });
+    ctx.font = `800 32px ${FONT_DISPLAY}`;
+    ctx.fillStyle = '#64748B';
+    ctx.fillText('+', -145, 17);
+    ctx.fillText('=', 135, 17);
+  } else if (props.variant === 'css-flashcard-flip') {
+    // Layered Stacked Flip Flashcard
+    fillCardWithShadow(ctx, -340, -124, 680, 224, 28, '#E0E7FF', 0.06);
+    fillCardWithShadow(ctx, -370, -104, 740, 224, 28, '#FFFFFF', 0.12);
+    ctx.strokeStyle = '#C7D2FE';
+    ctx.lineWidth = 2.5;
+    drawRoundedRectPath(ctx, -370, -104, 740, 224, 28);
+    ctx.stroke();
+
+    ctx.fillStyle = '#EEF2FF';
+    drawRoundedRectPath(ctx, -115, -82, 230, 34, 17);
+    ctx.fill();
+    ctx.font = `800 17px ${FONT_SANS}`;
+    ctx.fillStyle = '#4338CA';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('FLASHCARD · FLIP', 0, -65);
+
+    ctx.font = `800 40px ${FONT_DISPLAY}`;
+    ctx.fillStyle = '#0F172A';
+    ctx.fillText(props.data?.title || 'commute', 0, -4, 660);
+    ctx.font = `600 25px ${FONT_SANS}`;
+    ctx.fillStyle = '#475569';
+    ctx.fillText(
+      props.data?.subtitle || props.data?.speechText || '/kəˈmjuːt/ · Đi làm hằng ngày',
+      0,
+      58,
+      660,
+    );
+  } else if (props.variant === 'css-sticky-note') {
+    // Sticky Note Card with Red Pushpin & Corner Fold
+    ctx.save();
+    ctx.rotate(-0.018);
+    fillCardWithShadow(ctx, -375, -124, 750, 248, 22, '#FEF9C3', 0.12);
+    ctx.strokeStyle = '#FDE047';
+    ctx.lineWidth = 2.5;
+    drawRoundedRectPath(ctx, -375, -124, 750, 248, 22);
+    ctx.stroke();
+
+    // Folded bottom-right corner
+    ctx.fillStyle = '#FDE047';
+    ctx.beginPath();
+    ctx.moveTo(315, 124);
+    ctx.lineTo(375, 68);
+    ctx.lineTo(315, 68);
+    ctx.closePath();
+    ctx.fill();
+
+    // Red pushpin top center
+    ctx.fillStyle = '#EF4444';
+    ctx.beginPath();
+    ctx.arc(0, -112, 16, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#FCA5A5';
+    ctx.beginPath();
+    ctx.arc(-5, -116, 5, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = `800 18px ${FONT_SANS}`;
+    ctx.fillStyle = '#B45309';
+    ctx.fillText(props.data?.formula || 'QUICK NOTE · REMEMBER', 0, -68, 620);
+
+    ctx.font = `800 35px ${FONT_DISPLAY}`;
+    ctx.fillStyle = '#1E293B';
+    ctx.fillText(props.data?.title || 'Soften requests with Could / Would', 0, -4, 670);
+
+    ctx.font = `600 24px ${FONT_SANS}`;
+    ctx.fillStyle = '#475569';
+    ctx.fillText(
+      props.data?.subtitle || props.data?.speechText || 'Never use bare imperatives in polite settings!',
+      0,
+      58,
+      650,
+    );
+    ctx.restore();
+  } else if (props.variant === 'bs-badge-cluster') {
+    // Bootstrap Pill Badge Cluster Card
+    fillCardWithShadow(ctx, -420, -124, 840, 248, 28, '#FFFFFF', 0.1);
+    ctx.strokeStyle = '#E2E8F0';
+    ctx.lineWidth = 2;
+    drawRoundedRectPath(ctx, -420, -124, 840, 248, 28);
+    ctx.stroke();
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = `800 26px ${FONT_DISPLAY}`;
+    ctx.fillStyle = '#0F172A';
+    ctx.fillText(props.data?.title || 'OTHER NATURAL WAYS TO SAY IT', 0, -72, 740);
+
+    const pills = props.data?.labels?.slice(0, 3) ?? ['Could you...', 'Would you mind...', 'I was wondering...'];
+    const palette = [
+      { bg: '#DBEAFE', fg: '#1D4ED8' },
+      { bg: '#DCFCE7', fg: '#15803D' },
+      { bg: '#EDE9FE', fg: '#6D28D9' },
+    ];
+    const xs = pills.length === 2 ? [-195, 195] : [-258, 0, 258];
+    const pw = pills.length === 2 ? 330 : 236;
+    pills.forEach((txt, i) => {
+      const col = palette[i % palette.length];
+      ctx.fillStyle = col.bg;
+      drawRoundedRectPath(ctx, xs[i] - pw / 2, -16, pw, 72, 36);
+      ctx.fill();
+      ctx.font = `800 24px ${FONT_DISPLAY}`;
+      ctx.fillStyle = col.fg;
+      ctx.fillText(txt, xs[i], 20, pw - 24);
+    });
+
+    ctx.font = `600 21px ${FONT_SANS}`;
+    ctx.fillStyle = '#64748B';
+    ctx.fillText(props.data?.subtitle || 'Tap to level up vocabulary variety', 0, 86, 740);
+  } else if (props.variant === 'css-magnifying-word') {
+    // Spotlight Card + Magnifying Glass Icon
+    fillCardWithShadow(ctx, -420, -122, 840, 244, 28, '#FFFFFF', 0.1);
+    ctx.strokeStyle = '#CBD5E1';
+    ctx.lineWidth = 2;
+    drawRoundedRectPath(ctx, -420, -122, 840, 244, 28);
+    ctx.stroke();
+
+    // Spotlight lens circle on left
+    ctx.fillStyle = '#EEF2FF';
+    ctx.beginPath();
+    ctx.arc(-270, -6, 66, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#4F46E5';
+    ctx.lineWidth = 8;
+    ctx.stroke();
+    // Handle
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(-222, 42);
+    ctx.lineTo(-190, 74);
+    ctx.stroke();
+
+    ctx.save();
+    ctx.translate(-270, -6);
+    ctx.scale(0.58, 0.58);
+    drawSceneIcon(ctx, props.data?.sceneIcon || 'eye');
+    ctx.restore();
+
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.font = `800 18px ${FONT_SANS}`;
+    ctx.fillStyle = '#4F46E5';
+    ctx.fillText(props.data?.formula || 'CLOSER LOOK · NUANCE', -160, -64, 520);
+
+    ctx.font = `800 36px ${FONT_DISPLAY}`;
+    ctx.fillStyle = '#0F172A';
+    ctx.fillText(props.data?.highlightWord || props.data?.title || 'Keyword Spotlight', -160, -4, 540);
+
+    ctx.font = `600 24px ${FONT_SANS}`;
+    ctx.fillStyle = '#475569';
+    ctx.fillText(
+      props.data?.subtitle || props.data?.speechText || 'Zoom in on native phrasing & usage',
+      -160,
+      56,
+      540,
+    );
+  } else if (props.variant === 'bs-modal-quiz') {
+    // Bootstrap Modal Dialog Quiz Card
+    fillCardWithShadow(ctx, -415, -130, 830, 260, 26, '#FFFFFF', 0.13);
+    ctx.strokeStyle = '#CBD5E1';
+    ctx.lineWidth = 2;
+    drawRoundedRectPath(ctx, -415, -130, 830, 260, 26);
+    ctx.stroke();
+
+    // Dark Indigo Modal Header
+    ctx.fillStyle = '#1E1B4B';
+    drawRoundedRectPath(ctx, -415, -130, 830, 62, 24);
+    ctx.fill();
+    ctx.fillRect(-415, -90, 830, 22);
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.font = `800 22px ${FONT_DISPLAY}`;
+    ctx.fillStyle = '#FFFFFF';
+    ctx.fillText(props.data?.formula || '⚡ QUICK CHECK MODAL', -380, -98, 560);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#A5B4FC';
+    ctx.fillText('✕', 380, -98);
+
+    ctx.textAlign = 'center';
+    ctx.font = `800 30px ${FONT_DISPLAY}`;
+    ctx.fillStyle = '#0F172A';
+    ctx.fillText(props.data?.title || props.data?.speechText || 'Which phrase sounds natural?', 0, -18, 760);
+
+    const optA = props.data?.labels?.[0] || 'A. Option 1';
+    const optB = props.data?.labels?.[1] || 'B. Option 2';
+    ctx.fillStyle = '#EEF2FF';
+    drawRoundedRectPath(ctx, -370, 38, 350, 62, 18);
+    ctx.fill();
+    ctx.fillStyle = '#ECFDF5';
+    drawRoundedRectPath(ctx, 20, 38, 350, 62, 18);
+    ctx.fill();
+
+    ctx.font = `800 23px ${FONT_DISPLAY}`;
+    ctx.fillStyle = '#4338CA';
+    ctx.fillText(optA, -195, 70, 320);
+    ctx.fillStyle = '#15803D';
+    ctx.fillText(optB, 195, 70, 320);
   } else if (props.variant === 'dynamic-scene' && props.data?.dynamicScene) {
     drawDynamicScene(ctx, props.data.dynamicScene, time);
   } else {

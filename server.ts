@@ -44,7 +44,7 @@ interface StudioJob {
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ALLOWED_AUDIO_EXTS = new Set(['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.webm', '.flac', '.opus']);
 const ALLOWED_MEDIA_EXTS = new Set(['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.webm', '.mp4', '.mov', '.mkv', '.avi', '.m4v', '.mpeg', '.mpg']);
-const JOB_TTL_MS = 20 * 60 * 1000;
+const JOB_TTL_MS = 60 * 60 * 1000;
 const COMPONENTS_DATA_DIR = path.resolve('data');
 const COMPONENTS_DATA_FILE = path.join(COMPONENTS_DATA_DIR, 'custom-components.json');
 const RENDER_TMP_ROOT = path.resolve('.render-tmp');
@@ -350,20 +350,66 @@ function splitTextForTtsChunks(text: string, maxChars = 175): string[] {
   return chunks.filter(Boolean);
 }
 
-async function synthesizeEdgeTtsBuffer(text: string, voice: string, rate = 1.0): Promise<Buffer> {
-  const tts = new MsEdgeTTS({ connectionTimeoutMs: 8000, synthesisTimeoutMs: 18000 });
+function sanitizeTtsSegmentText(raw: string): string {
+  return String(raw || '')
+    .replace(/\u200B|\uFEFF/g, '')
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .replace(/[–—]/g, ', ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s*&\s*/g, ' and ')
+    .replace(/&/g, ' and ')
+    .replace(/[<>]/g, ' ')
+    .replace(/[`*_~#|]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function escapeXmlForSsml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function pickEdgeVoiceForLang(lang: string, requestedVoice: string): string {
+  if (requestedVoice && requestedVoice.includes('Neural')) {
+    return requestedVoice;
+  }
+  const low = (lang || 'en').trim().toLowerCase();
+  if (low.startsWith('vi')) return 'vi-VN-HoaiMyNeural';
+  if (low.startsWith('ja')) return 'ja-JP-NanamiNeural';
+  if (low.startsWith('zh')) return 'zh-CN-XiaoxiaoNeural';
+  if (low.startsWith('ko')) return 'ko-KR-SunHiNeural';
+  if (low.startsWith('fr')) return 'fr-FR-DeniseNeural';
+  if (low.startsWith('es')) return 'es-ES-ElviraNeural';
+  if (low.includes('en-gb') || low === 'uk') return 'en-GB-SoniaNeural';
+  if (low.includes('en-au')) return 'en-AU-NatashaNeural';
+  return 'en-US-JennyNeural';
+}
+
+async function synthesizeEdgeTtsSingleChunk(text: string, voice: string, rate = 1.0): Promise<Buffer> {
+  const safeXmlText = escapeXmlForSsml(sanitizeTtsSegmentText(text));
+  if (!safeXmlText) {
+    throw new Error('Edge TTS: Nội dung sau khi làm sạch bị rỗng.');
+  }
+  const tts = new MsEdgeTTS({ connectionTimeoutMs: 9000, synthesisTimeoutMs: 20000 });
   try {
     await tts.setMetadata(voice, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
     const prosody = new ProsodyOptions();
     const pct = Math.round((Math.max(0.6, Math.min(1.6, rate)) - 1) * 100);
     prosody.rate = `${pct >= 0 ? '+' : ''}${pct}%`;
-    const { audioStream } = tts.toStream(text, prosody);
-    return await new Promise<Buffer>((resolve, reject) => {
+    const { audioStream } = tts.toStream(safeXmlText, prosody);
+    const buf = await new Promise<Buffer>((resolve, reject) => {
       const chunks: Buffer[] = [];
       audioStream.on('data', (d: Buffer) => chunks.push(Buffer.isBuffer(d) ? d : Buffer.from(d)));
       audioStream.on('end', () => resolve(Buffer.concat(chunks)));
       audioStream.on('error', (err) => reject(err));
     });
+    if (buf.length < 128) {
+      throw new Error('Edge TTS không trả về dữ liệu âm thanh.');
+    }
+    return buf;
   } finally {
     try {
       tts.close();
@@ -373,6 +419,56 @@ async function synthesizeEdgeTtsBuffer(text: string, voice: string, rate = 1.0):
   }
 }
 
+async function synthesizeEdgeTtsBuffer(
+  text: string,
+  voice: string,
+  rate = 1.0,
+  tmpDir?: string,
+  prefix = 'edge',
+): Promise<Buffer> {
+  const cleaned = sanitizeTtsSegmentText(text);
+  const chunks = splitTextForTtsChunks(cleaned, 290);
+  if (chunks.length === 0) {
+    throw new Error('Nội dung TTS rỗng.');
+  }
+  if (chunks.length === 1 || !tmpDir) {
+    return synthesizeEdgeTtsSingleChunk(chunks.join(' '), voice, rate);
+  }
+  const partFiles: string[] = [];
+  for (let i = 0; i < chunks.length; i++) {
+    const partBuf = await synthesizeEdgeTtsSingleChunk(chunks[i], voice, rate);
+    const partPath = path.join(tmpDir, `${prefix}_e_${i}.mp3`);
+    await fs.promises.writeFile(partPath, partBuf);
+    partFiles.push(partPath);
+  }
+  const concatTxt = path.join(tmpDir, `${prefix}_e_concat.txt`);
+  await fs.promises.writeFile(
+    concatTxt,
+    partFiles.map((f) => `file '${f.replace(/'/g, "'\\''")}'`).join('\n'),
+    'utf8',
+  );
+  const merged = path.join(tmpDir, `${prefix}_e_merged.mp3`);
+  await runProcess('ffmpeg', [
+    '-y',
+    '-f',
+    'concat',
+    '-safe',
+    '0',
+    '-i',
+    concatTxt,
+    '-c:a',
+    'libmp3lame',
+    '-ar',
+    '24000',
+    '-ac',
+    '1',
+    '-b:a',
+    '64k',
+    merged,
+  ]);
+  return fs.promises.readFile(merged);
+}
+
 async function synthesizeGoogleTranslateTtsChunked(
   text: string,
   lang: string,
@@ -380,25 +476,44 @@ async function synthesizeGoogleTranslateTtsChunked(
   prefix: string,
   rate = 1.0,
 ): Promise<Buffer> {
-  const normalizedLang = (lang || 'en').split('-')[0].toLowerCase() === 'zh' ? 'zh-CN' : (lang || 'en').split('-')[0].toLowerCase();
-  const pieces = splitTextForTtsChunks(text, 165);
+  const cleaned = sanitizeTtsSegmentText(text);
+  const rawBase = (lang || 'en').split('-')[0].toLowerCase();
+  const normalizedLang = rawBase === 'zh' ? 'zh-CN' : rawBase || 'en';
+  const pieces = splitTextForTtsChunks(cleaned, 160);
+  if (pieces.length === 0) {
+    throw new Error('Google TTS: Nội dung rỗng.');
+  }
   const partFiles: string[] = [];
   for (let i = 0; i < pieces.length; i++) {
     const q = encodeURIComponent(pieces[i]);
     const speedParam = rate < 0.85 ? '&ttsspeed=0.7' : '';
-    const url = `https://translate.googleapis.com/translate_tts?ie=UTF-8&q=${q}&tl=${encodeURIComponent(normalizedLang)}&client=tw-ob${speedParam}`;
-    const res = await fetch(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0',
-        Referer: 'https://translate.google.com/',
-      },
-    });
-    if (!res.ok) {
-      throw new Error(`Google TTS HTTP ${res.status}`);
+    const clients = ['tw-ob', 'gtx'];
+    let chunkBuf: Buffer | null = null;
+    let lastStatus = 0;
+    for (const client of clients) {
+      const url = `https://translate.googleapis.com/translate_tts?ie=UTF-8&q=${q}&tl=${encodeURIComponent(normalizedLang)}&client=${client}${speedParam}`;
+      const res = await fetch(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36',
+          Referer: 'https://translate.google.com/',
+        },
+        signal: AbortSignal.timeout(10000),
+      });
+      lastStatus = res.status;
+      const ctype = (res.headers.get('content-type') || '').toLowerCase();
+      if (res.ok && !ctype.includes('text/html')) {
+        const candidate = Buffer.from(await res.arrayBuffer());
+        if (candidate.length >= 160) {
+          chunkBuf = candidate;
+          break;
+        }
+      }
     }
-    const buf = Buffer.from(await res.arrayBuffer());
+    if (!chunkBuf) {
+      throw new Error(`Google TTS HTTP ${lastStatus || 'error'}`);
+    }
     const partPath = path.join(tmpDir, `${prefix}_g_${i}.mp3`);
-    await fs.promises.writeFile(partPath, buf);
+    await fs.promises.writeFile(partPath, chunkBuf);
     partFiles.push(partPath);
   }
   if (partFiles.length === 1) {
@@ -416,15 +531,26 @@ async function synthesizeGoogleTranslateTtsChunked(
 }
 
 async function synthesizeStreamElementsTts(text: string, voice: string, tmpDir: string, prefix: string): Promise<Buffer> {
-  const pieces = splitTextForTtsChunks(text, 220);
+  const cleaned = sanitizeTtsSegmentText(text);
+  const pieces = splitTextForTtsChunks(cleaned, 200);
+  if (pieces.length === 0) {
+    throw new Error('StreamElements TTS: Nội dung rỗng.');
+  }
   const partFiles: string[] = [];
   for (let i = 0; i < pieces.length; i++) {
     const url = `https://api.streamelements.com/kappa/v2/speech?voice=${encodeURIComponent(voice || 'Brian')}&text=${encodeURIComponent(pieces[i])}`;
-    const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-    if (!res.ok) {
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      signal: AbortSignal.timeout(10000),
+    });
+    const ctype = (res.headers.get('content-type') || '').toLowerCase();
+    if (!res.ok || ctype.includes('text/html')) {
       throw new Error(`StreamElements TTS HTTP ${res.status}`);
     }
     const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length < 160) {
+      throw new Error('StreamElements TTS trả về buffer rỗng.');
+    }
     const p = path.join(tmpDir, `${prefix}_se_${i}.mp3`);
     await fs.promises.writeFile(p, buf);
     partFiles.push(p);
@@ -930,6 +1056,8 @@ async function startServer(): Promise<void> {
 
       const segFiles: string[] = [];
       const segDurations: number[] = [];
+      const spokenDurations: number[] = [];
+      const pauseDurations: number[] = [];
       const cues: Array<{
         id: string;
         start: number;
@@ -941,16 +1069,20 @@ async function startServer(): Promise<void> {
       let cursor = 0;
 
       for (let i = 0; i < rawSegments.length; i++) {
-        const segText = String(rawSegments[i]?.text || '').trim();
+        const segText = sanitizeTtsSegmentText(String(rawSegments[i]?.text || ''));
+        const pauseAfterSec = Math.max(0, Math.min(12, Number(rawSegments[i]?.pauseAfterSec || 0)));
         if (!segText) continue;
 
         let buf: Buffer | null = null;
-        const attemptOrder =
-          providerReq === 'auto'
-            ? ['edge', 'google', 'streamelements', ...(elevenLabsKey ? ['elevenlabs'] : []), ...(geminiKey ? ['gemini'] : [])]
-            : [providerReq, 'edge', 'google', 'streamelements'];
+        const attemptOrder = Array.from(
+          new Set(
+            providerReq === 'auto'
+              ? ['edge', 'google', 'streamelements', ...(elevenLabsKey ? ['elevenlabs'] : []), ...(geminiKey ? ['gemini'] : [])]
+              : [providerReq, 'edge', 'google', 'streamelements'],
+          ),
+        );
 
-        let lastErr: unknown = null;
+        const attemptErrors: string[] = [];
         for (const p of attemptOrder) {
           try {
             if (p === 'elevenlabs') {
@@ -959,8 +1091,8 @@ async function startServer(): Promise<void> {
               providerUsed = 'elevenlabs';
               break;
             } else if (p === 'edge') {
-              const edgeVoice = voice.includes('Neural') ? voice : 'en-US-JennyNeural';
-              buf = await synthesizeEdgeTtsBuffer(segText, edgeVoice, rate);
+              const edgeVoice = pickEdgeVoiceForLang(lang, voice);
+              buf = await synthesizeEdgeTtsBuffer(segText, edgeVoice, rate, tmpDir, `s${i}`);
               providerUsed = 'edge';
               break;
             } else if (p === 'google') {
@@ -980,12 +1112,17 @@ async function startServer(): Promise<void> {
               break;
             }
           } catch (err) {
-            lastErr = err;
+            const msg = err instanceof Error ? err.message : String(err);
+            attemptErrors.push(`${p}: ${msg}`);
           }
         }
 
         if (!buf || buf.length === 0) {
-          throw lastErr instanceof Error ? lastErr : new Error('Không thể tạo giọng đọc từ các API TTS.');
+          throw new Error(
+            attemptErrors.length > 0
+              ? `Không thể tạo giọng đọc (${attemptErrors.join(' | ')})`
+              : 'Không thể tạo giọng đọc từ các API TTS.',
+          );
         }
 
         const rawPath = path.join(tmpDir, `seg_raw_${i}.mp3`);
@@ -1006,20 +1143,53 @@ async function startServer(): Promise<void> {
           normPath,
         ]);
 
-        const dur = await getAudioDurationSec(normPath);
+        const spokenDur = await getAudioDurationSec(normPath);
         segFiles.push(normPath);
-        segDurations.push(dur);
+
+        let actualPauseDur = 0;
+        if (pauseAfterSec > 0.15) {
+          const pausePath = path.join(tmpDir, `seg_pause_${i}.mp3`);
+          await runProcess('ffmpeg', [
+            '-y',
+            '-f',
+            'lavfi',
+            '-i',
+            'anullsrc=r=24000:cl=mono',
+            '-t',
+            String(Number(pauseAfterSec.toFixed(2))),
+            '-c:a',
+            'libmp3lame',
+            '-ar',
+            '24000',
+            '-ac',
+            '1',
+            '-b:a',
+            '64k',
+            pausePath,
+          ]);
+          actualPauseDur = await getAudioDurationSec(pausePath);
+          segFiles.push(pausePath);
+        }
+
+        const totalSegDur = Number((spokenDur + actualPauseDur).toFixed(3));
+        segDurations.push(totalSegDur);
+        spokenDurations.push(spokenDur);
+        pauseDurations.push(actualPauseDur);
 
         const start = Number(cursor.toFixed(3));
-        const end = Number((cursor + dur).toFixed(3));
+        const spokenEnd = Number((cursor + spokenDur).toFixed(3));
         cues.push({
           id: String(rawSegments[i]?.id || `tts-cue-${i + 1}`),
           start,
-          end,
+          end: spokenEnd,
           text: segText,
-          words: interpolateWordTimings(segText, start, end),
+          words: interpolateWordTimings(segText, start, spokenEnd),
         });
-        cursor = end;
+        cursor = Number((cursor + totalSegDur).toFixed(3));
+      }
+
+      if (segFiles.length === 0) {
+        throw new Error('Các đoạn văn bản sau khi lọc ký tự đặc biệt đều bị rỗng.');
       }
 
       const finalAudioPath = path.join(tmpDir, 'combined.mp3');
@@ -1045,6 +1215,8 @@ async function startServer(): Promise<void> {
         audioBase64: finalBuf.toString('base64'),
         durationSec: totalDur,
         segmentDurations: segDurations,
+        spokenDurations,
+        pauseDurations,
         cues,
         srt: cuesToSrt(cues),
         vtt: cuesToVtt(cues),
@@ -1078,11 +1250,11 @@ async function startServer(): Promise<void> {
         const translateLang =
           typeof req.headers['x-translate-lang'] === 'string' ? req.headers['x-translate-lang'].trim() : 'none';
         const engineReq =
-          typeof req.headers['x-engine'] === 'string' ? req.headers['x-engine'].trim().toLowerCase() : 'auto';
+          typeof req.headers['x-engine'] === 'string' ? req.headers['x-engine'].trim().toLowerCase() : 'faster-whisper';
         const whisperModel =
           typeof req.headers['x-whisper-model'] === 'string' && req.headers['x-whisper-model'].trim()
             ? req.headers['x-whisper-model'].trim()
-            : 'Xenova/whisper-tiny';
+            : 'large-v3-turbo';
 
         const inputPath = path.join(tmpDir, `input${ext}`);
         const wavPath = path.join(tmpDir, 'extracted_16k.wav');
@@ -1119,7 +1291,7 @@ async function startServer(): Promise<void> {
 
         let rawSegs: Array<{ start: number; end: number; text: string; translation?: string }> = [];
         let detectedLang = sourceLang;
-        let engineUsed = 'whisper-local';
+        let engineUsed = 'faster-whisper (Built-in)';
         let whisperWords: Array<{ word: string; start: number; end: number }> = [];
 
         const tryGeminiTranscribe = async () => {
@@ -1147,8 +1319,8 @@ async function startServer(): Promise<void> {
             apiKey,
             httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
           });
-          // Try compatible Gemini models gracefully if an account doesn't have gemini-3.5-transcribe
-          const modelCandidates = ['gemini-3.5-transcribe', 'gemini-4-hydrogen', 'gemini-3.1-flash-lite'];
+          // Use supported Gemini audio-capable models without triggering broken v1 404s
+          const modelCandidates = ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'];
           let aiRes: any = null;
           let lastErr: unknown = null;
           for (const modelName of modelCandidates) {
@@ -1189,27 +1361,29 @@ async function startServer(): Promise<void> {
           try {
             await tryGeminiTranscribe();
           } catch (gemErr) {
-            // Auto-rescue with Local Whisper if Gemini fails (404 / no key)
+            // Auto-rescue with Built-in Local Whisper if Gemini fails (404 / no key)
             const wRes = await runLocalWhisperOnWav(wavPath, {
               sourceLang,
               modelId: whisperModel,
               wordLevel: true,
+              preferFasterWhisper: true,
             });
             rawSegs = wRes.segments;
             whisperWords = wRes.words.map((w) => ({ word: w.text, start: w.start, end: w.end }));
-            engineUsed = `whisper-local (${whisperModel})`;
+            engineUsed = `${wRes.backendUsed || 'faster-whisper (Built-in)'} · ${wRes.modelUsed || whisperModel}`;
             if (rawSegs.length === 0) throw gemErr;
           }
         } else {
-          // Default 'auto' or 'whisper': Use Local Whisper ONNX first (0 API key required)
+          // Default 'faster-whisper' or 'auto' or 'whisper-local': Run Local Whisper (0 API key required)
           const wRes = await runLocalWhisperOnWav(wavPath, {
             sourceLang,
             modelId: whisperModel,
             wordLevel: true,
+            preferFasterWhisper: engineReq !== 'whisper-onnx',
           });
           rawSegs = wRes.segments;
           whisperWords = wRes.words.map((w) => ({ word: w.text, start: w.start, end: w.end }));
-          engineUsed = `whisper-local (${whisperModel})`;
+          engineUsed = `${wRes.backendUsed || 'faster-whisper (Built-in)'} · ${wRes.modelUsed || whisperModel}`;
 
           // Optional bilingual translation using Gemini if requested & key present
           if (rawSegs.length > 0 && translateLang && translateLang !== 'none' && apiKey) {
@@ -1289,24 +1463,45 @@ async function startServer(): Promise<void> {
       const tmpDir = path.join(os.tmpdir(), `ks-align-${crypto.randomUUID()}`);
       await fs.promises.mkdir(tmpDir, { recursive: true });
       try {
-        const body = req.body;
-        if (!Buffer.isBuffer(body) || body.length === 0) {
+        const isJson =
+          typeof req.headers['content-type'] === 'string' &&
+          req.headers['content-type'].includes('application/json');
+        let audioBuf: Buffer | null = Buffer.isBuffer(req.body) ? req.body : null;
+        let ext = '.mp3';
+        let sourceLang = 'auto';
+        let whisperModel = 'large-v3-turbo';
+
+        if (isJson && audioBuf) {
+          const parsed = JSON.parse(audioBuf.toString('utf8')) as {
+            audioBase64?: string;
+            ext?: string;
+            lang?: string;
+            model?: string;
+          };
+          audioBuf = parsed.audioBase64 ? Buffer.from(parsed.audioBase64, 'base64') : null;
+          ext = sanitizeAudioExt(parsed.ext || '.mp3');
+          sourceLang = parsed.lang?.trim() || 'auto';
+          whisperModel = parsed.model?.trim() || 'large-v3-turbo';
+        } else {
+          ext = sanitizeAudioExt(
+            typeof req.headers['x-file-ext'] === 'string' ? req.headers['x-file-ext'] : '.mp3',
+          );
+          sourceLang =
+            typeof req.headers['x-source-lang'] === 'string' ? req.headers['x-source-lang'].trim() : 'auto';
+          whisperModel =
+            typeof req.headers['x-whisper-model'] === 'string' && req.headers['x-whisper-model'].trim()
+              ? req.headers['x-whisper-model'].trim()
+              : 'large-v3-turbo';
+        }
+
+        if (!audioBuf || audioBuf.length === 0) {
           res.status(400).json({ error: 'Thiếu file audio để căn chỉnh word-level.' });
           return;
         }
-        const ext = sanitizeAudioExt(
-          typeof req.headers['x-file-ext'] === 'string' ? req.headers['x-file-ext'] : '.mp3',
-        );
-        const sourceLang =
-          typeof req.headers['x-source-lang'] === 'string' ? req.headers['x-source-lang'].trim() : 'auto';
-        const whisperModel =
-          typeof req.headers['x-whisper-model'] === 'string' && req.headers['x-whisper-model'].trim()
-            ? req.headers['x-whisper-model'].trim()
-            : 'Xenova/whisper-tiny';
 
         const inPath = path.join(tmpDir, `audio${ext}`);
         const wavPath = path.join(tmpDir, 'align_16k.wav');
-        await fs.promises.writeFile(inPath, body);
+        await fs.promises.writeFile(inPath, audioBuf);
         await runProcess('ffmpeg', [
           '-y',
           '-i',
@@ -1325,13 +1520,25 @@ async function startServer(): Promise<void> {
           sourceLang,
           modelId: whisperModel,
           wordLevel: true,
+          preferFasterWhisper: true,
         });
+        const cues = aligned.segments.map((seg, idx) => ({
+          id: `align-cue-${idx + 1}`,
+          start: seg.start,
+          end: seg.end,
+          text: seg.text,
+          words: aligned.words.filter((w) => w.start >= seg.start - 0.06 && w.end <= seg.end + 0.08),
+        }));
         res.json({
           ok: true,
-          modelUsed: whisperModel,
+          modelUsed: aligned.modelUsed || whisperModel,
+          backendUsed: aligned.backendUsed || 'faster-whisper-built-in',
           durationSec,
           text: aligned.text,
+          segments: aligned.segments,
           words: aligned.words,
+          cues,
+          srt: cuesToSrt(cues),
         });
       } catch (err) {
         res.status(500).json({ error: err instanceof Error ? err.message : 'Lỗi căn chỉnh Whisper Local.' });
@@ -1371,7 +1578,7 @@ async function startServer(): Promise<void> {
           ...(isGemini4 ? {} : { temperature: 0.35 }),
         },
       });
-      res.json({ ok: true, jsonText: response.text || '' });
+      res.json({ ok: true, jsonText: response.text || '', text: response.text || '' });
     } catch (err) {
       res.status(500).json({
         error: err instanceof Error ? err.message : 'Lỗi gọi Gemini API',
@@ -1442,8 +1649,9 @@ async function startServer(): Promise<void> {
       }
       if (job.audioPath !== audioPath) {
         job.audioPath = audioPath;
-        await saveJobMeta(job);
       }
+      job.createdAt = Date.now();
+      await saveJobMeta(job);
       res.json({ ok: true, bytes: body.length });
     },
   );
@@ -1454,7 +1662,7 @@ async function startServer(): Promise<void> {
     async (req, res) => {
       const job = await loadJob(req.params.jobId);
       if (!job) {
-        res.status(404).json({ error: 'Render job not found' });
+        res.status(404).json({ error: 'Render job not found (job đã hết hạn hoặc bị hủy)' });
         return;
       }
       const body = req.body;
@@ -1464,6 +1672,10 @@ async function startServer(): Promise<void> {
       }
       await fs.promises.appendFile(job.framesPath, body);
       job.chunkCount += 1;
+      job.createdAt = Date.now();
+      if (job.chunkCount % 10 === 0) {
+        await saveJobMeta(job).catch(() => undefined);
+      }
       res.json({ ok: true, chunkCount: job.chunkCount, bytes: body.length });
     },
   );
@@ -1613,6 +1825,7 @@ async function startServer(): Promise<void> {
         await fs.promises.writeFile(destPath, body);
       }
       job.files[role] = destPath;
+      job.createdAt = Date.now();
       await fs.promises.writeFile(path.join(job.dir, 'meta.json'), JSON.stringify(job), 'utf8');
       res.json({ ok: true, role, bytes: body.length });
     },
@@ -1633,7 +1846,12 @@ async function startServer(): Promise<void> {
       }
       const vMeta = await probeMediaMeta(videoPath);
       const aMeta = await probeMediaMeta(audioPath);
-      const duration = Math.max(0.5, Math.min(vMeta.duration, aMeta.duration));
+      const durationMode = req.body?.durationMode === 'loop-video' ? 'loop-video' : 'shortest';
+      const shouldLoopVideo = durationMode === 'loop-video' && vMeta.duration > 0.2 && vMeta.duration < aMeta.duration;
+      const duration = Math.max(
+        0.5,
+        durationMode === 'loop-video' ? aMeta.duration : Math.min(vMeta.duration, aMeta.duration),
+      );
 
       const watermarkText = typeof req.body?.watermarkText === 'string' ? req.body.watermarkText.trim() : '';
       const watermarkCorner = typeof req.body?.watermarkCorner === 'string' ? req.body.watermarkCorner : 'bottom-right';
@@ -1650,8 +1868,8 @@ async function startServer(): Promise<void> {
         '',
         '[V4+ Styles]',
         'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
-        `Style: Watermark,DejaVu Sans,${Math.max(20, Math.round(vMeta.height * 0.024))},&H00FFFFFF,&H00FFFFFF,&H800F172A,&H00000000,-1,0,0,0,100,100,0,0,1,2,1,3,36,36,28,1`,
-        `Style: Outro,DejaVu Sans,${Math.max(26, Math.round(vMeta.height * 0.042))},&H00FFFFFF,&H00FFFFFF,&H400F172A,&H00000000,-1,0,0,0,100,100,0,0,1,3,1,5,40,40,40,1`,
+        `Style: Watermark,Noto Sans,${Math.max(20, Math.round(vMeta.height * 0.024))},&H00FFFFFF,&H00FFFFFF,&H800F172A,&H00000000,-1,0,0,0,100,100,0,0,1,2,1,3,36,36,28,1`,
+        `Style: Outro,Noto Sans,${Math.max(26, Math.round(vMeta.height * 0.042))},&H00FFFFFF,&H00FFFFFF,&H400F172A,&H00000000,-1,0,0,0,100,100,0,0,1,3,1,5,40,40,40,1`,
         '',
         '[Events]',
         'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text',
@@ -1689,7 +1907,7 @@ async function startServer(): Promise<void> {
         const startOutro = Math.max(0, duration - outroDuration);
         const joined = outroText
           .split(/\r?\n/)
-          .map((l) => escAss(l.trim()))
+          .map((l: string) => escAss(l.trim()))
           .filter(Boolean)
           .slice(0, 2)
           .join('\\N');
@@ -1714,12 +1932,17 @@ async function startServer(): Promise<void> {
       }
 
       const outLocal = path.join(job.dir, 'merged.mp4');
-      const args: string[] = ['-y', '-hide_banner', '-loglevel', 'error', '-i', videoPath, '-i', audioPath];
+      const args: string[] = ['-y', '-hide_banner', '-loglevel', 'error'];
+      if (shouldLoopVideo) args.push('-stream_loop', '-1');
+      args.push('-i', videoPath, '-i', audioPath);
       if (vFilters.length > 0) {
         args.push('-filter_complex', `[0:v:0]${vFilters.join(',')}[v]`, '-map', '[v]', '-map', '1:a:0');
         args.push('-c:v', 'libx264', '-preset', 'medium', '-crf', '19', '-pix_fmt', 'yuv420p');
       } else {
-        args.push('-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy');
+        args.push('-map', '0:v:0', '-map', '1:a:0', '-c:v', shouldLoopVideo ? 'libx264' : 'copy');
+        if (shouldLoopVideo) {
+          args.push('-preset', 'medium', '-crf', '19', '-pix_fmt', 'yuv420p');
+        }
       }
       args.push('-t', duration.toFixed(3), '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', outLocal);
 
@@ -1831,21 +2054,21 @@ async function startServer(): Promise<void> {
 
       if (!muteOriginal && vMeta.hasAudio) {
         if (removeDialogue && vMeta.isStereo) {
-          filters.push(`[0:a:0]aformat=channel_layouts=stereo,pan=stereo|c0=FL-FR|c1=FR-FL,volume=${originalVol.toFixed(3)}[orig]`);
+          filters.push(`[0:a:0]aformat=sample_rates=48000:channel_layouts=stereo,pan=stereo|c0=FL-FR|c1=FR-FL,volume=${originalVol.toFixed(3)}[orig]`);
         } else {
-          filters.push(`[0:a:0]aformat=channel_layouts=stereo,volume=${originalVol.toFixed(3)}[orig]`);
+          filters.push(`[0:a:0]aformat=sample_rates=48000:channel_layouts=stereo,volume=${originalVol.toFixed(3)}[orig]`);
         }
         bedLabels.push('[orig]');
       }
       if (musicIdx !== null) {
         filters.push(
-          `[${musicIdx}:a:0]aformat=channel_layouts=stereo,volume=${musicVol.toFixed(3)},atrim=0:${duration.toFixed(3)},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=1.2,afade=t=out:st=${Math.max(0, duration - 1.5).toFixed(3)}:d=${Math.min(1.5, duration).toFixed(3)}[music]`,
+          `[${musicIdx}:a:0]aformat=sample_rates=48000:channel_layouts=stereo,volume=${musicVol.toFixed(3)},atrim=0:${duration.toFixed(3)},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=1.2,afade=t=out:st=${Math.max(0, duration - 1.5).toFixed(3)}:d=${Math.min(1.5, duration).toFixed(3)}[music]`,
         );
         bedLabels.push('[music]');
       }
       if (sfxIdx !== null) {
         filters.push(
-          `[${sfxIdx}:a:0]aformat=channel_layouts=stereo,volume=${sfxVol.toFixed(3)},atrim=0:${duration.toFixed(3)},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=1.8,afade=t=out:st=${Math.max(0, duration - 2.0).toFixed(3)}:d=${Math.min(2.0, duration).toFixed(3)}[sfx]`,
+          `[${sfxIdx}:a:0]aformat=sample_rates=48000:channel_layouts=stereo,volume=${sfxVol.toFixed(3)},atrim=0:${duration.toFixed(3)},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=1.8,afade=t=out:st=${Math.max(0, duration - 2.0).toFixed(3)}:d=${Math.min(2.0, duration).toFixed(3)}[sfx]`,
         );
         bedLabels.push('[sfx]');
       }

@@ -13,6 +13,7 @@ import {
   Shuffle,
   SlidersHorizontal,
   Sparkles,
+  Square,
   Upload,
 } from 'lucide-react';
 import { buildSceneGenerationPrompt } from '../engine/aiPromptBuilder';
@@ -88,6 +89,7 @@ interface AutomationPipelinePanelProps {
   onSeek: (time: number) => void;
   onOpenAdvancedEditor: () => void;
   onOpenAudioSubtitleStudio: () => void;
+  onCancelExportVideo?: () => void;
 }
 
 export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = ({
@@ -111,6 +113,7 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
   onSeek,
   onOpenAdvancedEditor,
   onOpenAudioSubtitleStudio,
+  onCancelExportVideo,
 }) => {
   const [step, setStep] = useState<1 | 2 | 3>(2);
   const [dbVersion, setDbVersion] = useState(0);
@@ -982,10 +985,22 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
               )}
 
               {isExportingVideo && (
-                <div className="p-3 rounded-lg bg-indigo-50 border border-indigo-200 space-y-1.5">
-                  <div className="flex items-center justify-between text-xs font-medium text-indigo-800">
+                <div className="p-3 rounded-lg bg-indigo-50 border border-indigo-200 space-y-2">
+                  <div className="flex items-center justify-between gap-2 text-xs font-medium text-indigo-800">
                     <span>{exportStageLabel || 'Đang render Video MP4...'}</span>
-                    <span className="tabular-nums">{Math.round(exportProgress * 100)}%</span>
+                    <div className="flex items-center gap-2">
+                      <span className="tabular-nums">{Math.round(exportProgress * 100)}%</span>
+                      {onCancelExportVideo && (
+                        <button
+                          type="button"
+                          onClick={onCancelExportVideo}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-semibold text-white bg-rose-600 hover:bg-rose-700 rounded"
+                        >
+                          <Square className="w-2.5 h-2.5 fill-current" />
+                          <span>Hủy render</span>
+                        </button>
+                      )}
+                    </div>
                   </div>
                   <div className="w-full h-1.5 bg-indigo-200/70 rounded-full overflow-hidden">
                     <div
@@ -1021,21 +1036,32 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
                     <Eye className="w-3.5 h-3.5" />
                     <span>Áp dụng vào Xem trước</span>
                   </button>
-                  <button
-                    type="button"
-                    disabled={isExportingVideo}
-                    onClick={() => void handleRenderAndDownloadVideo()}
-                    className="inline-flex items-center gap-2 px-5 py-2.5 text-xs font-semibold text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 disabled:opacity-60 transition-colors"
-                  >
-                    {isExportingVideo ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    ) : (
-                      <Download className="w-3.5 h-3.5" />
-                    )}
-                    <span>
-                      {isExportingVideo ? 'Đang render MP4...' : 'Render & Tải Video (.mp4)'}
-                    </span>
-                  </button>
+                  {isExportingVideo && onCancelExportVideo ? (
+                    <button
+                      type="button"
+                      onClick={onCancelExportVideo}
+                      className="inline-flex items-center gap-2 px-5 py-2.5 text-xs font-semibold text-white bg-rose-600 rounded-lg hover:bg-rose-700 transition-colors"
+                    >
+                      <Square className="w-3.5 h-3.5 fill-current" />
+                      <span>Hủy render</span>
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={isExportingVideo}
+                      onClick={() => void handleRenderAndDownloadVideo()}
+                      className="inline-flex items-center gap-2 px-5 py-2.5 text-xs font-semibold text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 disabled:opacity-60 transition-colors"
+                    >
+                      {isExportingVideo ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Download className="w-3.5 h-3.5" />
+                      )}
+                      <span>
+                        {isExportingVideo ? 'Đang render MP4...' : 'Render & Tải Video (.mp4)'}
+                      </span>
+                    </button>
+                  )}
                 </div>
               </div>
             </>
