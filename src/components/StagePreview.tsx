@@ -342,6 +342,42 @@ export const StagePreview: React.FC<StagePreviewProps> = ({
               ))}
             </select>
           </div>
+          <div className="grid grid-cols-2 gap-1.5">
+            <select
+              aria-label="Kiểu bố cục Tự sáng tạo"
+              value={customCompositionConfig.layoutMode || 'stacked'}
+              onChange={(e) =>
+                onChangeCustomComposition({
+                  ...customCompositionConfig,
+                  layoutMode: e.target.value as 'stacked' | 'split-focus' | 'hero-only',
+                })
+              }
+              className="px-2 py-1 text-[11px] bg-white border border-slate-200 rounded"
+            >
+              <option value="stacked">Bố cục: Xếp dọc chuẩn</option>
+              <option value="split-focus">Bố cục: Song song 2 cột</option>
+              <option value="hero-only">Bố cục: Tập trung hình lớn</option>
+            </select>
+            <select
+              aria-label="Component phụ slot 2 cho Xem trước"
+              value={customCompositionConfig.secondaryVariant || ''}
+              onChange={(e) =>
+                onChangeCustomComposition({
+                  ...customCompositionConfig,
+                  secondaryVariant: e.target.value as IllustrationVariant | '',
+                  layoutMode: e.target.value ? 'split-focus' : customCompositionConfig.layoutMode,
+                })
+              }
+              className="px-2 py-1 text-[11px] bg-white border border-slate-200 rounded"
+            >
+              <option value="">Slot 2: Tự động / Thẻ câu</option>
+              {vectorCatalog.map((item) => (
+                <option key={`sec-${item.variant}`} value={item.variant}>
+                  + {item.label}
+                </option>
+              ))}
+            </select>
+          </div>
           <div className="flex items-center gap-1.5">
             <input
               type="text"

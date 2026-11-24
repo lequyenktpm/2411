@@ -17,6 +17,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
+import { PasteButton } from './PasteButton';
 import { renderIllustrationVariantThumbnail } from '../engine/canvasRenderer';
 import {
   buildVectorComponentAiPrompt,
@@ -1255,16 +1256,27 @@ export const ComponentDatabaseModal: React.FC<ComponentDatabaseModalProps> = ({
             </div>
 
             <div className="lg:col-span-6 space-y-3">
-              <div>
-                <h3 className="text-sm font-bold text-slate-900">
-                  Bước 2: Dán JSON từ AI Web &amp; Xem trước Live
-                </h3>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Hỗ trợ cả 1 object hoặc mảng nhiều component cùng lúc. Sau khi thêm, bạn vẫn có thể chỉnh sửa lại bằng Visual UI Builder.
-                </p>
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900">
+                    Bước 2: Dán JSON từ AI Web &amp; Xem trước Live
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Hỗ trợ cả 1 object hoặc mảng nhiều component cùng lúc. Sau khi thêm, bạn vẫn có thể chỉnh sửa lại bằng Visual UI Builder.
+                  </p>
+                </div>
+                <PasteButton
+                  targetSelector="#comp-db-ai-json-textarea"
+                  onPasteText={(text) => {
+                    setPastedAiJson(text);
+                    setAiParseError(null);
+                    setAiImportSuccess(null);
+                  }}
+                />
               </div>
 
               <textarea
+                id="comp-db-ai-json-textarea"
                 aria-label="Dán JSON component từ AI Web"
                 rows={9}
                 value={pastedAiJson}

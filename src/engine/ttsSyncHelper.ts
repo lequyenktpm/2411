@@ -1,4 +1,4 @@
-import { buildApiKeyHeaders, loadClientApiKeys } from '../utils/apiKeysStore';
+import { alignKnownTextToPcmFloat } from './forcedAligner';
 import { cleanDownloadFileName } from './outputNaming';
 import {
   cuesToBlockTranscript,
@@ -93,9 +93,7 @@ export async function fetchTtsVoicesCatalog(): Promise<{
   hasGeminiKey: boolean;
   hasElevenLabsKey: boolean;
 }> {
-  const res = await fetch('/api/tts/voices', {
-    headers: buildApiKeyHeaders(),
-  });
+  const res = await fetch('/api/tts/voices');
   const data = (await res.json().catch(() => ({}))) as {
     providers?: TtsProviderItem[];
     hasGeminiKey?: boolean;
@@ -113,17 +111,11 @@ export async function synthesizeAudioWithProgressJob(
   onProgress?: (progress: number, stageLabel: string) => void,
 ): Promise<TtsSynthesizeResponse> {
   onProgress?.(4, 'Đang khởi tạo tác vụ đọc TTS...');
-  const clientKeys = loadClientApiKeys();
-  const bodyWithKeys: Record<string, unknown> = {
-    ...payload,
-    ...(clientKeys.elevenlabsApiKey ? { elevenLabsApiKey: clientKeys.elevenlabsApiKey } : {}),
-    ...(clientKeys.geminiApiKey ? { geminiApiKey: clientKeys.geminiApiKey } : {}),
-  };
-  const headers = buildApiKeyHeaders({ 'Content-Type': 'application/json' });
+  const headers = { 'Content-Type': 'application/json' };
   const startRes = await fetch('/api/tts/synthesize/start', {
     method: 'POST',
     headers,
-    body: JSON.stringify(bodyWithKeys),
+    body: JSON.stringify(payload),
   });
   const startRaw = await startRes.text();
   const trimmedStart = startRaw.trim();
@@ -134,7 +126,7 @@ export async function synthesizeAudioWithProgressJob(
     const directRes = await fetch('/api/tts/synthesize', {
       method: 'POST',
       headers,
-      body: JSON.stringify(bodyWithKeys),
+      body: JSON.stringify(payload),
     });
     const directRaw = await directRes.text();
     let directJson: TtsSynthesizeResponse = {};
@@ -234,6 +226,102 @@ export async function synthesizeAudioWithProgressJob(
   throw new Error('Hết thời gian chờ tổng hợp Audio TTS.');
 }
 
+async function decodeAudioBlobToMono16k(audioSource: Blob | ArrayBuffer): Promise<Float32Array | null> {
+  if (typeof window === 'undefined') return null;
+  const AudioCtx =
+    window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!AudioCtx) return null;
+  const ctx = new AudioCtx();
+  try {
+    const rawBuf = audioSource instanceof ArrayBuffer ? audioSource.slice(0) : await audioSource.arrayBuffer();
+    const audioBuffer = await ctx.decodeAudioData(rawBuf);
+    const chCount = Math.max(1, audioBuffer.numberOfChannels);
+    const len = audioBuffer.length;
+    const mono = new Float32Array(len);
+    for (let ch = 0; ch < chCount; ch++) {
+      const chData = audioBuffer.getChannelData(ch);
+      for (let i = 0; i < len; i++) {
+        mono[i] += chData[i] / chCount;
+      }
+    }
+    const targetRate = 16000;
+    if (audioBuffer.sampleRate === targetRate) {
+      return mono;
+    }
+    const outLen = Math.max(1, Math.round((len * targetRate) / audioBuffer.sampleRate));
+    const resampled = new Float32Array(outLen);
+    const ratio = (len - 1) / Math.max(1, outLen - 1);
+    for (let i = 0; i < outLen; i++) {
+      const srcPos = i * ratio;
+      const lo = Math.floor(srcPos);
+      const hi = Math.min(len - 1, lo + 1);
+      const frac = srcPos - lo;
+      resampled[i] = mono[lo] * (1 - frac) + mono[hi] * frac;
+    }
+    return resampled;
+  } catch {
+    return null;
+  } finally {
+    await ctx.close().catch(() => undefined);
+  }
+}
+
+async function tryClientForcedAlignFallback(
+  payload: {
+    audioFile?: File | null;
+    audioBase64?: string;
+    referenceText?: string;
+  },
+  onProgress?: (progress: number, stageLabel: string) => void,
+): Promise<WhisperAlignResponse | null> {
+  const refText = payload.referenceText?.trim();
+  if (!refText) return null;
+  try {
+    onProgress?.(45, 'Đang chuyển sang căn nhịp trực tiếp trên trình duyệt (không cần mạng)...');
+    let audioSource: Blob | ArrayBuffer | null = null;
+    if (payload.audioFile) {
+      audioSource = payload.audioFile;
+    } else if (payload.audioBase64) {
+      const rawBytes = base64ToUint8Array(payload.audioBase64);
+      audioSource = rawBytes.buffer.slice(
+        rawBytes.byteOffset,
+        rawBytes.byteOffset + rawBytes.byteLength,
+      ) as ArrayBuffer;
+    }
+    if (!audioSource) return null;
+    const mono16k = await decodeAudioBlobToMono16k(audioSource);
+    if (!mono16k || mono16k.length < 1600) return null;
+
+    const aligned = alignKnownTextToPcmFloat(refText, mono16k, 16000);
+    const cues: TranscriptCue[] = aligned.segments.map((seg, idx) => {
+      const segWords: WordTiming[] = aligned.words
+        .filter((w) => w.end > seg.start - 0.04 && w.start < seg.end + 0.04)
+        .map((w) => ({ word: w.word, start: w.start, end: w.end }));
+      return {
+        id: `aligned-cue-${idx + 1}`,
+        start: seg.start,
+        end: seg.end,
+        text: seg.text,
+        words: segWords,
+      };
+    });
+    const srt = cuesToSrt(cues);
+    onProgress?.(100, 'Đã căn nhịp từng từ thành công trên trình duyệt!');
+    return {
+      ok: true,
+      words: aligned.words,
+      segments: aligned.segments,
+      text: refText,
+      cues,
+      srt,
+      backendUsed: 'client-fast-forced (WebAudio)',
+      modelUsed: 'client-energy-vad',
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function alignAudioWithProgressJob(
   payload: {
     audioFile?: File | null;
@@ -270,13 +358,13 @@ export async function alignAudioWithProgressJob(
     throw new Error('Thiếu file audio để căn chỉnh word-level.');
   }
 
-  const headers: Record<string, string> = buildApiKeyHeaders({
+  const headers: Record<string, string> = {
     'Content-Type': 'application/octet-stream',
     'x-file-ext': ext,
     'x-source-lang': payload.lang || 'auto',
     'x-whisper-model': payload.model || 'Xenova/whisper-small',
     'x-align-mode': mode,
-  });
+  };
   if (payload.referenceText && payload.referenceText.trim()) {
     headers['x-reference-text-b64'] = encodeUtf8Base64(payload.referenceText.trim());
   }
@@ -303,25 +391,43 @@ export async function alignAudioWithProgressJob(
     return lastRes!;
   };
 
-  const startRes = await postWithRetry('/api/subtitles/align/start');
-  const startRaw = await startRes.text();
+  let startRes: Response;
+  let startRaw = '';
+  try {
+    startRes = await postWithRetry('/api/subtitles/align/start');
+    startRaw = await startRes.text();
+  } catch (netErr) {
+    const fallback = await tryClientForcedAlignFallback(payload, onProgress);
+    if (fallback) return fallback;
+    throw netErr instanceof Error ? netErr : new Error('Không thể kết nối máy chủ Whisper Align.');
+  }
   const trimmedStart = startRaw.trim();
 
   if (startRes.status === 404 || trimmedStart.startsWith('<')) {
     onProgress?.(35, 'Đang chạy căn chỉnh trực tiếp...');
-    const directRes = await postWithRetry('/api/subtitles/align');
-    const directData = (await directRes.json().catch(() => ({}))) as WhisperAlignResponse;
-    if (!directRes.ok || directData.error) {
-      throw new Error(directData.error || `Không thể căn chỉnh audio (HTTP ${directRes.status}).`);
+    try {
+      const directRes = await postWithRetry('/api/subtitles/align');
+      const directData = (await directRes.json().catch(() => ({}))) as WhisperAlignResponse;
+      if (!directRes.ok || directData.error) {
+        const fallback = await tryClientForcedAlignFallback(payload, onProgress);
+        if (fallback) return fallback;
+        throw new Error(directData.error || `Không thể căn chỉnh audio (HTTP ${directRes.status}).`);
+      }
+      onProgress?.(100, 'Căn từng từ hoàn tất!');
+      return directData;
+    } catch (directErr) {
+      const fallback = await tryClientForcedAlignFallback(payload, onProgress);
+      if (fallback) return fallback;
+      throw directErr;
     }
-    onProgress?.(100, 'Căn từng từ hoàn tất!');
-    return directData;
   }
 
   let startData: { jobId?: string; error?: string } = {};
   try {
     startData = JSON.parse(trimmedStart) as { jobId?: string; error?: string };
   } catch {
+    const fallback = await tryClientForcedAlignFallback(payload, onProgress);
+    if (fallback) return fallback;
     throw new Error(
       startRes.ok
         ? 'Server trả về phản hồi căn chỉnh không hợp lệ.'
@@ -329,6 +435,8 @@ export async function alignAudioWithProgressJob(
     );
   }
   if (!startRes.ok || !startData.jobId) {
+    const fallback = await tryClientForcedAlignFallback(payload, onProgress);
+    if (fallback) return fallback;
     throw new Error(startData.error || `Không khởi tạo được Whisper Align (HTTP ${startRes.status}).`);
   }
 

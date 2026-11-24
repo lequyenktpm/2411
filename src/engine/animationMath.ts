@@ -155,3 +155,62 @@ export function computeElementFrameState(
     translateX,
   };
 }
+
+export interface IdleMotionState {
+  translateY: number;
+  scaleMultiplier: number;
+}
+
+function hashElementSeed(id: string): number {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) {
+    h = (h * 31 + id.charCodeAt(i)) | 0;
+  }
+  return Math.abs(h % 360) * (Math.PI / 180);
+}
+
+/**
+ * Subtle idle float & breathing motion for illustrations, 3D shapes, and topic pills
+ * once entrance settles, while keeping reading cards, karaoke, and meters steady.
+ */
+export function computeIdleMotion(element: SceneElement, time: number): IdleMotionState {
+  if (time < element.startTime || time > element.endTime) {
+    return { translateY: 0, scaleMultiplier: 1 };
+  }
+  if (
+    element.type !== 'illustration-prop' &&
+    element.type !== 'shape-3d' &&
+    element.type !== 'topic-pill'
+  ) {
+    return { translateY: 0, scaleMultiplier: 1 };
+  }
+
+  const elapsed = time - element.startTime;
+  const remaining = element.endTime - time;
+  const enterFade = clamp01((elapsed - 0.38) / 0.35);
+  const exitFade = clamp01((remaining - 0.15) / 0.28);
+  const envelope = enterFade * exitFade;
+  if (envelope <= 0.001) {
+    return { translateY: 0, scaleMultiplier: 1 };
+  }
+
+  const phase = hashElementSeed(element.id || element.type);
+  const t = time - element.startTime;
+
+  if (element.type === 'shape-3d') {
+    return {
+      translateY: Math.sin(t * 2.0 + phase) * 6 * envelope,
+      scaleMultiplier: 1 + Math.sin(t * 1.4 + phase) * 0.012 * envelope,
+    };
+  }
+  if (element.type === 'illustration-prop') {
+    return {
+      translateY: Math.sin(t * 2.1 + phase) * 5 * envelope,
+      scaleMultiplier: 1 + Math.sin(t * 1.45 + phase) * 0.008 * envelope,
+    };
+  }
+  return {
+    translateY: Math.sin(t * 2.3 + phase) * 2.5 * envelope,
+    scaleMultiplier: 1,
+  };
+}

@@ -914,63 +914,99 @@ export function recomposeProjectWithStyle(
       lastCard3dEnd = safeEnd;
     });
   } else {
-    // Composition-specific layout architecture & distinct visual styling so presets are unmistakably different
+    // Composition-specific layout architecture & distinct spatial geometry so each preset looks genuinely unique
     const profileMap: Record<
       string,
       {
         showStrip: boolean;
         stripY: number;
+        pillX?: number;
         pillY: number;
+        pillWidth?: number;
+        illX?: number;
         illY: number;
+        illWidth?: number;
+        cardX?: number;
         cardY: number;
+        cardWidth?: number;
+        sentenceAboveIllustration?: boolean;
+        hideSentenceCard?: boolean;
         pillBg?: string;
         pillColor?: string;
         cardBg?: string;
         cardText?: string;
         emphasisColor?: string;
         showToneMeter: boolean;
+        toneMeterY?: number;
       }
     > = {
       'story-scenes': {
         showStrip: true,
         stripY: 185,
+        pillX: 540,
         pillY: 335,
+        pillWidth: 410,
+        illX: 540,
         illY: 635,
+        illWidth: 880,
+        cardX: 540,
         cardY: 985,
+        cardWidth: 830,
         showToneMeter: true,
+        toneMeterY: 1225,
       },
       'flow-steps': {
         showStrip: true,
-        stripY: 175,
-        pillY: 315,
+        stripY: 168,
+        pillX: 540,
+        pillY: 300,
+        pillWidth: 360,
+        illX: 540,
         illY: 575,
-        cardY: 945,
+        illWidth: 920,
+        cardX: 540,
+        cardY: 960,
+        cardWidth: 780,
         pillBg: '#E0E7FF',
         pillColor: '#3730A3',
         cardBg: '#EEF2FF',
         cardText: '#1E1B4B',
         emphasisColor: '#4F46E5',
         showToneMeter: true,
+        toneMeterY: 1215,
       },
       'gauge-tone': {
         showStrip: false,
         stripY: 185,
-        pillY: 225,
-        illY: 570,
-        cardY: 965,
+        pillX: 540,
+        pillY: 210,
+        pillWidth: 380,
+        illX: 540,
+        illY: 525,
+        illWidth: 860,
+        cardX: 540,
+        cardY: 895,
+        cardWidth: 800,
         pillBg: '#DCFCE7',
         pillColor: '#065F46',
         cardBg: '#FFFFFF',
         cardText: '#0F172A',
         emphasisColor: '#059669',
-        showToneMeter: false,
+        showToneMeter: true,
+        toneMeterY: 1185,
       },
       'checklist-cards': {
         showStrip: false,
         stripY: 185,
-        pillY: 220,
-        illY: 585,
-        cardY: 995,
+        pillX: 540,
+        pillY: 215,
+        pillWidth: 430,
+        illX: 540,
+        illY: 580,
+        illWidth: 900,
+        cardX: 540,
+        cardY: 1005,
+        cardWidth: 860,
         pillBg: '#F3E8FF',
         pillColor: '#6B21A8',
         cardBg: '#0F172A',
@@ -981,9 +1017,15 @@ export function recomposeProjectWithStyle(
       'dialogue-upgrade': {
         showStrip: false,
         stripY: 185,
-        pillY: 225,
-        illY: 600,
-        cardY: 1005,
+        pillX: 540,
+        pillY: 220,
+        pillWidth: 460,
+        illX: 540,
+        illY: 590,
+        illWidth: 900,
+        cardX: 540,
+        cardY: 1015,
+        cardWidth: 840,
         pillBg: '#FEF3C7',
         pillColor: '#92400E',
         cardBg: '#FFFBEB',
@@ -993,23 +1035,36 @@ export function recomposeProjectWithStyle(
       },
       'timeline-track': {
         showStrip: true,
-        stripY: 180,
-        pillY: 325,
-        illY: 590,
-        cardY: 955,
+        stripY: 175,
+        pillX: 540,
+        pillY: 320,
+        pillWidth: 420,
+        illX: 540,
+        illY: 585,
+        illWidth: 910,
+        cardX: 540,
+        cardY: 945,
+        cardWidth: 820,
         pillBg: '#CCFBF1',
         pillColor: '#0F766E',
         cardBg: '#F0FDFA',
         cardText: '#134E4A',
         emphasisColor: '#0D9488',
         showToneMeter: true,
+        toneMeterY: 1215,
       },
       'spatial-contrast': {
-        showStrip: true,
+        showStrip: false,
         stripY: 180,
-        pillY: 325,
-        illY: 595,
+        pillX: 540,
+        pillY: 220,
+        pillWidth: 450,
+        illX: 540,
+        illY: 575,
+        illWidth: 900,
+        cardX: 540,
         cardY: 975,
+        cardWidth: 850,
         pillBg: '#1E293B',
         pillColor: '#F8FAFC',
         cardBg: '#FEFCE8',
@@ -1018,24 +1073,40 @@ export function recomposeProjectWithStyle(
         showToneMeter: false,
       },
       'avatar-dialogue': {
+        // True two-column asymmetric split: illustration left + speech card right
         showStrip: false,
         stripY: 185,
-        pillY: 230,
-        illY: 595,
-        cardY: 985,
+        pillX: 540,
+        pillY: 225,
+        pillWidth: 430,
+        illX: 315,
+        illY: 645,
+        illWidth: 430,
+        cardX: 775,
+        cardY: 645,
+        cardWidth: 430,
         pillBg: '#FFE4E6',
         pillColor: '#BE123C',
         cardBg: '#FFF1F2',
         cardText: '#1F2937',
         emphasisColor: '#E11D48',
-        showToneMeter: false,
+        showToneMeter: true,
+        toneMeterY: 1120,
       },
       'clock-spotlight': {
+        // Inverted editorial hierarchy: asymmetric top pill left, focal sentence card upper-mid, large clock spotlight below
         showStrip: false,
         stripY: 185,
-        pillY: 225,
-        illY: 595,
-        cardY: 990,
+        pillX: 310,
+        pillY: 220,
+        pillWidth: 380,
+        illX: 540,
+        illY: 955,
+        illWidth: 880,
+        cardX: 540,
+        cardY: 515,
+        cardWidth: 850,
+        sentenceAboveIllustration: true,
         pillBg: '#FDE68A',
         pillColor: '#78350F',
         cardBg: '#FFFBEB',
@@ -1044,13 +1115,23 @@ export function recomposeProjectWithStyle(
         showToneMeter: false,
       },
       'phrase-icon-split': {
-        showStrip: true,
+        // Oversized focal visual card without top strip + compact takeaway pill card
+        showStrip: false,
         stripY: 168,
-        pillY: 295,
-        illY: 600,
-        cardY: 980,
+        pillX: 540,
+        pillY: 215,
+        pillWidth: 400,
+        illX: 540,
+        illY: 605,
+        illWidth: 940,
+        cardX: 540,
+        cardY: 1050,
+        cardWidth: 740,
         pillBg: '#EEF2FF',
         pillColor: '#4338CA',
+        cardBg: '#F5F3FF',
+        cardText: '#1E1B4B',
+        emphasisColor: '#6D28D9',
         showToneMeter: false,
       },
     };
@@ -1096,7 +1177,13 @@ export function recomposeProjectWithStyle(
           endTime: Number(pillEnd.toFixed(2)),
           enterAnimation: 'pop-up',
           exitAnimation: 'fade-out',
-          layout: { x: 540, y: profile.pillY, width: 410, scale: 1, zIndex: 12 },
+          layout: {
+            x: profile.pillX ?? 540,
+            y: profile.pillY,
+            width: profile.pillWidth ?? 410,
+            scale: 1,
+            zIndex: 12,
+          },
           props: {
             kind: 'topic-pill',
             text: seg.topicLabel,
@@ -1118,7 +1205,8 @@ export function recomposeProjectWithStyle(
 
       const illStart = idx === 0 ? 0 : Math.max(safeStart, lastIllEnd + 0.03);
       const illEnd = idx === segments.length - 1 ? project.duration : Math.max(safeEnd, nextSegStart);
-      if (illEnd - illStart >= 0.35) {
+      const pushIllustration = () => {
+        if (illEnd - illStart < 0.35) return;
         newVisuals.push({
           id: `comp-ill-${idx + 1}`,
           type: 'illustration-prop',
@@ -1128,9 +1216,9 @@ export function recomposeProjectWithStyle(
           enterAnimation: 'fade-scale',
           exitAnimation: 'fade-out',
           layout: {
-            x: 540,
+            x: profile.illX ?? 540,
             y: profile.illY,
-            width: 880,
+            width: profile.illWidth ?? 880,
             scale: 1,
             zIndex: 8,
           },
@@ -1141,10 +1229,11 @@ export function recomposeProjectWithStyle(
           },
         });
         lastIllEnd = illEnd;
-      }
+      };
 
       const cardStart = Math.max(safeStart, lastCardEnd + 0.03);
-      if (safeEnd - cardStart >= 0.35) {
+      const pushSentenceCard = () => {
+        if (profile.hideSentenceCard || safeEnd - cardStart < 0.35) return;
         newVisuals.push({
           id: `comp-card-${idx + 1}`,
           type: 'sentence-card',
@@ -1153,7 +1242,13 @@ export function recomposeProjectWithStyle(
           endTime: Number(safeEnd.toFixed(2)),
           enterAnimation: 'pop-up',
           exitAnimation: idx === segments.length - 1 ? 'fade-out' : 'shrink',
-          layout: { x: 540, y: profile.cardY, width: 830, scale: 1, zIndex: 20 },
+          layout: {
+            x: profile.cardX ?? 540,
+            y: profile.cardY,
+            width: profile.cardWidth ?? 830,
+            scale: 1,
+            zIndex: 20,
+          },
           props: {
             kind: 'sentence-card',
             text: seg.cardText,
@@ -1168,6 +1263,14 @@ export function recomposeProjectWithStyle(
           },
         });
         lastCardEnd = safeEnd;
+      };
+
+      if (profile.sentenceAboveIllustration) {
+        pushSentenceCard();
+        pushIllustration();
+      } else {
+        pushIllustration();
+        pushSentenceCard();
       }
     });
 
@@ -1181,7 +1284,7 @@ export function recomposeProjectWithStyle(
         endTime: project.duration,
         enterAnimation: 'slide-up',
         exitAnimation: 'fade-out',
-        layout: { x: 540, y: 1255, width: 700, scale: 1, zIndex: 18 },
+        layout: { x: 540, y: profile.toneMeterY ?? 1255, width: 700, scale: 1, zIndex: 18 },
         props: {
           kind: 'tone-meter',
           title: 'TONE',
@@ -1234,27 +1337,46 @@ export function applyCustomComponentComposition(
 ): LessonProject {
   const catalog = getEffectiveVectorCatalog();
   const matchedMeta = catalog.find((c) => c.variant === customConfig.variant);
+  const secondaryMeta = customConfig.secondaryVariant
+    ? catalog.find((c) => c.variant === customConfig.secondaryVariant)
+    : undefined;
   const nextTheme = options?.theme ?? project.theme;
   const segments = buildBeatSegments(project);
   const stripItems = deriveStripItems(project);
   const karaokeEls = project.elements.filter((e) => e.type === 'karaoke-card');
   const accentColor = customConfig.accentColor || '#4F46E5';
+  const layoutMode = customConfig.layoutMode ?? 'stacked';
 
-  const makeCustomData = (seg: ReturnType<typeof buildBeatSegments>[number]): IllustrationPropData => ({
-    title: customConfig.title?.trim() || seg.topicLabel || matchedMeta?.label || 'Key Insight',
-    subtitle:
-      customConfig.subtitle?.trim() ||
-      (seg.subtext ? cleanShortPhrase(seg.subtext, 8, 46) : matchedMeta?.description),
-    speechText: customConfig.speechText?.trim() || cleanShortPhrase(seg.cardText, 8, 48),
-    labels:
-      customConfig.labels && customConfig.labels.length > 0
-        ? customConfig.labels
-        : stripItems.slice(0, 3).map((s) => s.label),
-    highlightWord: customConfig.highlightWord?.trim() || seg.emphasisWord,
-    formula: customConfig.formula?.trim() || undefined,
-    sceneIcon: customConfig.sceneIcon ?? matchedMeta?.defaultIcon ?? 'sparkles',
-    customPrimitives: getCustomComponentByVariant(customConfig.variant)?.primitives,
-  });
+  const makeCustomData = (
+    seg: ReturnType<typeof buildBeatSegments>[number],
+    variantOverride?: IllustrationVariant,
+  ): IllustrationPropData => {
+    const v = variantOverride || customConfig.variant;
+    const metaForV = catalog.find((c) => c.variant === v) ?? matchedMeta;
+    const isSecondary = Boolean(variantOverride && variantOverride !== customConfig.variant);
+    return {
+      title: isSecondary
+        ? metaForV?.label || 'Key Contrast'
+        : customConfig.title?.trim() || seg.topicLabel || metaForV?.label || 'Key Insight',
+      subtitle: isSecondary
+        ? cleanShortPhrase(seg.subtext || metaForV?.description || '', 8, 46)
+        : customConfig.subtitle?.trim() ||
+          (seg.subtext ? cleanShortPhrase(seg.subtext, 8, 46) : metaForV?.description),
+      speechText: isSecondary
+        ? cleanShortPhrase(seg.cardText, 6, 40)
+        : customConfig.speechText?.trim() || cleanShortPhrase(seg.cardText, 8, 48),
+      labels:
+        !isSecondary && customConfig.labels && customConfig.labels.length > 0
+          ? customConfig.labels
+          : stripItems.slice(0, 3).map((s) => s.label),
+      highlightWord: customConfig.highlightWord?.trim() || seg.emphasisWord,
+      formula: !isSecondary ? customConfig.formula?.trim() || undefined : undefined,
+      sceneIcon: isSecondary
+        ? metaForV?.defaultIcon ?? 'sparkles'
+        : customConfig.sceneIcon ?? metaForV?.defaultIcon ?? 'sparkles',
+      customPrimitives: getCustomComponentByVariant(v)?.primitives,
+    };
+  };
 
   if (options?.scope === 'active-cue' && typeof options.activeTimeSec === 'number') {
     const t = options.activeTimeSec;
@@ -1294,7 +1416,7 @@ export function applyCustomComponentComposition(
           layout: {
             x: 540,
             y: customConfig.illustrationY ?? 635,
-            width: 880,
+            width: layoutMode === 'hero-only' ? 940 : 880,
             scale: 1,
             zIndex: 10,
           },
@@ -1317,7 +1439,17 @@ export function applyCustomComponentComposition(
   }
 
   const newVisuals: SceneElement[] = [];
-  if (customConfig.showStrip !== false && stripItems.length >= 2) {
+  const hasSecondary = Boolean(customConfig.secondaryVariant && secondaryMeta);
+  const showStripEffective =
+    layoutMode === 'hero-only' ? false : customConfig.showStrip !== false && stripItems.length >= 2;
+  const showSentenceEffective =
+    layoutMode === 'hero-only'
+      ? false
+      : layoutMode === 'split-focus' && !hasSecondary
+        ? true
+        : customConfig.showSentenceCard !== false;
+
+  if (showStripEffective) {
     newVisuals.push({
       id: 'comp-custom-strip',
       type: 'comparison-strip',
@@ -1337,8 +1469,10 @@ export function applyCustomComponentComposition(
   let lastPillEnd = -1;
   let lastIllEnd = -1;
   let lastCardEnd = -1;
-  const pillY = customConfig.showStrip !== false && stripItems.length >= 2 ? 330 : 225;
-  const illY = customConfig.illustrationY ?? (customConfig.showStrip !== false ? 630 : 585);
+  const pillY = showStripEffective ? 330 : 225;
+  const illY =
+    customConfig.illustrationY ??
+    (layoutMode === 'hero-only' ? 680 : showStripEffective ? 630 : 585);
   const cardY = customConfig.showToneMeter ? 980 : 1015;
 
   segments.forEach((seg, idx) => {
@@ -1372,26 +1506,70 @@ export function applyCustomComponentComposition(
     const illStart = idx === 0 ? 0 : Math.max(safeStart, lastIllEnd + 0.03);
     const illEnd = idx === segments.length - 1 ? project.duration : Math.max(safeEnd, nextSegStart);
     if (illEnd - illStart >= 0.35) {
-      newVisuals.push({
-        id: `comp-custom-ill-${idx + 1}`,
-        type: 'illustration-prop',
-        label: `Kho Component: ${matchedMeta?.label || customConfig.variant}`,
-        startTime: Number(illStart.toFixed(2)),
-        endTime: Number(illEnd.toFixed(2)),
-        enterAnimation: 'fade-scale',
-        exitAnimation: 'fade-out',
-        layout: { x: 540, y: illY, width: 880, scale: 1, zIndex: 9 },
-        props: {
-          kind: 'illustration-prop',
-          variant: customConfig.variant,
-          data: makeCustomData(seg),
-        },
-      });
+      if (layoutMode === 'split-focus') {
+        // Left column: primary illustration
+        newVisuals.push({
+          id: `comp-custom-ill-${idx + 1}`,
+          type: 'illustration-prop',
+          label: `Kho Component (Trái): ${matchedMeta?.label || customConfig.variant}`,
+          startTime: Number(illStart.toFixed(2)),
+          endTime: Number(illEnd.toFixed(2)),
+          enterAnimation: 'fade-scale',
+          exitAnimation: 'fade-out',
+          layout: { x: 300, y: illY, width: 440, height: 255, scale: 1, zIndex: 9 },
+          props: {
+            kind: 'illustration-prop',
+            variant: customConfig.variant,
+            data: makeCustomData(seg),
+          },
+        });
+        if (hasSecondary && customConfig.secondaryVariant) {
+          // Right column: secondary illustration from Kho Component
+          newVisuals.push({
+            id: `comp-custom-ill-sec-${idx + 1}`,
+            type: 'illustration-prop',
+            label: `Kho Component (Phải): ${secondaryMeta?.label || customConfig.secondaryVariant}`,
+            startTime: Number(illStart.toFixed(2)),
+            endTime: Number(illEnd.toFixed(2)),
+            enterAnimation: 'fade-scale',
+            exitAnimation: 'fade-out',
+            layout: { x: 780, y: illY, width: 440, height: 255, scale: 1, zIndex: 9 },
+            props: {
+              kind: 'illustration-prop',
+              variant: customConfig.secondaryVariant,
+              data: makeCustomData(seg, customConfig.secondaryVariant),
+            },
+          });
+        }
+      } else {
+        newVisuals.push({
+          id: `comp-custom-ill-${idx + 1}`,
+          type: 'illustration-prop',
+          label: `Kho Component: ${matchedMeta?.label || customConfig.variant}`,
+          startTime: Number(illStart.toFixed(2)),
+          endTime: Number(illEnd.toFixed(2)),
+          enterAnimation: 'fade-scale',
+          exitAnimation: 'fade-out',
+          layout: {
+            x: 540,
+            y: illY,
+            width: layoutMode === 'hero-only' ? 940 : 880,
+            scale: 1,
+            zIndex: 9,
+          },
+          props: {
+            kind: 'illustration-prop',
+            variant: customConfig.variant,
+            data: makeCustomData(seg),
+          },
+        });
+      }
       lastIllEnd = illEnd;
     }
 
     const cardStart = Math.max(safeStart, lastCardEnd + 0.03);
-    if (customConfig.showSentenceCard !== false && safeEnd - cardStart >= 0.35) {
+    if (showSentenceEffective && safeEnd - cardStart >= 0.35) {
+      const splitSideCard = layoutMode === 'split-focus' && !hasSecondary;
       newVisuals.push({
         id: `comp-custom-card-${idx + 1}`,
         type: 'sentence-card',
@@ -1400,7 +1578,9 @@ export function applyCustomComponentComposition(
         endTime: Number(safeEnd.toFixed(2)),
         enterAnimation: 'pop-up',
         exitAnimation: idx === segments.length - 1 ? 'fade-out' : 'shrink',
-        layout: { x: 540, y: cardY, width: 830, scale: 1, zIndex: 20 },
+        layout: splitSideCard
+          ? { x: 780, y: illY, width: 440, scale: 1, zIndex: 20 }
+          : { x: 540, y: cardY, width: 830, scale: 1, zIndex: 20 },
         props: {
           kind: 'sentence-card',
           text: seg.cardText,
@@ -1445,7 +1625,7 @@ export function applyCustomComponentComposition(
     ...project,
     theme: nextTheme,
     compositionId: 'custom',
-    subtitle: `${project.cues.length} câu thoại · Tự sáng tạo (${matchedMeta?.label || customConfig.variant})`,
+    subtitle: `${project.cues.length} câu thoại · Tự sáng tạo (${matchedMeta?.label || customConfig.variant}${secondaryMeta ? ` + ${secondaryMeta.label}` : ''})`,
     elements: resolveProjectOverlaps([...newVisuals, ...karaokeEls]),
   };
 }

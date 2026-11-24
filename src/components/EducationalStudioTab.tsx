@@ -27,6 +27,7 @@ import {
   buildEduKaraokeAss,
   buildEstimatedReadingWords,
   computeReadingTimelineMetrics,
+  CURATED_READING_PASSAGES,
   EduKaraokePosition,
   EduKaraokeSize,
   EduWatermarkCorner,
@@ -77,9 +78,8 @@ import {
   TtsProviderItem,
 } from '../engine/ttsSyncHelper';
 import { LessonProject, TranscriptCue, WordTiming } from '../engine/types';
-import { buildApiKeyHeaders, useClientApiKeys } from '../utils/apiKeysStore';
-import { ApiKeyInlineControl } from './ApiKeyInlineControl';
 import { emitOutputUpdated } from './GlobalOutputPanel';
+import { PasteButton } from './PasteButton';
 
 interface EducationalStudioTabProps {
   onSendAudioCuesToStudio?: (audioFile: File | null, cues: TranscriptCue[], title?: string) => void;
@@ -1078,7 +1078,7 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
 
   // ── Sub-tab 3: Reading Along Studio (Book + Pointer Hand + Whisper + MP4 Export) ──
   const [showKmOutroPreview, setShowKmOutroPreview] = useState(false);
-  const { keys: clientKeys } = useClientApiKeys();
+  const [selectedCuratedId, setSelectedCuratedId] = useState<string>('a1-morning-routine');
   const [readingTitle, setReadingTitle] = useState('A Simple Morning Routine');
   const [readingTopic, setReadingTopic] = useState('Daily life · A1');
   const [readingPaletteId, setReadingPaletteId] =
@@ -1176,22 +1176,18 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
     refreshReadingVoices();
   }, [refreshReadingVoices]);
 
-  const effectiveReadingGeminiKey = hasReadingGeminiKey || Boolean(clientKeys.geminiApiKey);
-  const effectiveReadingElevenLabsKey =
-    hasReadingElevenLabsKey || Boolean(clientKeys.elevenlabsApiKey);
-
   const allReadingVoices = useMemo(() => {
     if (readingProvider === 'auto') {
       return ttsVoices
         .filter(
           (p) =>
-            (p.id !== 'gemini' || effectiveReadingGeminiKey) &&
-            (p.id !== 'elevenlabs' || effectiveReadingElevenLabsKey),
+            (p.id !== 'gemini' || hasReadingGeminiKey) &&
+            (p.id !== 'elevenlabs' || hasReadingElevenLabsKey),
         )
         .flatMap((p) => p.voices);
     }
     return ttsVoices.find((p) => p.id === readingProvider)?.voices ?? [];
-  }, [ttsVoices, readingProvider, effectiveReadingGeminiKey, effectiveReadingElevenLabsKey]);
+  }, [ttsVoices, readingProvider, hasReadingGeminiKey, hasReadingElevenLabsKey]);
 
   useEffect(() => {
     if (allReadingVoices.length > 0 && !allReadingVoices.some((v) => v.id === readingVoice)) {
@@ -1924,11 +1920,11 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
       setReadingWebPromptMode('web-url');
       setReadingAiProgress(55);
 
-      if (adaptWithAi && effectiveReadingGeminiKey) {
+      if (adaptWithAi && hasReadingGeminiKey) {
         setReadingAiStageLabel(`AI đang biên tập lại theo trình độ ${readingAiLevel}...`);
         const aiRes = await fetch('/api/ai/generate-reading', {
           method: 'POST',
-          headers: buildApiKeyHeaders({ 'Content-Type': 'application/json' }),
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             mode: 'adapt-url',
             level: readingAiLevel,
@@ -1968,7 +1964,7 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
       setAlignCurrentSec(0);
       setIsWebPromptOpen(true);
       setReadingAiStageLabel(
-        effectiveReadingGeminiKey
+        hasReadingGeminiKey
           ? 'Đã lấy nội dung trang web vào bài đọc!'
           : 'Đã bóc tách văn bản sạch từ Web — có thể sao chép Prompt Web AI bên dưới rồi dán kết quả về sách!',
       );
@@ -1989,7 +1985,7 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
     try {
       const res = await fetch('/api/ai/generate-reading', {
         method: 'POST',
-        headers: buildApiKeyHeaders({ 'Content-Type': 'application/json' }),
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           mode: 'generate',
           topic: readingAiTopic.trim(),
@@ -2855,20 +2851,40 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                     </div>
                   </div>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
-                    <textarea
-                      rows={4}
-                      value={kmSrtInput}
-                      onChange={(e) => setKmSrtInput(e.target.value)}
-                      placeholder="Dán .SRT hoặc từng dòng câu..."
-                      className="w-full p-2.5 text-[11px] font-mono bg-slate-50 border border-slate-200 rounded-lg"
-                    />
-                    <textarea
-                      rows={4}
-                      value={kmAssContent}
-                      onChange={(e) => setKmAssContent(e.target.value)}
-                      placeholder="Mã Karaoke .ASS tự động sinh (hoặc dán file .ass có sẵn)..."
-                      className="w-full p-2.5 text-[11px] font-mono bg-slate-50 border border-slate-200 rounded-lg"
-                    />
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-semibold text-slate-600">Nội dung .SRT / Script</span>
+                        <PasteButton
+                          targetSelector="#edu-km-srt-textarea"
+                          onPasteText={(text) => setKmSrtInput(text)}
+                        />
+                      </div>
+                      <textarea
+                        id="edu-km-srt-textarea"
+                        rows={4}
+                        value={kmSrtInput}
+                        onChange={(e) => setKmSrtInput(e.target.value)}
+                        placeholder="Dán .SRT hoặc từng dòng câu..."
+                        className="w-full p-2.5 text-[11px] font-mono bg-slate-50 border border-slate-200 rounded-lg"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-semibold text-slate-600">Mã Karaoke .ASS</span>
+                        <PasteButton
+                          targetSelector="#edu-km-ass-textarea"
+                          onPasteText={(text) => setKmAssContent(text)}
+                        />
+                      </div>
+                      <textarea
+                        id="edu-km-ass-textarea"
+                        rows={4}
+                        value={kmAssContent}
+                        onChange={(e) => setKmAssContent(e.target.value)}
+                        placeholder="Mã Karaoke .ASS tự động sinh (hoặc dán file .ass có sẵn)..."
+                        className="w-full p-2.5 text-[11px] font-mono bg-slate-50 border border-slate-200 rounded-lg"
+                      />
+                    </div>
                   </div>
                 </div>
 
@@ -3082,18 +3098,12 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                     </button>
                   </div>
 
-                  <ApiKeyInlineControl
-                    provider="gemini"
-                    hasServerKey={hasReadingGeminiKey}
-                    onSaved={refreshReadingVoices}
-                    compact
-                  />
-
                   {/* URL Input */}
                   <div className="flex flex-col sm:flex-row gap-2">
                     <div className="relative flex-1">
                       <Link2 className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
                       <input
+                        id="reading-url-input"
                         type="url"
                         aria-label="Đường link bài báo hoặc truyện tiếng Anh"
                         value={readingUrl}
@@ -3102,6 +3112,10 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                         className="w-full pl-8 pr-3 py-1.5 text-xs bg-white border border-slate-200 rounded-lg"
                       />
                     </div>
+                    <PasteButton
+                      targetSelector="#reading-url-input"
+                      onPasteText={(text) => setReadingUrl(text.trim())}
+                    />
                     <button
                       type="button"
                       disabled={isScrapingOrGeneratingReading || !readingUrl.trim()}
@@ -3231,9 +3245,18 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                       />
 
                       <div className="space-y-1.5">
-                        <label htmlFor="paste-web-ai-reading" className="block text-[11px] font-semibold text-slate-700">
-                          Dán kết quả JSON (hoặc đoạn văn) từ Web AI vào đây rồi bấm Áp dụng:
-                        </label>
+                        <div className="flex items-center justify-between gap-2">
+                          <label htmlFor="paste-web-ai-reading" className="text-[11px] font-semibold text-slate-700">
+                            Dán kết quả JSON (hoặc đoạn văn) từ Web AI vào đây rồi bấm Áp dụng:
+                          </label>
+                          <PasteButton
+                            targetSelector="#paste-web-ai-reading"
+                            onPasteText={(text) => {
+                              setPastedReadingAiResponse(text);
+                              setPastedReadingAiError(null);
+                            }}
+                          />
+                        </div>
                         <textarea
                           id="paste-web-ai-reading"
                           rows={3}
@@ -3361,6 +3384,57 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                       </div>
                     </div>
 
+                    {/* Curated CEFR A1-C1 Reading Passage Library */}
+                    <div className="p-2.5 rounded-lg bg-amber-50/60 border border-amber-200/80 space-y-1.5">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="text-[11px] font-semibold text-amber-950">
+                          Thư viện bài đọc chuẩn CEFR A1–C1 ({CURATED_READING_PASSAGES.length} bài)
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const pool = CURATED_READING_PASSAGES.filter((p) => p.id !== selectedCuratedId);
+                            const pick = pool[Math.floor(Math.random() * pool.length)] ?? CURATED_READING_PASSAGES[0];
+                            setSelectedCuratedId(pick.id);
+                            setReadingTitle(pick.title);
+                            setReadingTopic(pick.topic);
+                            setReadingText(pick.text);
+                            setReadingAiLevel(pick.level);
+                            setAlignResult(null);
+                            setAlignCurrentSec(0);
+                            setSynthesizedReadingSig('');
+                          }}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold text-amber-900 bg-white border border-amber-300 rounded hover:bg-amber-100"
+                        >
+                          <Wand2 className="w-3 h-3" />
+                          <span>Bài ngẫu nhiên</span>
+                        </button>
+                      </div>
+                      <select
+                        aria-label="Chọn bài đọc mẫu CEFR"
+                        value={selectedCuratedId}
+                        onChange={(e) => {
+                          const chosen = CURATED_READING_PASSAGES.find((p) => p.id === e.target.value);
+                          if (!chosen) return;
+                          setSelectedCuratedId(chosen.id);
+                          setReadingTitle(chosen.title);
+                          setReadingTopic(chosen.topic);
+                          setReadingText(chosen.text);
+                          setReadingAiLevel(chosen.level);
+                          setAlignResult(null);
+                          setAlignCurrentSec(0);
+                          setSynthesizedReadingSig('');
+                        }}
+                        className="w-full px-2.5 py-1.5 text-xs bg-white border border-amber-200 rounded-lg"
+                      >
+                        {CURATED_READING_PASSAGES.map((p) => (
+                          <option key={p.id} value={p.id}>
+                            [{p.level}] {p.title} — {p.topic}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
                     <div className="grid grid-cols-2 gap-2.5">
                       <div>
                         <label htmlFor="reading-title-input" className="block text-[11px] font-semibold text-slate-700 mb-1">
@@ -3393,7 +3467,16 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                         <label htmlFor="reading-passage-textarea" className="text-[11px] font-semibold text-slate-700">
                           Nội dung bài đọc
                         </label>
-                        <div className="flex items-center gap-3">
+                        <div className="flex items-center gap-2.5">
+                          <PasteButton
+                            targetSelector="#reading-passage-textarea"
+                            onPasteText={(text) => {
+                              setReadingText(text);
+                              setAlignResult(null);
+                              setAlignCurrentSec(0);
+                              setSynthesizedReadingSig('');
+                            }}
+                          />
                           <button
                             type="button"
                             onClick={() => {
@@ -3577,12 +3660,12 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                           <option value="auto">Tự động (Edge TTS miễn phí)</option>
                           <option value="edge">Edge TTS (Miễn phí)</option>
                           <option value="elevenlabs">
-                            ElevenLabs AI Voice ({effectiveReadingElevenLabsKey ? 'Đã có Key' : 'Nhập Key ngay dưới'})
+                            ElevenLabs AI Voice ({hasReadingElevenLabsKey ? 'Đã có Key' : 'Cần .env Server'})
                           </option>
                           <option value="google">Google Translate TTS (Miễn phí)</option>
                           <option value="polly">Amazon Polly (Miễn phí)</option>
                           <option value="gemini">
-                            Gemini Flash TTS ({effectiveReadingGeminiKey ? 'Đã có Key' : 'Nhập Key ngay dưới'})
+                            Gemini Flash TTS ({hasReadingGeminiKey ? 'Đã có Key' : 'Cần .env Server'})
                           </option>
                         </select>
                         <select
@@ -3603,17 +3686,11 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                         </select>
                       </div>
 
-                      {(readingProvider === 'elevenlabs' || readingProvider === 'gemini') && (
-                        <ApiKeyInlineControl
-                          provider={readingProvider === 'elevenlabs' ? 'elevenlabs' : 'gemini'}
-                          hasServerKey={
-                            readingProvider === 'elevenlabs'
-                              ? hasReadingElevenLabsKey
-                              : hasReadingGeminiKey
-                          }
-                          onSaved={refreshReadingVoices}
-                          compact
-                        />
+                      {((readingProvider === 'elevenlabs' && !hasReadingElevenLabsKey) ||
+                        (readingProvider === 'gemini' && !hasReadingGeminiKey)) && (
+                        <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
+                          Chưa cấu hình {readingProvider === 'elevenlabs' ? 'ELEVENLABS_API_KEY' : 'GEMINI_API_KEY'} trong biến môi trường server (<code className="font-mono">.env</code>) — bạn có thể dùng miễn phí <strong>Edge TTS / Google / Polly</strong> ngay.
+                        </p>
                       )}
 
                       <div className="flex flex-wrap items-center gap-2">

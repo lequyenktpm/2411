@@ -239,7 +239,27 @@ export function validateStoryboardDocument(
   const seenSceneIds = new Set<string>();
   const seenElementIds = new Set<string>();
 
+  const sceneSpans = scenes.map((sc, scIdx) => {
+    const referencedSegs = (Array.isArray(sc.elements) ? sc.elements : [])
+      .map((raw) => {
+        const el = raw as unknown as StoryboardV19Element;
+        return el.sync_anchor?.segment_id ? sourceSegmentsMap.get(el.sync_anchor.segment_id) : undefined;
+      })
+      .filter((s): s is StoryboardSourceSegment => Boolean(s));
+    if (referencedSegs.length > 0) {
+      const minS = Math.min(...referencedSegs.map((s) => Number(s.start) || 0));
+      const maxE = Math.max(...referencedSegs.map((s) => Number(s.end) || 0));
+      return { start: minS, end: Math.max(minS + 0.6, maxE) };
+    }
+    const segApprox = sourceSegments[scIdx];
+    return {
+      start: Number(segApprox?.start) || scIdx * 4,
+      end: Number(segApprox?.end) || (scIdx + 1) * 4,
+    };
+  });
+
   scenes.forEach((sc, scIdx) => {
+    const span = sceneSpans[scIdx] ?? { start: 0, end: 4 };
     const sceneId = (sc.scene_id || sc.id || '').trim() || `scene_${scIdx + 1}`;
     if (seenSceneIds.has(sceneId)) {
       pushIssue({
@@ -267,6 +287,27 @@ export function validateStoryboardDocument(
       h: number;
     }
     const sceneBoxes: BoxTiming[] = [];
+
+    // Collect ordered segment start times present in this scene so visual hold extensions
+    // never bleed into the next sequential cue inside the same scene.
+    const sceneSegStarts = Array.from(
+      new Set(
+        elements
+          .map((raw) => {
+            const sid = (raw as unknown as StoryboardV19Element)?.sync_anchor?.segment_id;
+            const segObj = sid ? sourceSegmentsMap.get(sid) : undefined;
+            return segObj ? Number(segObj.start) : NaN;
+          })
+          .filter((n) => Number.isFinite(n)),
+      ),
+    ).sort((a, b) => a - b);
+
+    const hasMultipleSceneTitlePills =
+      elements.filter((raw) => {
+        const k = String((raw as any)?.kind ?? (raw as any)?.type ?? '').toLowerCase();
+        const r = String((raw as any)?.role ?? '').toLowerCase();
+        return k === 'pill' || r === 'scene_title';
+      }).length > 1;
 
     elements.forEach((rawEl, elIdx) => {
       const el = rawEl as unknown as StoryboardV19Element & Record<string, unknown>;
@@ -334,14 +375,63 @@ export function validateStoryboardDocument(
                 });
               }
             }
+            const explicitDisplayDur =
+              typeof (el as any).display_duration_s === 'number' && (el as any).display_duration_s > 0
+                ? Number((el as any).display_duration_s)
+                : typeof (el as any).duration_s === 'number' && (el as any).duration_s > 0.8
+                  ? Number((el as any).duration_s)
+                  : undefined;
+
             resolvedTiming = resolveSyncAnchorTiming(
               el.sync_anchor,
               seg,
               cues,
-              seg.start,
-              seg.end,
-              el.animation?.duration_s,
+              span.start,
+              span.end,
+              explicitDisplayDur,
             );
+
+            const rawKindCheck = String(el.kind ?? el.type ?? '').toLowerCase();
+            const rawRoleCheck = String(el.role ?? '').toLowerCase();
+            const isHeaderStrip =
+              rawKindCheck === 'strip' ||
+              rawKindCheck === 'comparison_strip' ||
+              rawRoleCheck === 'comparison_header' ||
+              rawRoleCheck === 'section_header' ||
+              rawRoleCheck === 'header' ||
+              rawRoleCheck === 'persistent_strip';
+            const isPersistentTitle = rawRoleCheck === 'scene_title' && !hasMultipleSceneTitlePills;
+            const nextSegStartInScene = sceneSegStarts.find((t) => t > (Number(seg.start) || 0) + 0.08);
+            const maxHoldCeiling = nextSegStartInScene !== undefined ? Math.max(Number(seg.end) || 0, nextSegStartInScene - 0.05) : span.end;
+
+            if (isHeaderStrip || isPersistentTitle) {
+              resolvedTiming.endTime = span.end;
+            } else {
+              const anchorType = el.sync_anchor.anchor_type;
+              const isVisualProp =
+                rawKindCheck === 'illustration' ||
+                rawKindCheck === 'asset' ||
+                rawKindCheck === 'illustration-prop' ||
+                rawKindCheck === 'object' ||
+                rawKindCheck === 'connector' ||
+                rawKindCheck === 'shape_3d' ||
+                rawKindCheck === 'shape-3d' ||
+                rawKindCheck === 'word_stack' ||
+                rawKindCheck === 'word-stack' ||
+                rawKindCheck === 'meter' ||
+                rawKindCheck === 'tone_meter' ||
+                rawKindCheck === 'tone-meter' ||
+                rawKindCheck === 'pill' ||
+                rawKindCheck === 'topic_pill' ||
+                rawKindCheck === 'topic-pill';
+              if (isVisualProp && (anchorType === 'segment_start' || anchorType === 'phrase' || !anchorType)) {
+                const naturalHoldEnd = Math.max(Number(seg.end) || 0, resolvedTiming.startTime + 2.2);
+                resolvedTiming.endTime = Math.max(
+                  resolvedTiming.endTime,
+                  Math.min(span.end, maxHoldCeiling, naturalHoldEnd),
+                );
+              }
+            }
           }
         }
       }
@@ -388,12 +478,12 @@ export function validateStoryboardDocument(
       }
 
       // 4. Validate normalized 0..1 position & Karaoke safe zone
-      const pos = el.position;
+      const pos = el.position as (typeof el.position & { w?: unknown; h?: unknown }) | undefined;
       if (pos && typeof pos === 'object') {
         const px = Number(pos.x);
         const py = Number(pos.y);
-        const pw = Number(pos.width);
-        const ph = Number(pos.height);
+        const pw = Number(pos.width ?? pos.w);
+        const ph = Number(pos.height ?? pos.h);
         if (
           !Number.isFinite(px) ||
           !Number.isFinite(py) ||
@@ -461,6 +551,24 @@ export function validateStoryboardDocument(
       }
     }
   });
+
+  if (isV19 && sourceSegments.length >= 6) {
+    const coveredSegIds = new Set<string>();
+    scenes.forEach((sc) => {
+      (Array.isArray(sc.elements) ? sc.elements : []).forEach((raw) => {
+        const sid = (raw as unknown as StoryboardV19Element)?.sync_anchor?.segment_id;
+        if (sid && sourceSegmentsMap.has(sid)) coveredSegIds.add(sid);
+      });
+    });
+    const missingCount = sourceSegments.length - coveredSegIds.size;
+    if (missingCount > Math.max(2, Math.floor(sourceSegments.length * 0.25))) {
+      pushIssue({
+        code: 'UNCOVERED_SOURCE_SEGMENTS',
+        severity: 'warning',
+        message: `${missingCount}/${sourceSegments.length} câu chưa có element riêng trong JSON (app sẽ tự bổ sung minh họa ngữ cảnh hoặc bạn có thể bấm Tự chuẩn hóa JSON v1.9).`,
+      });
+    }
+  }
 
   const multiSceneOk =
     scenes.length > 1 || (cues.length <= 6 && elementCount <= 10);

@@ -14,7 +14,6 @@ import {
   resyncProjectTimingToCues,
 } from './engine/autoChoreographer';
 import { syncCustomComponentsFromServer } from './engine/customComponentStore';
-import { hydrateClientApiKeysFromServer } from './utils/apiKeysStore';
 import {
   applyCustomComponentComposition,
   pickRandomComposition,
@@ -84,6 +83,8 @@ export default function App() {
   const resolvedExport = resolveMp4EncodingParams(mp4Settings);
   const [customCompositionConfig, setCustomCompositionConfig] = useState<CustomComponentPresetConfig>({
     variant: 'css-sticky-note',
+    secondaryVariant: '',
+    layoutMode: 'stacked',
     sceneIcon: 'sparkles',
     title: '',
     subtitle: '',
@@ -155,7 +156,6 @@ export default function App() {
 
   useEffect(() => {
     void syncCustomComponentsFromServer();
-    void hydrateClientApiKeysFromServer();
   }, []);
 
   useEffect(() => {

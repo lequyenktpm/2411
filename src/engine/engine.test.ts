@@ -12,7 +12,7 @@ import {
 import { inferSpokenLanguageFromText } from '../server/mediaHelpers';
 import { buildSceneGenerationPrompt } from './aiPromptBuilder';
 import { choreographFromTranscript, resyncProjectTimingToCues } from './autoChoreographer';
-import { computeElementFrameState, computeStaggerItemState } from './animationMath';
+import { computeElementFrameState, computeIdleMotion, computeStaggerItemState } from './animationMath';
 import {
   cleanDownloadFileName,
   cleanOutputTitleStem,
@@ -37,6 +37,7 @@ import {
   parseScenePlanJson,
   parseWordLevelJson,
   projectToWordsAndScenePlan,
+  repairStoryboardV19Document,
   scenePlanToProject,
   summarizeScenePlan,
 } from './scenePlanAdapter';
@@ -106,6 +107,7 @@ import {
 } from './readingPromptBuilder';
 import {
   computeReadingTimelineMetrics,
+  CURATED_READING_PASSAGES,
   paginateReadingWords,
   READING_BOOK_FRAMES,
   READING_POINTER_STYLES,
@@ -2352,6 +2354,296 @@ test('Storyboard v1.9 preserves animation.duration_s transition without truncati
   assert.ok(richPrompt.includes('"kind": "connector"'));
   assert.ok(richPrompt.includes('"kind": "meter"'));
   assert.ok(richPrompt.includes('CHỈ là tốc độ hiệu ứng bay vào/ra'));
+});
+
+test('Layout presets differentiate spatial geometry and custom split-focus renders two side-by-side components cleanly', () => {
+  const cues = [
+    { id: 'c1', start: 0.0, end: 3.5, text: 'At 9:30, meet your team in the cafe.', words: [] },
+    { id: 'c2', start: 3.6, end: 7.2, text: 'Can I speak with the manager at 10:15?', words: [] },
+  ];
+  const baseProject = choreographFromTranscript(cues, {
+    title: 'Spatial Preset Diff',
+    compositionId: 'story-scenes',
+  });
+
+  const avatarProj = recomposeProjectWithStyle(baseProject, 'avatar-dialogue');
+  const clockProj = recomposeProjectWithStyle(baseProject, 'clock-spotlight');
+  const storyProj = recomposeProjectWithStyle(baseProject, 'story-scenes');
+
+  assert.equal(findVisualOverlaps(avatarProj.elements).length, 0);
+  assert.equal(findVisualOverlaps(clockProj.elements).length, 0);
+  assert.equal(findVisualOverlaps(storyProj.elements).length, 0);
+
+  const avatarIll = avatarProj.elements.find((e) => e.id === 'comp-ill-1');
+  const avatarCard = avatarProj.elements.find((e) => e.id === 'comp-card-1');
+  assert.ok(avatarIll && avatarCard);
+  assert.ok(avatarIll.layout.x < 450 && avatarCard.layout.x > 650);
+
+  const clockIll = clockProj.elements.find((e) => e.id === 'comp-ill-1');
+  const clockCard = clockProj.elements.find((e) => e.id === 'comp-card-1');
+  assert.ok(clockIll && clockCard);
+  assert.ok(clockCard.layout.y < clockIll.layout.y);
+
+  const customSplit = applyCustomComponentComposition(baseProject, {
+    variant: 'css-sticky-note',
+    secondaryVariant: 'bs-card-header',
+    layoutMode: 'split-focus',
+    title: 'CUSTOM FOCUS',
+  });
+  assert.equal(findVisualOverlaps(customSplit.elements).length, 0);
+  const splitPrimaries = customSplit.elements.filter((e) => /^comp-custom-ill-\d+$/.test(e.id));
+  const splitSecondaries = customSplit.elements.filter((e) => /^comp-custom-ill-sec-\d+$/.test(e.id));
+  assert.equal(splitPrimaries.length, 2);
+  assert.equal(splitSecondaries.length, 2);
+  assert.ok(splitPrimaries[0].layout.x < 450 && splitSecondaries[0].layout.x > 650);
+
+  const customHero = applyCustomComponentComposition(baseProject, {
+    variant: 'timeline-track',
+    layoutMode: 'hero-only',
+  });
+  assert.equal(findVisualOverlaps(customHero.elements).length, 0);
+  assert.ok(!customHero.elements.some((e) => e.id.startsWith('comp-custom-card-')));
+});
+
+test('computeIdleMotion animates visual props gently while keeping reading text and karaoke stationary', () => {
+  const illEl: SceneElement = {
+    id: 'idle-ill-1',
+    type: 'illustration-prop',
+    label: 'Prop',
+    startTime: 0,
+    endTime: 5,
+    enterAnimation: 'fade-scale',
+    exitAnimation: 'fade-out',
+    layout: { x: 540, y: 600, width: 800, scale: 1, zIndex: 10 },
+    props: { kind: 'illustration-prop', variant: 'cafe-water' },
+  };
+  const cardEl: SceneElement = {
+    id: 'idle-card-1',
+    type: 'sentence-card',
+    label: 'Card',
+    startTime: 0,
+    endTime: 5,
+    enterAnimation: 'pop-up',
+    exitAnimation: 'fade-out',
+    layout: { x: 540, y: 980, width: 820, scale: 1, zIndex: 20 },
+    props: { kind: 'sentence-card', text: 'Could I have some water?' },
+  };
+
+  let sawFloat = false;
+  for (const sampleT of [1.2, 1.7, 2.3, 2.9]) {
+    const m = computeIdleMotion(illEl, sampleT);
+    assert.ok(Math.abs(m.translateY) <= 6.5);
+    assert.ok(m.scaleMultiplier >= 0.985 && m.scaleMultiplier <= 1.015);
+    if (Math.abs(m.translateY) > 0.25) sawFloat = true;
+  }
+  assert.ok(sawFloat, 'illustration-prop should have gentle float mid-lifespan');
+
+  const cardMotion = computeIdleMotion(cardEl, 2.0);
+  assert.equal(cardMotion.translateY, 0);
+  assert.equal(cardMotion.scaleMultiplier, 1);
+});
+
+test('English Reels JSON parser normalizes snake_case variants, trailing commas, and preserves partial visual fields', () => {
+  const rawWithQuirks = `{
+    "cards": [
+      {
+        "mode": "mistake-fix",
+        "topicBadge": "POLITE",
+        "spokenText": "Give me water sounds abrupt.",
+        "visual": {
+          "title": "Water Order",
+          "highlightWord": "please",
+          "value": "85",
+          "sceneIcon": "cup",
+        },
+      },
+      {
+        "mode": "story",
+        "topicBadge": "STEPS",
+        "spokenText": "Follow three simple steps.",
+        "visual": {
+          "variant": "flow_diagram",
+          "title": "Three Steps",
+        },
+      },
+    ],
+  }`;
+
+  const parsed = parseEnglishReelsAiJson(rawWithQuirks);
+  assert.ok(parsed);
+  assert.equal(parsed!.cards.length, 2);
+  assert.equal(parsed!.cards[0].visual?.title, 'Water Order');
+  assert.equal(parsed!.cards[0].visual?.highlightWord, 'please');
+  assert.equal(parsed!.cards[0].visual?.value, 0.85);
+  assert.ok(parsed!.cards[0].visual?.variant && parsed!.cards[0].visual.variant.length > 0);
+  assert.equal(parsed!.cards[1].visual?.variant, 'flow-diagram');
+});
+
+test('Storyboard v1.9 prompt multi-segment example, validator duration hold, numeric pos aliases, and curated reading library', () => {
+  const cues = [
+    { id: 'c1', start: 0.0, end: 3.0, text: 'First stop saying Give me water.', words: [] },
+    { id: 'c2', start: 3.1, end: 6.2, text: 'Instead say Could I have some water?', words: [] },
+    { id: 'c3', start: 6.3, end: 9.5, text: 'It immediately sounds warm and polite.', words: [] },
+  ];
+
+  const prompt = buildSceneGenerationPrompt(cues, { title: 'Water Etiquette', compositionId: 'ai-decide' });
+  assert.ok(prompt.includes('"segment_id": "seg_002"'));
+  assert.ok(prompt.includes('"segment_id": "seg_003"'));
+
+  const doc = {
+    schema_version: '1.9',
+    title: 'Validator Hold Test',
+    theme: 'soft-lavender',
+    compositionId: 'story-scenes',
+    source_segments: buildSourceSegmentsFromCues(cues),
+    scenes: [
+      {
+        scene_id: 'sc_01',
+        title: 'Scene 1',
+        elements: [
+          {
+            element_id: 'el_head',
+            kind: 'strip',
+            role: 'comparison_header',
+            items: [{ label: 'Rude' }, { label: 'Polite' }],
+            sync_anchor: { segment_id: 'seg_001', anchor_type: 'segment_start', quote: 'First stop' },
+            position: { x: 0.08, y: 0.06, width: 0.84, height: 0.07 },
+            animation: { in: 'drop-in', out: 'fade-out', duration_s: 0.35 },
+          },
+          {
+            element_id: 'el_prop',
+            kind: 'illustration',
+            variant: 'cafe-water',
+            sync_anchor: { segment_id: 'seg_001', anchor_type: 'phrase', quote: 'Give me water' },
+            position: { x: '0.10', y: '0.24', w: '0.80', h: '0.26' },
+            animation: { in: 'fade-scale', out: 'fade-out', duration_s: 0.35 },
+          },
+          {
+            element_id: 'el_low',
+            kind: 'text',
+            role: 'example_sentence',
+            content: 'Low card above karaoke safe zone',
+            sync_anchor: { segment_id: 'seg_002', anchor_type: 'full_segment', quote: 'Could I have' },
+            position: { x: 0.10, y: 0.72, width: 0.80, height: 0.15 },
+          },
+        ],
+      },
+    ],
+  };
+
+  const report = validateStoryboardDocument(doc, cues, { audioDurationSec: 9.5 });
+  assert.ok(
+    !report.errors.some((issue) => issue.code === 'element_short_lifespan' || issue.code === 'no_short_flash'),
+    `Unexpected short-lifespan errors: ${JSON.stringify(report.errors)}`,
+  );
+
+  const parsed = parseScenePlanJson(JSON.stringify(doc));
+  assert.ok(parsed);
+  const project = scenePlanToProject([], parsed!, { cuesOverride: cues });
+  const lowEl = project.elements.find((e) => e.id === 'el_low');
+  assert.ok(lowEl, 'el_low should be mapped');
+  const lowBounds = estimateElementBounds(lowEl!);
+  assert.ok(lowBounds.bottom <= 1455, `non-karaoke element bottom ${lowBounds.bottom} should clear karaoke safe zone`);
+
+  assert.ok(CURATED_READING_PASSAGES.length >= 7);
+  const levels = new Set(CURATED_READING_PASSAGES.map((p) => p.level));
+  for (const reqLevel of ['A1', 'A2', 'B1', 'B2', 'C1'] as const) {
+    assert.ok(levels.has(reqLevel), `missing CEFR level ${reqLevel}`);
+  }
+});
+
+test('Storyboard v1.9 validator avoids false overlaps across sequential cues in same scene and repairStoryboardV19Document fixes LLM quirks cleanly', () => {
+  const cues = Array.from({ length: 12 }, (_, idx) => ({
+    id: `c${idx + 1}`,
+    start: Number((idx * 1.4).toFixed(2)),
+    end: Number((idx * 1.4 + 1.3).toFixed(2)),
+    text: `Sentence number ${idx + 1} teaches natural speaking flow.`,
+    words: [],
+  }));
+
+  // 1. Sequential cues inside same scene occupying same visual slot must NOT trigger ELEMENT_SPATIAL_OVERLAP
+  const seqSceneDoc = parseScenePlanJson(
+    JSON.stringify({
+      schema_version: '1.9',
+      title: 'Sequential Same-Scene Test',
+      source_segments: buildSourceSegmentsFromCues(cues.slice(0, 3)),
+      scenes: [
+        {
+          scene_id: 'sc_01',
+          elements: [
+            {
+              element_id: 'sc01_el01',
+              kind: 'illustration',
+              variant: 'cafe-water',
+              sync_anchor: { segment_id: 'seg_001', anchor_type: 'segment_start', quote: 'Sentence number 1' },
+              position: { x: 0.08, y: 0.22, w: 0.84, h: 0.24 },
+            },
+            {
+              element_id: 'sc01_el02',
+              kind: 'illustration',
+              variant: 'gauge-arc',
+              sync_anchor: { segment_id: 'seg_002', anchor_type: 'segment_start', quote: 'Sentence number 2' },
+              position: { x: 0.08, y: 0.22, w: 0.84, h: 0.24 },
+            },
+            {
+              element_id: 'sc01_el03',
+              kind: 'illustration',
+              variant: 'clock-face',
+              sync_anchor: { segment_id: 'seg_003', anchor_type: 'segment_start', quote: 'Sentence number 3' },
+              position: { x: 0.08, y: 0.22, w: 0.84, h: 0.24 },
+            },
+          ],
+        },
+      ],
+    }),
+  );
+  assert.ok(seqSceneDoc);
+  const seqReport = validateStoryboardDocument(seqSceneDoc!, cues.slice(0, 3));
+  assert.deepEqual(seqReport.errors, []);
+
+  // 2. Broken LLM output across 12 segments (duplicate IDs, bad icon, quote drift, karaoke overflow, uncovered segments)
+  const messyDoc = parseScenePlanJson(
+    JSON.stringify({
+      schema_version: '1.9',
+      title: 'Messy 12-Seg Output',
+      source_segments: buildSourceSegmentsFromCues(cues),
+      scenes: [
+        {
+          scene_id: 'sc_01',
+          elements: [
+            {
+              element_id: 'el_01',
+              kind: 'illustration',
+              variant: 'bs_card_header',
+              sceneIcon: 'tree',
+              sync_anchor: { segment_id: 'seg_001', anchor_type: 'phrase', quote: 'wrong quote text' },
+              position: { x: 0.08, y: 0.65, w: 0.84, h: 0.18 },
+            },
+          ],
+        },
+        {
+          scene_id: 'sc_02',
+          elements: [
+            {
+              element_id: 'el_01', // duplicate ID across scenes
+              kind: 'text',
+              content: 'Sentence number 5 teaches natural speaking flow.',
+              sync_anchor: { segment_id: 'seg_005', anchor_type: 'full_segment', quote: 'Sentence number 5' },
+              position: { x: 0.08, y: 0.50, width: 0.84, height: 0.14 },
+            },
+          ],
+        },
+      ],
+    }),
+  );
+  assert.ok(messyDoc);
+  const repaired = repairStoryboardV19Document(messyDoc!, cues);
+  const repairedReport = validateStoryboardDocument(repaired, cues);
+  assert.deepEqual(repairedReport.errors, []);
+  const anchoredSegIds = new Set(
+    repaired.scenes.flatMap((s) => (s.elements ?? []).map((e) => (e as any).sync_anchor?.segment_id)).filter(Boolean),
+  );
+  assert.equal(anchoredSegIds.size, 12);
 });
 
 

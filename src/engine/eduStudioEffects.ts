@@ -398,6 +398,66 @@ export const READING_POINTER_STYLES: ReadingPointerStyleMeta[] = [
   { id: 'underline-only', label: 'Gạch Chân Tối Giản', description: 'Thanh gạch chân động mượt mà, không che chữ' },
 ];
 
+export interface CuratedReadingPassage {
+  id: string;
+  level: 'A1' | 'A2' | 'B1' | 'B2' | 'C1';
+  title: string;
+  topic: string;
+  text: string;
+}
+
+export const CURATED_READING_PASSAGES: CuratedReadingPassage[] = [
+  {
+    id: 'a1-morning-routine',
+    level: 'A1',
+    title: 'A Simple Morning Routine',
+    topic: 'Daily life · A1',
+    text: `Tom wakes up early every morning.\nHe opens the window and makes his bed.\nThen he drinks a glass of water and eats breakfast.\nHe checks the time, takes his bag, and leaves home.\nA good morning helps him start the day with energy.`,
+  },
+  {
+    id: 'a2-coffee-shop',
+    level: 'A2',
+    title: 'Ordering at a Cozy Cafe',
+    topic: 'Conversation · A2',
+    text: `Anna walks into her favorite neighborhood cafe before work.\nShe smiles at the barista and asks for a small oat latte.\nWhile waiting by the counter, she reads a quick message from her friend.\nTwo minutes later, she picks up her warm cup and says thank you.\nThe pleasant aroma of fresh coffee makes the busy morning feel calm.`,
+  },
+  {
+    id: 'a2-airport-checkin',
+    level: 'A2',
+    title: 'Smooth Airport Check-In',
+    topic: 'Travel · A2',
+    text: `Maya arrives at the airport two hours before her flight.\nShe shows her passport at the counter and checks in her suitcase.\nThe staff member hands back her boarding pass with a clear gate number.\nAfter passing through security, Maya fills her water bottle and finds a seat.\nShe feels relaxed and ready for a wonderful trip.`,
+  },
+  {
+    id: 'b1-deep-focus',
+    level: 'B1',
+    title: 'The Habit of Deep Focus',
+    topic: 'Productivity · B1',
+    text: `Many people start their workday by checking dozens of notifications.\nHowever, switching quickly between small messages drains your mental energy.\nInstead, try spending the first thirty minutes on a single important task.\nTurn your phone face down, close extra browser tabs, and set a gentle timer.\nOnce you build this quiet rhythm, challenging projects feel much easier to finish.`,
+  },
+  {
+    id: 'b1-active-listening',
+    level: 'B1',
+    title: 'Polite Requests That Sound Natural',
+    topic: 'Workplace · B1',
+    text: `In daily conversations, direct commands can sometimes sound abrupt even when we mean well.\nAdding softening phrases like "Could you possibly" or "Would you mind" changes the tone right away.\nFor example, saying "Could we review the slides together?" invites genuine cooperation.\nListeners feel respected rather than rushed, so discussions stay constructive.\nPracticing polite phrasing builds trust with both colleagues and new friends.`,
+  },
+  {
+    id: 'b2-urban-forests',
+    level: 'B2',
+    title: 'Why Pocket Parks Matter in Cities',
+    topic: 'Environment · B2',
+    text: `As modern cities grow denser, small green spaces tucked between buildings play a vital role.\nEven a modest pocket park lined with shade trees can lower street temperatures on summer afternoons.\nOffice workers and students pause there to rest their eyes from bright screens and traffic noise.\nUrban planners now recognize that accessible greenery strengthens neighborhood health and social connection.\nTiny islands of nature quietly transform concrete streets into livable communities.`,
+  },
+  {
+    id: 'c1-deliberate-learning',
+    level: 'C1',
+    title: 'The Compound Effect of Shadowing',
+    topic: 'Language Mastery · C1',
+    text: `Acquiring natural rhythm in a second language rarely comes from memorizing isolated vocabulary lists.\nInstead, shadowing authentic audio trains your ear and vocal muscles to move in a unified cadence.\nBy echoing native stress patterns and subtle pauses, unfamiliar expressions quickly become intuitive.\nOver several weeks of consistent practice, hesitation fades and conversational flow deepens effortlessly.`,
+  },
+];
+
 export interface ReadingAlongRenderOptions {
   width: number;
   height: number;

@@ -49,6 +49,7 @@ import {
 import {
   parseScenePlanJson,
   parseWordLevelJson,
+  repairStoryboardV19Document,
   summarizeScenePlan,
 } from '../engine/scenePlanAdapter';
 import {
@@ -56,7 +57,7 @@ import {
   formatTimeToken,
   parseTranscriptAuto,
 } from '../engine/transcriptParser';
-import { ApiKeyInlineControl } from './ApiKeyInlineControl';
+import { PasteButton } from './PasteButton';
 import { getEffectiveVectorCatalog, SCENE_ICON_KEYWORDS } from '../engine/vectorComponentDb';
 import {
   CustomComponentPresetConfig,
@@ -69,7 +70,6 @@ import {
   TranscriptCue,
   WordTiming,
 } from '../engine/types';
-import { useClientApiKeys } from '../utils/apiKeysStore';
 
 export type PresetId = 'jp-en' | 'water' | 'ed' | '3d' | 'xun';
 
@@ -171,6 +171,8 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
   const [compositionMode, setCompositionMode] = useState<'manual' | 'ai-decide' | 'random' | 'custom'>('ai-decide');
   const [localCustomConfig, setLocalCustomConfig] = useState<CustomComponentPresetConfig>({
     variant: 'css-sticky-note',
+    secondaryVariant: '',
+    layoutMode: 'stacked',
     sceneIcon: 'sparkles',
     title: '',
     subtitle: '',
@@ -198,8 +200,6 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
   );
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [renderNotice, setRenderNotice] = useState<string | null>(null);
-
-  const { keys: clientKeys } = useClientApiKeys();
 
   // Inline TTS synthesis & auto-sync state (mirrors English Reels Studio)
   const [ttsProviders, setTtsProviders] = useState<TtsProviderItem[]>([]);
@@ -235,19 +235,16 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
     refreshTtsVoices();
   }, []);
 
-  const effectiveHasGeminiKey = hasGeminiKey || Boolean(clientKeys.geminiApiKey);
-  const effectiveHasElevenLabsKey = hasElevenLabsKey || Boolean(clientKeys.elevenlabsApiKey);
-
   const inlineAvailableVoices = useMemo(() => {
     if (inlineProvider === 'auto') {
       return ttsProviders.flatMap((p) => {
-        if (p.id === 'gemini' && !effectiveHasGeminiKey) return [];
-        if (p.id === 'elevenlabs' && !effectiveHasElevenLabsKey) return [];
+        if (p.id === 'gemini' && !hasGeminiKey) return [];
+        if (p.id === 'elevenlabs' && !hasElevenLabsKey) return [];
         return p.voices;
       });
     }
     return ttsProviders.find((p) => p.id === inlineProvider)?.voices ?? [];
-  }, [ttsProviders, inlineProvider, effectiveHasGeminiKey, effectiveHasElevenLabsKey]);
+  }, [ttsProviders, inlineProvider, hasGeminiKey, hasElevenLabsKey]);
 
   useEffect(() => {
     if (
@@ -840,13 +837,11 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
                     </button>
                   </div>
 
-                  {(inlineProvider === 'elevenlabs' || inlineProvider === 'gemini') && (
-                    <ApiKeyInlineControl
-                      provider={inlineProvider === 'elevenlabs' ? 'elevenlabs' : 'gemini'}
-                      hasServerKey={inlineProvider === 'elevenlabs' ? hasElevenLabsKey : hasGeminiKey}
-                      onSaved={refreshTtsVoices}
-                      compact
-                    />
+                  {((inlineProvider === 'elevenlabs' && !hasElevenLabsKey) ||
+                    (inlineProvider === 'gemini' && !hasGeminiKey)) && (
+                    <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
+                      Chưa cấu hình {inlineProvider === 'elevenlabs' ? 'ELEVENLABS_API_KEY' : 'GEMINI_API_KEY'} trong biến môi trường server (<code className="font-mono">.env</code>) — bạn có thể dùng miễn phí <strong>Edge Neural / Google / Polly</strong> ngay.
+                    </p>
                   )}
 
                   {isGeneratingInlineAudio && (
@@ -1089,16 +1084,25 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
               </div>
 
               <div>
-                <div className="flex items-center justify-between mb-1">
+                <div className="flex items-center justify-between mb-1 gap-2">
                   <label
                     htmlFor="pipeline-transcript-input"
                     className="text-xs font-medium text-slate-700"
                   >
                     2. Nội dung Sub / Kịch bản (dán SRT/VTT/Block HOẶC gõ mỗi câu 1 dòng rồi bấm Xuất Audio)
                   </label>
-                  <span className="text-[11px] font-medium text-emerald-700 tabular-nums">
-                    Nhận diện: {liveTranscriptCues.length || rawTranscript.split(/\r?\n/).filter((l) => l.trim()).length} câu
-                  </span>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <PasteButton
+                      targetSelector="#pipeline-transcript-input"
+                      onPasteText={(text) => {
+                        setRawTranscript(text);
+                        setErrorMsg(null);
+                      }}
+                    />
+                    <span className="text-[11px] font-medium text-emerald-700 tabular-nums">
+                      Nhận diện: {liveTranscriptCues.length || rawTranscript.split(/\r?\n/).filter((l) => l.trim()).length} câu
+                    </span>
+                  </div>
                 </div>
                 <textarea
                   id="pipeline-transcript-input"
@@ -1327,6 +1331,53 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
                         </div>
                       </div>
 
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <div>
+                          <label htmlFor="custom-comp-layout-mode" className="block text-[10px] font-semibold text-slate-600 mb-0.5">
+                            Bố cục trình bày
+                          </label>
+                          <select
+                            id="custom-comp-layout-mode"
+                            value={activeCustomConfig.layoutMode || 'stacked'}
+                            onChange={(e) =>
+                              updateCustomConfig({
+                                ...activeCustomConfig,
+                                layoutMode: e.target.value as 'stacked' | 'split-focus' | 'hero-only',
+                              })
+                            }
+                            className="w-full px-2 py-1 text-xs bg-slate-50 border border-slate-200 rounded"
+                          >
+                            <option value="stacked">Xếp dọc chuẩn</option>
+                            <option value="split-focus">Song song 2 cột</option>
+                            <option value="hero-only">Tập trung hình lớn</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label htmlFor="custom-comp-secondary" className="block text-[10px] font-semibold text-slate-600 mb-0.5">
+                            Component phụ Slot 2 (tùy chọn)
+                          </label>
+                          <select
+                            id="custom-comp-secondary"
+                            value={activeCustomConfig.secondaryVariant || ''}
+                            onChange={(e) =>
+                              updateCustomConfig({
+                                ...activeCustomConfig,
+                                secondaryVariant: e.target.value as IllustrationVariant | '',
+                                layoutMode: e.target.value ? 'split-focus' : activeCustomConfig.layoutMode,
+                              })
+                            }
+                            className="w-full px-2 py-1 text-xs bg-slate-50 border border-slate-200 rounded"
+                          >
+                            <option value="">Tự động / Ghép thẻ câu</option>
+                            {vectorCatalog.map((c) => (
+                              <option key={`step2-sec-${c.variant}`} value={c.variant}>
+                                {c.label} ({c.category})
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+
                       <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                         <input
                           type="text"
@@ -1496,7 +1547,15 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
                     Tự động lọc bỏ dấu <code>```json</code> và tự đồng bộ với Audio + {activeCues.length} câu thoại.
                   </p>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <PasteButton
+                    targetSelector="#pipeline-scene-json"
+                    onPasteText={(text) => {
+                      setRawSceneJson(text);
+                      setErrorMsg(null);
+                      setRenderNotice(null);
+                    }}
+                  />
                   <button
                     type="button"
                     onClick={() => {
@@ -1591,11 +1650,26 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
                       data-testid="storyboard-validator-issues"
                       className="p-2.5 rounded-lg bg-white border border-slate-200 space-y-1.5 text-[11px]"
                     >
-                      <div className="flex items-center justify-between text-[10.5px] font-semibold text-slate-700">
+                      <div className="flex items-center justify-between gap-2 text-[10.5px] font-semibold text-slate-700">
                         <span>Kiểm tra ngữ nghĩa (Stage 4 Validator)</span>
-                        <span>
-                          {validationReport.errors.length} lỗi · {validationReport.warnings.length} cảnh báo
-                        </span>
+                        <div className="flex items-center gap-2">
+                          <span>
+                            {validationReport.errors.length} lỗi · {validationReport.warnings.length} cảnh báo
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (!parsedPreviewPlan) return;
+                              const repaired = repairStoryboardV19Document(parsedPreviewPlan, activeCues);
+                              setRawSceneJson(JSON.stringify(repaired, null, 2));
+                              setErrorMsg(null);
+                              setRenderNotice('Đã tự động chuẩn hóa ID, tọa độ an toàn và lấp đầy minh họa cho các segment còn thiếu.');
+                            }}
+                            className="px-2 py-0.5 text-[10px] font-semibold rounded bg-indigo-600 text-white hover:bg-indigo-700 transition-colors"
+                          >
+                            Tự chuẩn hóa JSON v1.9
+                          </button>
+                        </div>
                       </div>
                       <ul className="space-y-1 max-h-36 overflow-y-auto pr-1">
                         {[...validationReport.errors, ...validationReport.warnings]
@@ -1629,7 +1703,7 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
                 </div>
               )}
 
-              <div>
+              <div className="flex items-center justify-between gap-2">
                 <label className="inline-flex items-center gap-2 text-[11px] text-slate-600 cursor-pointer">
                   <input
                     type="checkbox"
@@ -1639,10 +1713,17 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
                   />
                   <span>Tùy chọn: dùng file words.json riêng thay cho Transcript Bước 1</span>
                 </label>
+                {useSeparateWordsJson && (
+                  <PasteButton
+                    targetSelector="#pipeline-words-json"
+                    onPasteText={(text) => setRawWordsJson(text)}
+                  />
+                )}
               </div>
 
               {useSeparateWordsJson && (
                 <textarea
+                  id="pipeline-words-json"
                   aria-label="words.json tùy chọn"
                   rows={4}
                   value={rawWordsJson}

@@ -12,7 +12,6 @@ import {
   Upload,
   X,
 } from 'lucide-react';
-import { ApiKeyInlineControl } from './ApiKeyInlineControl';
 import {
   cuesToBlockTranscript,
   cuesToSrt,
@@ -25,7 +24,7 @@ import {
   synthesizeAudioWithProgressJob,
 } from '../engine/ttsSyncHelper';
 import { TranscriptCue } from '../engine/types';
-import { buildApiKeyHeaders, useClientApiKeys } from '../utils/apiKeysStore';
+import { PasteButton } from './PasteButton';
 
 export interface TtsVoiceOption {
   id: string;
@@ -130,7 +129,6 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
   const [ttsWhisperModel, setTtsWhisperModel] = useState<string>('Xenova/whisper-small');
   const [ttsAlignNote, setTtsAlignNote] = useState<string | null>(null);
   const [ttsCleanedNotice, setTtsCleanedNotice] = useState<string | null>(null);
-  const { keys: clientKeys } = useClientApiKeys();
   const [ttsPreviewMode, setTtsPreviewMode] = useState<'block' | 'srt'>('block');
   const [isSynthesizing, setIsSynthesizing] = useState(false);
   const [isAligningTts, setIsAligningTts] = useState(false);
@@ -212,7 +210,7 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
   };
 
   const refreshVoices = () => {
-    fetch('/api/tts/voices', { headers: buildApiKeyHeaders() })
+    fetch('/api/tts/voices')
       .then((r) => parseApiJson<{
         providers?: TtsProviderInfo[];
         hasGeminiKey?: boolean;
@@ -250,19 +248,16 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
     };
   }, [ttsResult]);
 
-  const effectiveHasGeminiKey = hasGeminiKey || Boolean(clientKeys.geminiApiKey);
-  const effectiveHasElevenLabsKey = hasElevenLabsKey || Boolean(clientKeys.elevenlabsApiKey);
-
   const availableVoices = useMemo(() => {
     if (provider === 'auto') {
       return providers.flatMap((p) => {
-        if (p.id === 'gemini' && !effectiveHasGeminiKey) return [];
-        if (p.id === 'elevenlabs' && !effectiveHasElevenLabsKey) return [];
+        if (p.id === 'gemini' && !hasGeminiKey) return [];
+        if (p.id === 'elevenlabs' && !hasElevenLabsKey) return [];
         return p.voices;
       });
     }
     return providers.find((p) => p.id === provider)?.voices ?? [];
-  }, [providers, provider, effectiveHasGeminiKey, effectiveHasElevenLabsKey]);
+  }, [providers, provider, hasGeminiKey, hasElevenLabsKey]);
 
   useEffect(() => {
     if (availableVoices.length > 0 && !availableVoices.some((v) => v.id === voice)) {
@@ -502,7 +497,7 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
       const buf = await mediaFile.arrayBuffer();
       const startRes = await fetch('/api/subtitles/transcribe/start', {
         method: 'POST',
-        headers: buildApiKeyHeaders({
+        headers: {
           'Content-Type': 'application/octet-stream',
           'x-file-ext': ext,
           'x-engine': sttService,
@@ -510,7 +505,7 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
           'x-output-format': outputFormat,
           'x-source-lang': sourceLang,
           'x-translate-lang': translateLang,
-        }),
+        },
         body: buf,
       });
       const startData = await parseApiJson<{ jobId?: string; error?: string }>(
@@ -616,7 +611,7 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
     try {
       const res = await fetch('/api/subtitles/translate', {
         method: 'POST',
-        headers: buildApiKeyHeaders({ 'Content-Type': 'application/json' }),
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           srt: sourceSrt,
           targetLang: standaloneTargetLang,
@@ -799,12 +794,11 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
                 </div>
               </div>
 
-              {(provider === 'elevenlabs' || provider === 'gemini') && (
-                <ApiKeyInlineControl
-                  provider={provider === 'elevenlabs' ? 'elevenlabs' : 'gemini'}
-                  hasServerKey={provider === 'elevenlabs' ? hasElevenLabsKey : hasGeminiKey}
-                  onSaved={refreshVoices}
-                />
+              {((provider === 'elevenlabs' && !hasElevenLabsKey) ||
+                (provider === 'gemini' && !hasGeminiKey)) && (
+                <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5">
+                  Chưa cấu hình {provider === 'elevenlabs' ? 'ELEVENLABS_API_KEY' : 'GEMINI_API_KEY'} trong biến môi trường server (<code className="font-mono">.env</code>) — bạn có thể chọn nhóm giọng <strong>Edge Neural / Google / Polly</strong> miễn phí ngay.
+                </p>
               )}
 
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
@@ -834,6 +828,23 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
                     Lời thoại đọc (tự bỏ dòng timestamp khi dán từ .SRT / Transcript)
                   </label>
                   <div className="flex items-center gap-2">
+                    <PasteButton
+                      targetSelector="#audio-modal-tts-textarea"
+                      onPasteText={(text) => {
+                        if (!text) {
+                          setTtsText('');
+                          setTtsCleanedNotice(null);
+                          return;
+                        }
+                        const cleaned = stripTimestampsFromScript(text);
+                        setTtsText(cleaned || text);
+                        if (cleaned && cleaned !== text.trim()) {
+                          setTtsCleanedNotice(
+                            'Đã tự động bỏ các mốc thời gian khi dán — sau khi sinh Audio sẽ tính lại mốc thời gian khớp 100% Audio mới.',
+                          );
+                        }
+                      }}
+                    />
                     <button
                       type="button"
                       onClick={() => {
@@ -853,6 +864,7 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
                   </div>
                 </div>
                 <textarea
+                  id="audio-modal-tts-textarea"
                   rows={5}
                   value={ttsText}
                   onPaste={(e) => {
@@ -1105,9 +1117,9 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
                     <option value="faster-whisper">faster-whisper (Built-in)</option>
                     <option value="whisper">Local Whisper (ONNX Built-in)</option>
                     <option value="gemini">
-                      {effectiveHasGeminiKey
-                        ? 'Gemini AI (Đã có API Key)'
-                        : 'Gemini AI (Nhập Key bên dưới)'}
+                      {hasGeminiKey
+                        ? 'Gemini AI (Đã cấu hình Key)'
+                        : 'Gemini AI (Cần .env Server)'}
                     </option>
                   </select>
                 </div>
@@ -1194,13 +1206,10 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
                 )}
               </div>
 
-              {sttService === 'gemini' && (
-                <ApiKeyInlineControl
-                  provider="gemini"
-                  hasServerKey={hasGeminiKey}
-                  onSaved={refreshVoices}
-                  compact
-                />
+              {sttService === 'gemini' && !hasGeminiKey && (
+                <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5">
+                  Chưa cấu hình <code className="font-mono">GEMINI_API_KEY</code> trên server — bạn có thể dùng miễn phí <strong>faster-whisper</strong> hoặc <strong>Local Whisper ONNX</strong>.
+                </p>
               )}
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -1226,7 +1235,7 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
 
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Dịch song ngữ thêm vào phụ đề ({effectiveHasGeminiKey ? 'Dùng Gemini LLM' : 'Dùng Google Translate miễn phí'})
+                    Dịch song ngữ thêm vào phụ đề ({hasGeminiKey ? 'Dùng Gemini LLM' : 'Dùng Google Translate miễn phí'})
                   </label>
                   <select
                     value={translateLang}
@@ -1291,10 +1300,16 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
                       <span>Dịch file gốc (.SRT / .VTT / Script) sang ngôn ngữ đích</span>
                     </div>
                     <p className="text-[11px] text-slate-500 mt-0.5">
-                      Cơ chế dịch: {effectiveHasGeminiKey ? 'Ưu tiên Gemini LLM (đã kết nối Key) & tự dự phòng Google Translate' : 'Dùng Google Translate miễn phí tự động (hoặc nhập Gemini API Key ngay trên app)'}. Nạp file <code className="font-mono">.srt</code>/<code className="font-mono">.vtt</code>/<code className="font-mono">.txt</code> hoặc dán nội dung để dịch ngay.
+                      Cơ chế dịch: {hasGeminiKey ? 'Ưu tiên Gemini LLM (đã cấu hình Key) & tự dự phòng Google Translate' : 'Dùng Google Translate miễn phí tự động (hoặc cấu hình GEMINI_API_KEY ở .env server)'}. Nạp file <code className="font-mono">.srt</code>/<code className="font-mono">.vtt</code>/<code className="font-mono">.txt</code> hoặc dán nội dung để dịch ngay.
                     </p>
                   </div>
-                  <div>
+                  <div className="flex items-center gap-1.5">
+                    {!transcribeResult && (
+                      <PasteButton
+                        targetSelector="#audio-modal-standalone-srt"
+                        onPasteText={(text) => setStandaloneSourceText(text)}
+                      />
+                    )}
                     <input
                       ref={srtFileInputRef}
                       type="file"
@@ -1323,6 +1338,7 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
 
                 {!transcribeResult && (
                   <textarea
+                    id="audio-modal-standalone-srt"
                     rows={3}
                     value={standaloneSourceText}
                     onChange={(e) => setStandaloneSourceText(e.target.value)}
@@ -1431,12 +1447,21 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
                   </div>
 
                   {subFormatTab === 'srt' ? (
-                    <textarea
-                      rows={8}
-                      value={editableSrt}
-                      onChange={(e) => setEditableSrt(e.target.value)}
-                      className="w-full p-3 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg leading-relaxed"
-                    />
+                    <div className="space-y-1">
+                      <div className="flex justify-end">
+                        <PasteButton
+                          targetSelector="#audio-modal-editable-srt"
+                          onPasteText={(text) => setEditableSrt(text)}
+                        />
+                      </div>
+                      <textarea
+                        id="audio-modal-editable-srt"
+                        rows={8}
+                        value={editableSrt}
+                        onChange={(e) => setEditableSrt(e.target.value)}
+                        className="w-full p-3 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg leading-relaxed"
+                      />
+                    </div>
                   ) : (
                     <textarea
                       readOnly

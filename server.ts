@@ -35,76 +35,10 @@ import {
   translateLinesWithGeminiOrFree,
 } from './src/server/mediaHelpers.ts';
 
-const PERSISTED_API_KEYS_FILE = path.resolve('.studio-tmp', 'api-keys.json');
-
-interface PersistedApiKeys {
-  elevenLabsApiKey: string;
-  geminiApiKey: string;
-  updatedAt?: number;
-}
-
-function loadPersistedApiKeysSync(): PersistedApiKeys {
-  try {
-    if (!fs.existsSync(PERSISTED_API_KEYS_FILE)) {
-      return { elevenLabsApiKey: '', geminiApiKey: '' };
-    }
-    const raw = fs.readFileSync(PERSISTED_API_KEYS_FILE, 'utf8');
-    const parsed = JSON.parse(raw) as Partial<PersistedApiKeys>;
-    return {
-      elevenLabsApiKey: typeof parsed?.elevenLabsApiKey === 'string' ? parsed.elevenLabsApiKey.trim() : '',
-      geminiApiKey: typeof parsed?.geminiApiKey === 'string' ? parsed.geminiApiKey.trim() : '',
-      updatedAt: typeof parsed?.updatedAt === 'number' ? parsed.updatedAt : undefined,
-    };
-  } catch {
-    return { elevenLabsApiKey: '', geminiApiKey: '' };
-  }
-}
-
-async function savePersistedApiKeys(partial: Partial<PersistedApiKeys>): Promise<PersistedApiKeys> {
-  const current = loadPersistedApiKeysSync();
-  const next: PersistedApiKeys = {
-    elevenLabsApiKey:
-      partial.elevenLabsApiKey !== undefined
-        ? String(partial.elevenLabsApiKey || '').trim()
-        : current.elevenLabsApiKey,
-    geminiApiKey:
-      partial.geminiApiKey !== undefined
-        ? String(partial.geminiApiKey || '').trim()
-        : current.geminiApiKey,
-    updatedAt: Date.now(),
-  };
-  await fs.promises.mkdir(path.dirname(PERSISTED_API_KEYS_FILE), { recursive: true });
-  await fs.promises.writeFile(PERSISTED_API_KEYS_FILE, JSON.stringify(next, null, 2), 'utf8');
-  return next;
-}
-
-function resolveClientAndEnvKeys(
-  req: express.Request,
-  body?: Record<string, any> | null,
-): { elevenLabsApiKey: string; geminiApiKey: string } {
-  const headerEleven =
-    typeof req.headers['x-elevenlabs-api-key'] === 'string'
-      ? req.headers['x-elevenlabs-api-key'].trim()
-      : '';
-  const bodyEleven =
-    typeof body?.elevenLabsApiKey === 'string'
-      ? body.elevenLabsApiKey.trim()
-      : typeof body?.elevenlabsApiKey === 'string'
-        ? body.elevenlabsApiKey.trim()
-        : '';
-  const headerGemini =
-    typeof req.headers['x-gemini-api-key'] === 'string'
-      ? req.headers['x-gemini-api-key'].trim()
-      : '';
-  const bodyGemini =
-    typeof body?.geminiApiKey === 'string' ? body.geminiApiKey.trim() : '';
-  const persisted = loadPersistedApiKeysSync();
-
+function getServerEnvApiKeys(): { elevenLabsApiKey: string; geminiApiKey: string } {
   return {
-    elevenLabsApiKey:
-      headerEleven || bodyEleven || persisted.elevenLabsApiKey || (process.env.ELEVENLABS_API_KEY || '').trim(),
-    geminiApiKey:
-      headerGemini || bodyGemini || persisted.geminiApiKey || (process.env.GEMINI_API_KEY || '').trim(),
+    elevenLabsApiKey: (process.env.ELEVENLABS_API_KEY || '').trim(),
+    geminiApiKey: (process.env.GEMINI_API_KEY || '').trim(),
   };
 }
 
@@ -845,9 +779,9 @@ async function startServer(): Promise<void> {
   const app = express();
   const port = Number(process.env.PORT) || 3000;
 
-  app.get('/api/health', (req, res) => {
+  app.get('/api/health', (_req, res) => {
     const { baseDir } = resolveSafeOutputDir();
-    const resolved = resolveClientAndEnvKeys(req);
+    const resolved = getServerEnvApiKeys();
     res.json({
       ok: true,
       encoder: 'ffmpeg-h264-aac',
@@ -856,40 +790,6 @@ async function startServer(): Promise<void> {
       hasWhisperLocal: true,
       outputDir: baseDir,
     });
-  });
-
-  app.get('/api/settings/api-keys', (_req, res) => {
-    const persisted = loadPersistedApiKeysSync();
-    res.json({
-      ok: true,
-      elevenLabsApiKey: persisted.elevenLabsApiKey,
-      geminiApiKey: persisted.geminiApiKey,
-      hasElevenLabsKey: Boolean(persisted.elevenLabsApiKey || process.env.ELEVENLABS_API_KEY),
-      hasGeminiKey: Boolean(persisted.geminiApiKey || process.env.GEMINI_API_KEY),
-    });
-  });
-
-  app.post('/api/settings/api-keys', express.json({ limit: '64kb' }), async (req, res) => {
-    try {
-      const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, unknown>;
-      const patch: Partial<PersistedApiKeys> = {};
-      if (typeof body.elevenLabsApiKey === 'string') {
-        patch.elevenLabsApiKey = body.elevenLabsApiKey;
-      } else if (typeof body.elevenlabsApiKey === 'string') {
-        patch.elevenLabsApiKey = body.elevenlabsApiKey;
-      }
-      if (typeof body.geminiApiKey === 'string') {
-        patch.geminiApiKey = body.geminiApiKey;
-      }
-      const saved = await savePersistedApiKeys(patch);
-      res.json({
-        ok: true,
-        hasElevenLabsKey: Boolean(saved.elevenLabsApiKey || process.env.ELEVENLABS_API_KEY),
-        hasGeminiKey: Boolean(saved.geminiApiKey || process.env.GEMINI_API_KEY),
-      });
-    } catch (err) {
-      res.status(500).json({ error: err instanceof Error ? err.message : 'Không lưu được API key.' });
-    }
   });
 
   // ── Direct Output Folder Save / List / Preview / Open API ─────────────────
@@ -1204,8 +1104,8 @@ async function startServer(): Promise<void> {
   });
 
   // ── Free & Key-based Multi-Provider TTS Catalog & Synthesizer ───────────────
-  app.get('/api/tts/voices', async (req, res) => {
-    const resolvedKeys = resolveClientAndEnvKeys(req);
+  app.get('/api/tts/voices', async (_req, res) => {
+    const resolvedKeys = getServerEnvApiKeys();
     const elevenLabsKey = resolvedKeys.elevenLabsApiKey;
     const geminiKey = resolvedKeys.geminiApiKey;
     let elevenLabsVoices = ELEVENLABS_DEFAULT_VOICES;
@@ -1581,7 +1481,7 @@ async function startServer(): Promise<void> {
 
   app.post('/api/tts/synthesize', express.json({ limit: '10mb' }), async (req, res) => {
     try {
-      const resolvedKeys = resolveClientAndEnvKeys(req, req.body || {});
+      const resolvedKeys = getServerEnvApiKeys();
       const result = await executeTtsSynthesis(req.body || {}, undefined, resolvedKeys);
       res.json(result);
     } catch (err: any) {
@@ -1592,17 +1492,17 @@ async function startServer(): Promise<void> {
 
   app.post('/api/tts/synthesize/start', express.json({ limit: '10mb' }), (req, res) => {
     const body = req.body || {};
-    const resolvedKeys = resolveClientAndEnvKeys(req, body);
+    const resolvedKeys = getServerEnvApiKeys();
     const providerReq = typeof body?.provider === 'string' ? body.provider : 'auto';
     if (providerReq === 'elevenlabs' && !resolvedKeys.elevenLabsApiKey) {
       res.status(400).json({
-        error: 'Chưa có ELEVENLABS_API_KEY. Hãy dán trực tiếp Key vào ô nhập trong App (hoặc chọn Edge Neural / Google / Polly).',
+        error: 'Chưa cấu hình ELEVENLABS_API_KEY trong biến môi trường server (.env / Secrets). Hãy chọn Edge Neural, Google hoặc Polly miễn phí.',
       });
       return;
     }
     if (providerReq === 'gemini' && !resolvedKeys.geminiApiKey) {
       res.status(400).json({
-        error: 'Chưa có GEMINI_API_KEY. Hãy dán trực tiếp Key vào ô nhập trong App (hoặc chọn Edge Neural / Google / Polly).',
+        error: 'Chưa cấu hình GEMINI_API_KEY trong biến môi trường server (.env / Secrets). Hãy chọn Edge Neural, Google hoặc Polly miễn phí.',
       });
       return;
     }
@@ -1719,7 +1619,7 @@ async function startServer(): Promise<void> {
 
         const mp3Buf = await fs.promises.readFile(mp3Path);
         const totalDur = await getAudioDurationSec(wavPath);
-        const apiKey = resolveClientAndEnvKeys(req).geminiApiKey;
+        const apiKey = getServerEnvApiKeys().geminiApiKey;
 
         let rawSegs: Array<{ start: number; end: number; text: string; translation?: string }> = [];
         let detectedLang = sourceLang;
@@ -1729,7 +1629,7 @@ async function startServer(): Promise<void> {
 
         const tryGeminiTranscribe = async () => {
           if (!apiKey) {
-            throw new Error('Chưa nhập GEMINI_API_KEY. Hãy dán Key trực tiếp trong App hoặc .env.');
+            throw new Error('Chưa cấu hình GEMINI_API_KEY trong biến môi trường server (.env / Secrets). Hãy chọn faster-whisper hoặc Local Whisper miễn phí.');
           }
           const langHint =
             sourceLang && sourceLang !== 'auto'
@@ -2245,7 +2145,7 @@ async function startServer(): Promise<void> {
 
           const mp3Buf = await fs.promises.readFile(mp3Path);
           const totalDur = await getAudioDurationSec(wavPath);
-          const apiKey = resolveClientAndEnvKeys(req).geminiApiKey;
+          const apiKey = getServerEnvApiKeys().geminiApiKey;
 
           let rawSegs: Array<{ start: number; end: number; text: string; translation?: string }> = [];
           let detectedLang = sourceLang;
@@ -2437,7 +2337,7 @@ async function startServer(): Promise<void> {
       }
 
       const sourceTexts = rawCues.map((c) => String(c.text || '').split('\n')[0].trim());
-      const resolvedKeys = resolveClientAndEnvKeys(req, req.body || {});
+      const resolvedKeys = getServerEnvApiKeys();
       const tr = await translateLinesWithGeminiOrFree(sourceTexts, targetLang, resolvedKeys.geminiApiKey);
 
       const translatedCues = rawCues.map((c, idx) => {
@@ -2479,9 +2379,9 @@ async function startServer(): Promise<void> {
 
   app.post('/api/ai/generate-scene', express.json({ limit: '2mb' }), async (req, res) => {
     try {
-      const apiKey = resolveClientAndEnvKeys(req, req.body || {}).geminiApiKey;
+      const apiKey = getServerEnvApiKeys().geminiApiKey;
       if (!apiKey) {
-        res.status(400).json({ error: 'Chưa có GEMINI_API_KEY. Hãy dán trực tiếp Key vào ô nhập trong App.' });
+        res.status(400).json({ error: 'Chưa cấu hình GEMINI_API_KEY trong biến môi trường server (.env / Secrets). Bạn vẫn có thể copy Prompt gửi ChatGPT / Gemini Web miễn phí.' });
         return;
       }
       const prompt = typeof req.body?.prompt === 'string' ? req.body.prompt : '';
@@ -2517,11 +2417,11 @@ async function startServer(): Promise<void> {
 
   app.post('/api/ai/generate-reading', express.json({ limit: '2mb' }), async (req, res) => {
     try {
-      const apiKey = resolveClientAndEnvKeys(req, req.body || {}).geminiApiKey;
+      const apiKey = getServerEnvApiKeys().geminiApiKey;
       if (!apiKey) {
         res.status(400).json({
           error:
-            'Chưa có GEMINI_API_KEY. Hãy dán trực tiếp Key vào ô nhập trong App hoặc dùng công cụ "Tạo Prompt cho Web AI" bên dưới (không cần API key).',
+            'Chưa cấu hình GEMINI_API_KEY trên server. Hãy dùng "Tạo Prompt cho Web AI" hoặc Thư viện bài đọc mẫu miễn phí ngay bên dưới.',
         });
         return;
       }

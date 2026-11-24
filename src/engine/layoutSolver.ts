@@ -281,7 +281,7 @@ function getZoneTier(el: SceneElement): number {
     case 'shape-3d':
       return el.layout.y >= 1150 ? 3.8 : 2;
     case 'sentence-card':
-      return 3;
+      return el.layout.y >= 1150 ? 3.8 : 2;
     case 'tone-meter':
       return 4;
     case 'karaoke-card':
@@ -315,7 +315,7 @@ export function resolveProjectOverlaps(elements: SceneElement[]): SceneElement[]
           ...el.layout,
           x: 540,
           width: safeW,
-          y: Math.max(KARAOKE_SAFE_Y - 75, Math.min(1680, el.layout.y || KARAOKE_SAFE_Y)),
+          y: Math.max(KARAOKE_SAFE_Y - 15, Math.min(1680, el.layout.y || KARAOKE_SAFE_Y)),
         },
       };
       karaokeEls.push(cloned);

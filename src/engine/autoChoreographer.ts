@@ -192,7 +192,7 @@ export function choreographFromTranscript(
         endTime: cue.end,
         enterAnimation: 'slide-up',
         exitAnimation: 'fade-out',
-        layout: { x: 540, y: 1495, width: 860, scale: 1, zIndex: 30 },
+        layout: { x: 540, y: 1585, width: 860, scale: 1, zIndex: 30 },
         props: {
           kind: 'karaoke-card',
           cueId: cue.id,

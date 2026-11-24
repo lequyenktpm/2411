@@ -45,7 +45,10 @@ export function buildSceneGenerationPrompt(
 
   const { variantsListText, sceneIconsListText } = getCatalogSummaryForPrompt();
   const sourceSegments = buildSourceSegmentsFromCues(cues);
-  const sourceSegmentsJson = JSON.stringify(sourceSegments, null, 2);
+  const sourceSegmentsJson =
+    sourceSegments.length >= 16
+      ? `[\n${sourceSegments.map((s) => `    ${JSON.stringify(s)}`).join(',\n')}\n  ]`
+      : JSON.stringify(sourceSegments, null, 2);
 
   // ── Style guide block ──────────────────────────────────────────────────────
   let styleGuide: string;
@@ -136,6 +139,12 @@ Quy tắc an toàn (KHÔNG invent type hay icon ngoài danh mục):
 
   const exampleSegId = sourceSegments[0]?.segment_id ?? 'seg_001';
   const exampleQuote = (sourceSegments[0]?.text ?? 'Lesson intro').slice(0, 60);
+  const exampleSeg2 = sourceSegments[1] ?? sourceSegments[0];
+  const exampleSeg2Id = exampleSeg2?.segment_id ?? exampleSegId;
+  const exampleQuote2 = (exampleSeg2?.text ?? exampleQuote).slice(0, 60);
+  const exampleSeg3 = sourceSegments[2] ?? exampleSeg2;
+  const exampleSeg3Id = exampleSeg3?.segment_id ?? exampleSeg2Id;
+  const exampleQuote3 = (exampleSeg3?.text ?? exampleQuote2).slice(0, 60);
 
   return `# KIẾN TRÚC PIPELINE 5 GIAI ĐOẠN — STORYBOARD SCHEMA v1.9
 Bạn đóng vai **Instructional Designer + Motion Graphics Director** cho video dọc 9:16 (1080×1920).
@@ -145,8 +154,8 @@ Trả về **DUY NHẤT 1 KHỐI JSON HỢP LỆ** chuẩn \`schema_version: "1.
 ${audioDiagLine}
 - **LUẬT BẢO TOÀN TRANSCRIPT**: Sao chép CHÍNH XÁC từng ký tự trong \`source_segments[]\` bên dưới (giữ nguyên dấu phẩy, dấu ngoặc kép \`"..."\`, chấm hỏi, xuống dòng, \`segment_id\`, \`start\`, \`end\`). Tuyệt đối KHÔNG sửa chính tả, không bỏ dấu ngoặc kép (VD: \`"I'm looking," he says,\` phải giữ nguyên từng dấu câu). Không bao giờ trộn hai bộ timestamp khác nhau.
 
-## STAGE 2 — INSTRUCTIONAL DESIGNER (CHIA ĐA SCENE SƯ PHẠM)
-- **CẤM DỒN 1 SCENE**: Tuyệt đối KHÔNG nhét toàn bộ bài vào 1 scene \`sc1\` duy nhất! Hãy chia bài học thành **nhiều \`scenes[]\` liên tiếp** (\`sc_01\`, \`sc_02\`, \`sc_03\`... mỗi scene 1–4 câu hoặc 1 ý sư phạm rõ ràng: Intro Hook → Tình huống/Quy tắc 1 → Đối chiếu/Ví dụ 2 → Takeaway/Practice).
+## STAGE 2 — INSTRUCTIONAL DESIGNER (CHIA ĐA SCENE SƯ PHẠM & PHỦ ĐỦ 100% SEGMENTS)
+- **CẤM DỒN 1 SCENE & CẤM BỎ SÓT SEGMENT**: Tuyệt đối KHÔNG nhét toàn bộ bài vào 1 scene duy nhất, và KHÔNG cắt ngắn bỏ dở các câu cuối! Hãy chia toàn bộ **${sourceSegments.length} \`source_segments\`** thành nhiều \`scenes[]\` liên tiếp (\`sc_01\`, \`sc_02\`... mỗi scene 2–5 \`source_segments\`, đảm bảo **mọi \`segment_id\` từ \`seg_001\` đến hết đều có ít nhất 1 element gắn \`sync_anchor\`**).
 - Mỗi scene phải có \`scene_id\`, \`title\`, \`learning_objective\`, \`composition\`, \`transition\`, và dạy được ý nghĩa bài học **ngay cả khi tắt tiếng** nhờ sơ đồ/vật thể/chú thích trực quan.
 
 ## STAGE 3 — MOTION GRAPHICS DIRECTOR (TỌA ĐỘ 0..1 & ĐỒNG BỘ \`sync_anchor\`)
@@ -158,10 +167,10 @@ Mỗi element dùng \`position: { "x": 0..1, "y": 0..1, "width": 0..1, "height":
 - \`y: 0.06 .. 0.14\` — Thanh đối chiếu (\`kind: "strip"\` / \`comparison_strip\`) hoặc Header bài.
 - \`y: 0.15 .. 0.22\` — Nhãn mục tiêu / ngữ cảnh (\`kind: "pill"\`).
 - \`y: 0.23 .. 0.48\` — Minh họa chính / Sơ đồ / Vật thể ngữ nghĩa (\`kind: "illustration"\`, \`"object"\`, \`"connector"\`, \`"shape_3d"\`, \`"word_stack"\`).
-- \`y: 0.50 .. 0.65\` — Thẻ câu trọng tâm / giải thích (\`kind: "text"\` / \`sentence_card\`).
-- \`y: 0.66 .. 0.74\` — Thanh sắc thái (\`kind: "meter"\`) nếu có.
-- **VÙNG CẤM KARAOKE (\`y >= 0.76\`..1.00)**: Chừa trống hoàn toàn để app tự render phụ đề Karaoke highlight từng từ. Mọi element PHẢI thỏa \`position.y + position.height <= 0.75\` và \`position.x + position.width <= 0.98\`.
-- **Chống chồng hình trong cùng Scene**: Hai element hiển thị trùng thời điểm trong cùng scene KHÔNG được có bounding-box \`position\` giao nhau (trừ \`connector\` nối giữa 2 khối).
+- \`y: 0.50 .. 0.64\` — Thẻ câu trọng tâm / giải thích (\`kind: "text"\` / \`sentence_card\`).
+- \`y: 0.65 .. 0.73\` — Thanh sắc thái (\`kind: "meter"\`) nếu có (với \`height: 0.08\`).
+- **VÙNG CẤM KARAOKE (\`y >= 0.75\`..1.00)**: Chừa trống hoàn toàn để app tự render phụ đề Karaoke highlight từng từ. Mọi element PHẢI thỏa \`position.y + position.height <= 0.74\` và \`position.x + position.width <= 0.98\`.
+- **Chống chồng hình trong cùng Scene**: Hai element cùng \`segment_id\` (hoặc hiển thị trùng lúc) KHÔNG được có bounding-box \`position\` giao nhau (trừ \`connector\`). Các element thuộc các \`segment_id\` kế tiếp nhau trong cùng scene mới được đặt cùng khe \`y\`.
 
 ### Hệ thống đồng bộ \`sync_anchor\` (BẮT BUỘC trên mọi element)
 Thay vì tự đoán giây rời rạc, mọi element gắn với đoạn nói bằng:
@@ -194,13 +203,14 @@ ${TYPOGRAPHY_MOBILE_READABILITY_PROMPT_BLOCK}
 
 ## STAGE 4 — TỰ KIỂM TRA SEMANTIC VALIDATOR TRƯỚC KHI XUẤT JSON
 Đảm bảo 100% các điều kiện sau trước khi trả JSON:
-- \`source_segments\` khớp nguyên văn transcript, không sót hay sửa dấu câu.
-- Có **nhiều scene** (\`scenes.length >= 2\` nếu transcript có ≥ 5 câu).
+- \`source_segments\` khớp nguyên văn transcript (${sourceSegments.length} segments), không sót hay sửa dấu câu.
+- **\`element_id\` duy nhất toàn cục**: Đặt theo dạng \`sc01_el01\`, \`sc02_el01\`... tuyệt đối KHÔNG lặp lại cùng \`element_id\` giữa hai scene.
+- **Phủ đủ 100% \`source_segments\`**: Có **nhiều scene** (\`scenes.length >= 2\` nếu transcript có ≥ 5 câu) và mỗi \`segment_id\` đều xuất hiện trong \`sync_anchor\`.
 - **Mỗi scene BẮT BUỘC có ít nhất 1 thành phần thị giác sinh động** (\`illustration\`, \`object\` + \`connector\`, \`shape_3d\`, hoặc \`word_stack\`) đi kèm \`pill\`/\`strip\`/\`text\` — **KHÔNG BAO GIỜ chỉ xuất mỗi \`text\` hay \`pill\` đơn điệu**.
 - Lưu ý: \`"animation": { "duration_s": 0.35 }\` CHỈ là tốc độ hiệu ứng bay vào/ra (transition), **KHÔNG phải thời lượng hiển thị** của component — app tự giữ component hiển thị trọn vẹn theo \`sync_anchor\` (\`full_segment\` / đến hết segment hoặc scene).
 - Mọi \`sync_anchor.segment_id\` đều tồn tại trong \`source_segments\` và \`sync_anchor.quote\` có thật trong \`segment.text\`.
 - Mọi \`sceneIcon\` đều nằm trong danh sách 42 icon chuẩn; mọi \`variant\` có trong Kho hoặc dùng \`customPrimitives\`.
-- Mọi \`position\` thỏa \`x >= 0\`, \`y >= 0\`, \`x + width <= 1\`, \`y + height <= 0.75\`, và không chồng nhau trong cùng scene.
+- Mọi \`position\` dùng đúng key \`width\`, \`height\`, thỏa \`x >= 0\`, \`y >= 0\`, \`x + width <= 0.98\`, \`y + height <= 0.74\`, và không chồng nhau trong cùng \`segment_id\`.
 
 # MẪU JSON OUTPUT CHUẨN v1.9
 \`\`\`json
@@ -287,7 +297,7 @@ ${TYPOGRAPHY_MOBILE_READABILITY_PROMPT_BLOCK}
           "kind": "object",
           "role": "subject",
           "object_spec": { "label": "Pattern A", "sublabel": "Basic", "icon": "book" },
-          "sync_anchor": { "segment_id": "${exampleSegId}", "anchor_type": "segment_start", "quote": ${JSON.stringify(exampleQuote)} },
+          "sync_anchor": { "segment_id": "${exampleSeg2Id}", "anchor_type": "segment_start", "quote": ${JSON.stringify(exampleQuote2)} },
           "position": { "x": 0.06, "y": 0.23, "width": 0.36, "height": 0.18 },
           "animation": { "in": "pop-up", "out": "fade-out", "duration_s": 0.35 }
         },
@@ -296,7 +306,7 @@ ${TYPOGRAPHY_MOBILE_READABILITY_PROMPT_BLOCK}
           "kind": "connector",
           "role": "relation",
           "connector_spec": { "from": "el_05", "to": "el_07", "direction": "right", "label": "Upgrade", "arrow": true },
-          "sync_anchor": { "segment_id": "${exampleSegId}", "anchor_type": "full_segment", "quote": ${JSON.stringify(exampleQuote)} },
+          "sync_anchor": { "segment_id": "${exampleSeg2Id}", "anchor_type": "full_segment", "quote": ${JSON.stringify(exampleQuote2)} },
           "position": { "x": 0.43, "y": 0.27, "width": 0.14, "height": 0.10 },
           "animation": { "in": "fade-scale", "out": "fade-out", "duration_s": 0.35 }
         },
@@ -305,7 +315,7 @@ ${TYPOGRAPHY_MOBILE_READABILITY_PROMPT_BLOCK}
           "kind": "object",
           "role": "target",
           "object_spec": { "label": "Pattern B", "sublabel": "Natural", "icon": "check" },
-          "sync_anchor": { "segment_id": "${exampleSegId}", "anchor_type": "full_segment", "quote": ${JSON.stringify(exampleQuote)} },
+          "sync_anchor": { "segment_id": "${exampleSeg2Id}", "anchor_type": "full_segment", "quote": ${JSON.stringify(exampleQuote2)} },
           "position": { "x": 0.58, "y": 0.23, "width": 0.36, "height": 0.18 },
           "animation": { "in": "pop-up", "out": "fade-out", "duration_s": 0.35 }
         },
@@ -318,7 +328,7 @@ ${TYPOGRAPHY_MOBILE_READABILITY_PROMPT_BLOCK}
           "rightLabel": "Native!",
           "valueStart": 0.25,
           "valueEnd": 0.88,
-          "sync_anchor": { "segment_id": "${exampleSegId}", "anchor_type": "full_segment", "quote": ${JSON.stringify(exampleQuote)} },
+          "sync_anchor": { "segment_id": "${exampleSeg3Id}", "anchor_type": "full_segment", "quote": ${JSON.stringify(exampleQuote3)} },
           "position": { "x": 0.10, "y": 0.64, "width": 0.80, "height": 0.09 },
           "animation": { "in": "slide-up", "out": "fade-out", "duration_s": 0.35 }
         }

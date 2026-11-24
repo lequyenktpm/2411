@@ -1,5 +1,6 @@
 import {
   computeElementFrameState,
+  computeIdleMotion,
   computeStaggerItemState,
   easeInOutCubic,
   easeOutCubic,
@@ -4805,10 +4806,20 @@ function drawKaraokeCard(
       const tokenW = ctx.measureText(token.word).width;
 
       if (isActive) {
+        const activeColor = token.highlightColor || props.activeColor;
+        const padX = 9;
+        const padY = 6;
+        const pillH = fontSize + padY * 2;
         ctx.save();
-        ctx.fillStyle = token.highlightColor || props.activeColor;
         ctx.translate(cursorX + tokenW / 2, lineY);
-        ctx.scale(1.04, 1.04);
+        ctx.scale(1.05, 1.05);
+        ctx.fillStyle = hexToRgba(activeColor, isDarkBar ? 0.24 : 0.14);
+        drawRoundedRectPath(ctx, -tokenW / 2 - padX, -pillH / 2, tokenW + padX * 2, pillH, 12);
+        ctx.fill();
+        ctx.strokeStyle = hexToRgba(activeColor, isDarkBar ? 0.48 : 0.28);
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.fillStyle = activeColor;
         ctx.textAlign = 'center';
         ctx.fillText(token.word, 0, 0);
         ctx.restore();
@@ -4912,10 +4923,11 @@ export function renderProjectFrame(
         ? STAGE_WIDTH / 2
         : Math.max(halfBoundsW + 16, Math.min(STAGE_WIDTH - halfBoundsW - 16, el.layout.x));
 
+    const idle = computeIdleMotion(el, time);
     ctx.save();
     ctx.globalAlpha = frame.opacity;
-    ctx.translate(drawX, el.layout.y + frame.translateY);
-    ctx.scale(frame.scale, frame.scale);
+    ctx.translate(drawX, el.layout.y + frame.translateY + idle.translateY);
+    ctx.scale(frame.scale * idle.scaleMultiplier, frame.scale * idle.scaleMultiplier);
 
     switch (el.props.kind) {
       case 'comparison-strip':

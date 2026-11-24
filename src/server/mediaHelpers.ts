@@ -216,6 +216,17 @@ function mapLanguageToGoogleCode(lang: string): string {
   return 'vi';
 }
 
+let hfDownloadQueue: Promise<void> = Promise.resolve();
+
+function withHfDownloadLock<T>(fn: () => Promise<T>): Promise<T> {
+  const prev = hfDownloadQueue;
+  let release!: () => void;
+  hfDownloadQueue = new Promise<void>((res) => {
+    release = res;
+  });
+  return prev.then(fn).finally(() => release());
+}
+
 async function getWhisperPipeline(
   modelId: string,
   onProgress?: (pct: number, label: string) => void,
@@ -248,7 +259,7 @@ async function getWhisperPipeline(
 
   let pending = whisperPipelines.get(modelId);
   if (!pending) {
-    pending = (async () => {
+    pending = withHfDownloadLock(async () => {
       const { pipeline, env } = await import('@huggingface/transformers');
       env.allowRemoteModels = true;
       env.allowLocalModels = true;
@@ -317,7 +328,7 @@ async function getWhisperPipeline(
       }
       notify(100, `Model ${modelId} đã sẵn sàng`);
       return pipe;
-    })();
+    });
     whisperPipelines.set(modelId, pending);
   }
   try {

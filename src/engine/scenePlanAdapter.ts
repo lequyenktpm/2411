@@ -3,11 +3,13 @@ import type { VectorPrimitive } from './customComponentTypes';
 import { matchIllustrationForCue } from './illustrationLayouts';
 import { resolveProjectOverlaps } from './layoutSolver';
 import {
+  buildSourceSegmentsFromCues,
   isStoryboardV19Document,
   mapV19EnterAnimation,
   mapV19ExitAnimation,
   normalizeSceneIconWithAlias,
   parseV19TimeFallback,
+  quoteMatchesSegmentText,
   resolveSyncAnchorTiming,
   StoryboardSourceSegment,
   StoryboardV19Document,
@@ -821,26 +823,52 @@ function convertStoryboardV19Elements(
     };
   });
 
+  const usedElementIds = new Set<string>();
+
   scenes.forEach((sc, scIdx) => {
     const span = sceneSpans[scIdx] ?? { start: 0, end: totalDuration };
     const rawList = sc.elements ?? [];
+    const sceneSegStarts = Array.from(
+      new Set(
+        rawList
+          .map((raw) => {
+            const sid = (raw as StoryboardV19Element)?.sync_anchor?.segment_id;
+            const sObj = sid ? segMap.get(sid) : undefined;
+            return sObj ? Number(sObj.start) : NaN;
+          })
+          .filter((n) => Number.isFinite(n)),
+      ),
+    ).sort((a, b) => a - b);
+    const hasMultipleSceneTitlePills =
+      rawList.filter((raw) => {
+        const k = String((raw as StoryboardV19Element)?.kind ?? (raw as any)?.type ?? '').toLowerCase();
+        const r = String((raw as StoryboardV19Element)?.role ?? '').toLowerCase();
+        return k === 'pill' || r === 'scene_title';
+      }).length > 1;
 
     rawList.forEach((rawItem, elIdx) => {
       const el = rawItem as StoryboardV19Element & FlexibleAiElement;
       const seg = el.sync_anchor?.segment_id ? segMap.get(el.sync_anchor.segment_id) : undefined;
-      const isPersistentHeader =
+      const isHeaderStrip =
         el.kind === 'strip' ||
         el.kind === 'comparison_strip' ||
-        el.role === 'scene_title' ||
-        el.role === 'section_header' ||
         el.role === 'comparison_header' ||
+        el.role === 'section_header' ||
         el.role === 'header' ||
         el.role === 'persistent_strip';
+      const isPersistentTitle = el.role === 'scene_title' && !hasMultipleSceneTitlePills;
+      const nextSegStartInScene = seg
+        ? sceneSegStarts.find((t) => t > (Number(seg.start) || 0) + 0.08)
+        : undefined;
+      const maxHoldCeiling =
+        nextSegStartInScene !== undefined && seg
+          ? Math.max(Number(seg.end) || 0, nextSegStartInScene - 0.05)
+          : span.end;
 
       const explicitDisplayDur =
         typeof (el as any).display_duration_s === 'number' && (el as any).display_duration_s > 0
           ? Number((el as any).display_duration_s)
-          : typeof (el as any).duration_s === 'number' && (el as any).duration_s > 0
+          : typeof (el as any).duration_s === 'number' && (el as any).duration_s > 0.8
             ? Number((el as any).duration_s)
             : undefined;
 
@@ -859,7 +887,7 @@ function convertStoryboardV19Elements(
       }
       if (el.end_s !== undefined || el.end !== undefined) {
         endTime = parseV19TimeFallback(el.end_s ?? el.end, endTime);
-      } else if (isPersistentHeader) {
+      } else if (isHeaderStrip || isPersistentTitle) {
         endTime = span.end;
       } else {
         const anchorType = el.sync_anchor?.anchor_type;
@@ -882,42 +910,74 @@ function convertStoryboardV19Elements(
           rawKind === 'topic-pill';
         if (isVisualProp && (anchorType === 'segment_start' || anchorType === 'phrase' || !anchorType)) {
           const naturalHoldEnd = seg ? Math.max(seg.end, startTime + 2.2) : span.end;
-          endTime = Math.max(endTime, Math.min(span.end, naturalHoldEnd));
+          endTime = Math.max(endTime, Math.min(span.end, maxHoldCeiling, naturalHoldEnd));
         }
       }
 
       const safeEnd = Math.max(startTime + 0.65, endTime);
 
-      // Position resolution: v1.9 normalized top-left { x, y, width, height } vs legacy center { x, y }
-      const pos = el.position;
-      const hasNormBox =
-        pos &&
-        typeof pos === 'object' &&
-        typeof pos.x === 'number' &&
-        typeof pos.y === 'number' &&
-        typeof pos.width === 'number';
+      // Position resolution: v1.9 normalized top-left { x, y, width|w, height|h } vs legacy center { x, y }
+      const rawKindForPos = String(el.kind || el.type || 'text').toLowerCase();
+      const isRichVisual =
+        rawKindForPos === 'illustration' ||
+        rawKindForPos === 'asset' ||
+        rawKindForPos === 'illustration-prop' ||
+        rawKindForPos === 'object' ||
+        rawKindForPos === 'shape_3d' ||
+        rawKindForPos === 'shape-3d' ||
+        rawKindForPos === 'word_stack' ||
+        rawKindForPos === 'word-stack';
+      const defaultNormH = isRichVisual ? 0.20 : 0.12;
+
+      const toFiniteNum = (v: unknown): number | undefined => {
+        if (typeof v === 'number' && Number.isFinite(v)) return v;
+        if (typeof v === 'string' && v.trim() !== '') {
+          const n = Number(v.trim());
+          if (Number.isFinite(n)) return n;
+        }
+        return undefined;
+      };
+
+      const pos = el.position as (typeof el.position & { w?: unknown; h?: unknown }) | undefined;
+      const posX = pos && typeof pos === 'object' ? toFiniteNum(pos.x) : undefined;
+      const posY = pos && typeof pos === 'object' ? toFiniteNum(pos.y) : undefined;
+      const posW = pos && typeof pos === 'object' ? toFiniteNum(pos.width ?? pos.w) : undefined;
+      const posH = pos && typeof pos === 'object' ? toFiniteNum(pos.height ?? pos.h) : undefined;
+      const hasNormBox = posX !== undefined && posY !== undefined && posW !== undefined;
+
+      const resolvedNormH = posH ?? defaultNormH;
       const cx = hasNormBox
-        ? Math.round((pos.x + pos.width / 2) * STAGE_W)
+        ? Math.round((posX + posW / 2) * STAGE_W)
         : el.x !== undefined
           ? Math.round(el.x <= 1 ? el.x * STAGE_W : el.x)
           : 540;
-      const cy = hasNormBox
-        ? Math.round((pos.y + (pos.height ?? 0.1) / 2) * STAGE_H)
+      const rawCy = hasNormBox
+        ? Math.round((posY + resolvedNormH / 2) * STAGE_H)
         : el.y !== undefined
           ? Math.round(el.y <= 1 ? el.y * STAGE_H : el.y)
           : 720;
       const wPx = hasNormBox
-        ? Math.max(120, Math.round(pos.width * STAGE_W))
+        ? Math.max(120, Math.round(posW * STAGE_W))
         : el.width !== undefined
           ? Math.round(el.width <= 1 ? el.width * STAGE_W : el.width)
           : 820;
       const hPx = hasNormBox
-        ? Math.max(48, Math.round((pos.height ?? 0.12) * STAGE_H))
+        ? Math.max(48, Math.round(resolvedNormH * STAGE_H))
         : el.height !== undefined
           ? Math.round(el.height <= 1 ? el.height * STAGE_H : el.height)
-          : 220;
+          : Math.round(defaultNormH * STAGE_H);
+      const safeNonKaraokeBottom = Math.round(0.75 * STAGE_H);
+      const isKaraokeItem = rawKindForPos === 'karaoke' || rawKindForPos === 'karaoke-card';
+      const cy =
+        !isKaraokeItem && rawCy + hPx / 2 > safeNonKaraokeBottom
+          ? Math.max(Math.round(hPx / 2) + 80, Math.round(safeNonKaraokeBottom - hPx / 2))
+          : rawCy;
 
-      const id = el.element_id?.trim() || `${sc.scene_id || sc.id || `sc${scIdx + 1}`}-el-${elIdx + 1}`;
+      let id = el.element_id?.trim() || `${sc.scene_id || sc.id || `sc${scIdx + 1}`}-el-${elIdx + 1}`;
+      if (usedElementIds.has(id)) {
+        id = `${sc.scene_id || sc.id || `sc${scIdx + 1}`}_${id}_${elIdx + 1}`;
+      }
+      usedElementIds.add(id);
       const enterAnimation = mapV19EnterAnimation(el.animation?.in, 'pop-up');
       const exitAnimation = mapV19ExitAnimation(el.animation?.out, 'fade-out');
       const kind = String(el.kind || el.type || 'text').toLowerCase();
@@ -1680,3 +1740,207 @@ export function projectToWordsAndScenePlan(project: LessonProject): {
     },
   };
 }
+
+/**
+ * Repairs common LLM Storyboard v1.9 JSON glitches (duplicate IDs, w/h keys,
+ * karaoke zone overflows, unknown icons/variants, quote drifts, uncovered cues)
+ * so pasted AI outputs pass Stage 4 semantic validation and cover the whole script.
+ */
+export function repairStoryboardV19Document(
+  rawDoc: FlexibleSceneDocument,
+  cues: TranscriptCue[] = [],
+): FlexibleSceneDocument {
+  const cloned = JSON.parse(JSON.stringify(rawDoc)) as FlexibleSceneDocument & Record<string, unknown>;
+  cloned.schema_version = '1.9';
+
+  const existingSegs = Array.isArray(cloned.source_segments) ? cloned.source_segments : [];
+  const baseSegs: StoryboardSourceSegment[] =
+    existingSegs.length > 0 && existingSegs.length >= cues.length
+      ? existingSegs
+      : cues.length > 0
+        ? buildSourceSegmentsFromCues(cues)
+        : existingSegs;
+
+  const seenSegIds = new Set<string>();
+  const repairedSegs: StoryboardSourceSegment[] = baseSegs.map((seg, idx) => {
+    let segId = (seg.segment_id || `seg_${String(idx + 1).padStart(3, '0')}`).trim();
+    if (seenSegIds.has(segId)) {
+      segId = `seg_${String(idx + 1).padStart(3, '0')}`;
+    }
+    seenSegIds.add(segId);
+    const matchingCue = cues[idx];
+    const start = Number.isFinite(Number(seg.start)) ? Number(seg.start) : (matchingCue?.start ?? idx * 3);
+    const end = Number.isFinite(Number(seg.end)) && Number(seg.end) > start
+      ? Number(seg.end)
+      : Math.max(start + 0.5, matchingCue?.end ?? start + 3);
+    const text = matchingCue?.text ? matchingCue.text : String(seg.text || '').trim();
+    return { segment_id: segId, start: Number(start.toFixed(3)), end: Number(end.toFixed(3)), text };
+  });
+  cloned.source_segments = repairedSegs;
+
+  const segMap = new Map<string, StoryboardSourceSegment>();
+  repairedSegs.forEach((s) => segMap.set(s.segment_id, s));
+
+  const scenes = Array.isArray(cloned.scenes) ? cloned.scenes : [];
+  const seenSceneIds = new Set<string>();
+  const seenElementIds = new Set<string>();
+  const coveredSegIds = new Set<string>();
+
+  scenes.forEach((sc, scIdx) => {
+    let sceneId = String(sc.scene_id || sc.id || `sc_${String(scIdx + 1).padStart(2, '0')}`).trim();
+    if (seenSceneIds.has(sceneId)) {
+      sceneId = `sc_${String(scIdx + 1).padStart(2, '0')}_${scIdx + 1}`;
+    }
+    seenSceneIds.add(sceneId);
+    sc.scene_id = sceneId;
+
+    const elements = Array.isArray(sc.elements) ? sc.elements : [];
+    const fallbackSeg = repairedSegs[Math.min(repairedSegs.length - 1, scIdx)] ?? repairedSegs[0];
+    const occupiedPerSeg = new Map<string, Array<{ x: number; y: number; w: number; h: number }>>();
+
+    elements.forEach((rawEl, elIdx) => {
+      const el = rawEl as unknown as StoryboardV19Element & Record<string, unknown>;
+      let elId =
+        typeof el.element_id === 'string' && el.element_id.trim()
+          ? el.element_id.trim()
+          : `${sceneId}_el_${String(elIdx + 1).padStart(2, '0')}`;
+      if (seenElementIds.has(elId)) {
+        elId = `${sceneId}_${elId}_${elIdx + 1}`;
+      }
+      seenElementIds.add(elId);
+      el.element_id = elId;
+
+      // Sync anchor repair
+      if (repairedSegs.length > 0) {
+        const anchor = el.sync_anchor ?? { segment_id: fallbackSeg?.segment_id || 'seg_001', anchor_type: 'full_segment' as const };
+        let targetSeg = anchor.segment_id ? segMap.get(anchor.segment_id) : undefined;
+        if (!targetSeg) {
+          targetSeg = fallbackSeg ?? repairedSegs[0];
+          anchor.segment_id = targetSeg.segment_id;
+        }
+        if (anchor.quote && anchor.quote.trim() && !quoteMatchesSegmentText(anchor.quote, targetSeg.text)) {
+          anchor.quote = targetSeg.text.slice(0, Math.min(48, targetSeg.text.length)).trim();
+          anchor.anchor_type = 'segment_start';
+        }
+        el.sync_anchor = anchor;
+        coveredSegIds.add(targetSeg.segment_id);
+      }
+
+      // Icon & variant repair
+      const kind = String(el.kind ?? el.type ?? 'text').toLowerCase();
+      const segText = el.sync_anchor?.segment_id ? segMap.get(el.sync_anchor.segment_id)?.text ?? '' : '';
+      const contextText = `${segText} ${String(el.title ?? el.content ?? el.text ?? '')}`;
+      if (typeof el.sceneIcon === 'string' && el.sceneIcon.trim()) {
+        el.sceneIcon = normalizeSceneIconWithAlias(el.sceneIcon, contextText).icon;
+      }
+      if ((kind === 'illustration' || kind === 'asset') && typeof el.variant === 'string' && el.variant.trim()) {
+        const kebab = el.variant.trim().replace(/_/g, '-');
+        const hasPrims = Array.isArray(el.customPrimitives) && el.customPrimitives.length > 0;
+        if (!hasPrims && kebab !== 'custom-ui' && kebab !== 'custom-vector') {
+          el.variant = isKnownIllustrationVariant(kebab)
+            ? kebab
+            : matchIllustrationForCue(contextText, 'bs-card-header');
+        } else {
+          el.variant = kebab as IllustrationVariant;
+        }
+      }
+
+      // Position normalization (width/height aliases + canvas/karaoke safe bounds + same-segment overlap nudge)
+      const pos = (el.position && typeof el.position === 'object' ? el.position : {}) as Record<string, unknown>;
+      let px = Number(pos.x);
+      let py = Number(pos.y);
+      let pw = Number(pos.width ?? pos.w);
+      let ph = Number(pos.height ?? pos.h);
+      if (!Number.isFinite(px)) px = 0.08;
+      if (!Number.isFinite(py)) py = kind === 'strip' ? 0.06 : kind === 'pill' ? 0.145 : kind === 'meter' ? 0.64 : kind === 'text' ? 0.48 : 0.23;
+      if (!Number.isFinite(pw) || pw <= 0) pw = 0.84;
+      if (!Number.isFinite(ph) || ph <= 0) ph = kind === 'strip' ? 0.07 : kind === 'pill' ? 0.05 : kind === 'meter' ? 0.09 : kind === 'text' ? 0.15 : 0.22;
+
+      px = Math.max(0.02, Math.min(0.92, px));
+      pw = Math.max(0.08, Math.min(0.96 - px, pw));
+      ph = Math.max(0.04, Math.min(0.68, ph));
+      const maxBottom = kind === 'karaoke' || kind === 'karaoke-card' ? 0.96 : 0.74;
+      if (py < 0.04) py = 0.04;
+      if (py + ph > maxBottom) {
+        py = Math.max(0.05, Number((maxBottom - ph).toFixed(3)));
+      }
+
+      // Resolve overlapping boxes sharing the exact same segment inside the same scene
+      const segKey = el.sync_anchor?.segment_id || sceneId;
+      const segBoxes = occupiedPerSeg.get(segKey) ?? [];
+      if (kind !== 'connector') {
+        for (const prev of segBoxes) {
+          const ovX = Math.min(px + pw, prev.x + prev.w) - Math.max(px, prev.x);
+          const ovY = Math.min(py + ph, prev.y + prev.h) - Math.max(py, prev.y);
+          if (ovX > 0.015 && ovY > 0.015) {
+            const candidateY = Number((prev.y + prev.h + 0.02).toFixed(3));
+            if (candidateY + ph <= maxBottom) {
+              py = candidateY;
+            }
+          }
+        }
+        segBoxes.push({ x: px, y: py, w: pw, h: ph });
+        occupiedPerSeg.set(segKey, segBoxes);
+      }
+
+      el.position = {
+        x: Number(px.toFixed(3)),
+        y: Number(py.toFixed(3)),
+        width: Number(pw.toFixed(3)),
+        height: Number(ph.toFixed(3)),
+      };
+    });
+  });
+
+  // Enrich uncovered segments into existing scenes so the JSON reflects full-script coverage
+  if (repairedSegs.length > 0 && scenes.length > 0) {
+    const ROTATION: IllustrationVariant[] = [
+      'bs-card-header',
+      'css-sticky-note',
+      'bs-alert-tip',
+      'css-magnifying-word',
+      'bs-badge-cluster',
+      'css-bento-stats',
+    ];
+    let lastVariant = '';
+    repairedSegs.forEach((seg, segIdx) => {
+      if (coveredSegIds.has(seg.segment_id)) return;
+      const targetSceneIdx = Math.min(
+        scenes.length - 1,
+        Math.floor((segIdx / Math.max(1, repairedSegs.length)) * scenes.length),
+      );
+      const targetScene = scenes[targetSceneIdx];
+      if (!targetScene.elements) targetScene.elements = [];
+      const resolved = resolveContextualVisualForCue(seg.text, undefined, 'bs-card-header');
+      let variant = resolved.variant;
+      if (variant === lastVariant) {
+        variant = ROTATION[(segIdx + 1) % ROTATION.length];
+      }
+      lastVariant = variant;
+
+      let autoId = `${targetScene.scene_id || `sc_${targetSceneIdx + 1}`}_auto_${seg.segment_id}`;
+      while (seenElementIds.has(autoId)) autoId = `${autoId}_x`;
+      seenElementIds.add(autoId);
+
+      targetScene.elements.push({
+        element_id: autoId,
+        kind: 'illustration',
+        role: 'visual',
+        variant,
+        title: resolved.data?.title || seg.text.slice(0, 42),
+        subtitle: resolved.data?.subtitle,
+        sceneIcon: resolved.data?.sceneIcon || 'sparkles',
+        sync_anchor: {
+          segment_id: seg.segment_id,
+          anchor_type: 'full_segment',
+          quote: seg.text.slice(0, Math.min(60, seg.text.length)),
+        },
+        position: { x: 0.08, y: 0.23, width: 0.84, height: 0.24 },
+        animation: { in: 'fade-scale', out: 'fade-out', duration_s: 0.35 },
+      });
+    });
+  }
+
+  return cloned;
+}
+

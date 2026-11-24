@@ -90,10 +90,9 @@ import {
   ALL_SCENE_ICONS,
   getEffectiveVectorCatalog,
 } from '../engine/vectorComponentDb';
-import { ApiKeyInlineControl } from './ApiKeyInlineControl';
+import { PasteButton } from './PasteButton';
 import { TtsProviderInfo } from './AudioSubtitleStudioModal';
 import { emitOutputUpdated } from './GlobalOutputPanel';
-import { buildApiKeyHeaders, useClientApiKeys } from '../utils/apiKeysStore';
 import { resizeImageFileToStageDataUrl } from '../utils/imageResize';
 
 interface EnglishReelsTabProps {
@@ -297,10 +296,8 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
     }
   };
 
-  const { keys: clientKeys } = useClientApiKeys();
-
   const refreshTtsVoices = () => {
-    fetch('/api/tts/voices', { headers: buildApiKeyHeaders() })
+    fetch('/api/tts/voices')
       .then((r) => r.json())
       .then((data) => {
         if (Array.isArray(data?.providers)) {
@@ -328,19 +325,16 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
     };
   }, [generatedAudioUrl]);
 
-  const effectiveHasGeminiKey = hasGeminiKey || Boolean(clientKeys.geminiApiKey);
-  const effectiveHasElevenLabsKey = hasElevenLabsKey || Boolean(clientKeys.elevenlabsApiKey);
-
   const availableVoices = useMemo(() => {
     if (ttsProvider === 'auto') {
       return ttsProviders.flatMap((p) => {
-        if (p.id === 'gemini' && !effectiveHasGeminiKey) return [];
-        if (p.id === 'elevenlabs' && !effectiveHasElevenLabsKey) return [];
+        if (p.id === 'gemini' && !hasGeminiKey) return [];
+        if (p.id === 'elevenlabs' && !hasElevenLabsKey) return [];
         return p.voices;
       });
     }
     return ttsProviders.find((p) => p.id === ttsProvider)?.voices ?? [];
-  }, [ttsProviders, ttsProvider, effectiveHasGeminiKey, effectiveHasElevenLabsKey]);
+  }, [ttsProviders, ttsProvider, hasGeminiKey, hasElevenLabsKey]);
 
   useEffect(() => {
     if (availableVoices.length > 0 && !availableVoices.some((v) => v.id === ttsVoice)) {
@@ -1036,14 +1030,14 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
   };
 
   const handleServerAiGenerateCards = async () => {
-    if (!effectiveHasGeminiKey || isGeneratingAiCards) return;
+    if (!hasGeminiKey || isGeneratingAiCards) return;
     setIsGeneratingAiCards(true);
     setAiJsonError(null);
     setAiJsonNotice(null);
     try {
       const res = await fetch('/api/ai/generate-scene', {
         method: 'POST',
-        headers: buildApiKeyHeaders({ 'Content-Type': 'application/json' }),
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt: webAiPrompt }),
       });
       const data = await parseApiJson<{ text?: string; error?: string }>(
@@ -1113,6 +1107,7 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
           <div className="relative flex-1 min-w-[260px]">
             <Globe className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
             <input
+              id="reels-url-input"
               type="url"
               value={urlInput}
               onChange={(e) => setUrlInput(e.target.value)}
@@ -1120,6 +1115,10 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
               className="w-full pl-9 pr-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
             />
           </div>
+          <PasteButton
+            targetSelector="#reels-url-input"
+            onPasteText={(text) => setUrlInput(text.trim())}
+          />
           <button
             type="button"
             disabled={isScraping}
@@ -1261,8 +1260,12 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
                 <label className="text-[11px] font-semibold text-slate-700">
                   Nội dung đã lọc sạch (hoặc dán văn bản bài đọc / từ vựng / câu hỏi)
                 </label>
-                <div className="flex items-center gap-3">
-                  {effectiveHasGeminiKey && (
+                <div className="flex items-center gap-2.5">
+                  <PasteButton
+                    targetSelector="#reels-source-textarea"
+                    onPasteText={(text) => setRawText(text)}
+                  />
+                  {hasGeminiKey && (
                     <button
                       type="button"
                       disabled={isGeneratingAiCards}
@@ -1287,6 +1290,7 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
                 </div>
               </div>
               <textarea
+                id="reels-source-textarea"
                 rows={5}
                 value={rawText}
                 onChange={(e) => setRawText(e.target.value)}
@@ -1305,14 +1309,24 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
                     Không cần API Key: AI Web sẽ lọc rác, nhận diện Reading/Quiz/Vocab, điền bản dịch và trả về đúng định dạng JSON của app.
                   </p>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => void handleCopyPrompt()}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 whitespace-nowrap"
-                >
-                  {copiedPrompt ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                  <span>{copiedPrompt ? 'Đã chép Prompt!' : 'Sao chép Prompt AI Web'}</span>
-                </button>
+                <div className="flex items-center gap-1.5">
+                  <PasteButton
+                    targetSelector="#reels-ai-json-textarea"
+                    label="Dán JSON"
+                    onPasteText={(text) => {
+                      setPastedAiJson(text);
+                      setAiJsonError(null);
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void handleCopyPrompt()}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 whitespace-nowrap"
+                  >
+                    {copiedPrompt ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                    <span>{copiedPrompt ? 'Đã chép Prompt!' : 'Sao chép Prompt AI Web'}</span>
+                  </button>
+                </div>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
@@ -1325,6 +1339,7 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
                 />
                 <div className="flex flex-col gap-1.5">
                   <textarea
+                    id="reels-ai-json-textarea"
                     rows={4}
                     value={pastedAiJson}
                     onChange={(e) => {
@@ -2242,13 +2257,11 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
               </div>
             </div>
 
-            {(ttsProvider === 'elevenlabs' || ttsProvider === 'gemini') && (
-              <ApiKeyInlineControl
-                provider={ttsProvider === 'elevenlabs' ? 'elevenlabs' : 'gemini'}
-                hasServerKey={ttsProvider === 'elevenlabs' ? hasElevenLabsKey : hasGeminiKey}
-                onSaved={refreshTtsVoices}
-                compact
-              />
+            {((ttsProvider === 'elevenlabs' && !hasElevenLabsKey) ||
+              (ttsProvider === 'gemini' && !hasGeminiKey)) && (
+              <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
+                Chưa cấu hình {ttsProvider === 'elevenlabs' ? 'ELEVENLABS_API_KEY' : 'GEMINI_API_KEY'} trong biến môi trường server (<code className="font-mono">.env</code>) — bạn có thể dùng miễn phí <strong>Edge Neural / Google / Polly</strong> ngay.
+              </p>
             )}
 
             <div>

@@ -290,6 +290,8 @@ export type LayoutCompositionId =
 
 export interface CustomComponentPresetConfig {
   variant: IllustrationVariant;
+  secondaryVariant?: IllustrationVariant | '';
+  layoutMode?: 'stacked' | 'split-focus' | 'hero-only';
   sceneIcon?: IllustrationSceneIcon;
   title?: string;
   subtitle?: string;

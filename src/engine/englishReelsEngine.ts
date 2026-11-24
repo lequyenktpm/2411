@@ -620,16 +620,13 @@ export function getQuizCardSpeechParts(
   return { questionSpeech, answerSpeech, thinkSec };
 }
 
-function defaultVisualForCard(
+function computeContextualFallbackVisual(
   card: ReelCard,
   idx: number,
   total: number,
   targetLang?: string,
 ): ReelCardVisualConfig {
   const locale = getReelLocaleStrings(targetLang);
-  if (card.visual?.variant || card.visual?.customPrimitives?.length) {
-    return card.visual;
-  }
   if (card.type === 'intro') {
     return {
       variant: 'bs-card-header',
@@ -705,6 +702,23 @@ function defaultVisualForCard(
     speechText: card.content,
     labels: ['Listen', 'Understand', 'Speak'],
     sceneIcon: 'book',
+  };
+}
+
+function defaultVisualForCard(
+  card: ReelCard,
+  idx: number,
+  total: number,
+  targetLang?: string,
+): ReelCardVisualConfig {
+  const fallback = computeContextualFallbackVisual(card, idx, total, targetLang);
+  if (!card.visual) {
+    return fallback;
+  }
+  return {
+    ...fallback,
+    ...card.visual,
+    variant: card.visual.variant || fallback.variant,
   };
 }
 
@@ -1218,21 +1232,27 @@ export function buildEnglishReelsWebAiPrompt(params: {
 function stripJsonCodeFences(raw: string): string {
   const trimmed = raw.trim();
   const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-  if (fenced && fenced[1]) return fenced[1].trim();
-  const firstBrace = trimmed.indexOf('{');
-  const lastBrace = trimmed.lastIndexOf('}');
-  if (firstBrace >= 0 && lastBrace > firstBrace) {
-    return trimmed.slice(firstBrace, lastBrace + 1);
+  let body = fenced && fenced[1] ? fenced[1].trim() : trimmed;
+  if (!fenced) {
+    const firstBrace = trimmed.indexOf('{');
+    const lastBrace = trimmed.lastIndexOf('}');
+    if (firstBrace >= 0 && lastBrace > firstBrace) {
+      body = trimmed.slice(firstBrace, lastBrace + 1);
+    }
   }
-  return trimmed;
+  return body.replace(/,\s*([}\]])/g, '$1');
 }
 
 function parseCardVisualConfig(rawVisual: unknown): ReelCardVisualConfig | undefined {
   if (!rawVisual || typeof rawVisual !== 'object') return undefined;
   const v = rawVisual as Record<string, unknown>;
+  const normalizedVariant =
+    typeof v.variant === 'string'
+      ? v.variant.trim().toLowerCase().replace(/_/g, '-')
+      : '';
   const variant =
-    typeof v.variant === 'string' && isKnownIllustrationVariant(v.variant.trim())
-      ? (v.variant.trim() as IllustrationVariant)
+    normalizedVariant && isKnownIllustrationVariant(normalizedVariant)
+      ? (normalizedVariant as IllustrationVariant)
       : undefined;
 
   const labels = Array.isArray(v.labels)
@@ -1251,12 +1271,25 @@ function parseCardVisualConfig(rawVisual: unknown): ReelCardVisualConfig | undef
     }
   }
 
+  const parsedNumVal =
+    typeof v.value === 'number'
+      ? v.value
+      : typeof v.value === 'string' && v.value.trim() !== ''
+        ? Number(v.value.trim())
+        : NaN;
+
+  const normalizedNumVal = Number.isFinite(parsedNumVal)
+    ? parsedNumVal > 1 && parsedNumVal <= 100
+      ? Number((parsedNumVal / 100).toFixed(3))
+      : Math.max(0, Math.min(1, parsedNumVal))
+    : undefined;
+
   const out: ReelCardVisualConfig = {
     variant,
     title: typeof v.title === 'string' && v.title.trim() ? v.title.trim() : undefined,
     subtitle: typeof v.subtitle === 'string' && v.subtitle.trim() ? v.subtitle.trim() : undefined,
     labels: labels && labels.length > 0 ? labels : undefined,
-    value: typeof v.value === 'number' && Number.isFinite(v.value) ? Math.max(0, Math.min(1, v.value)) : undefined,
+    value: normalizedNumVal,
     formula: typeof v.formula === 'string' && v.formula.trim() ? v.formula.trim() : undefined,
     highlightWord:
       typeof v.highlightWord === 'string' && v.highlightWord.trim() ? v.highlightWord.trim() : undefined,
@@ -1318,7 +1351,7 @@ export function parseEnglishReelsAiJson(
             ? 'quiz'
             : 'vocab';
 
-      const content = String(c.content || c.text || c.title || '').trim();
+      const content = String(c.content || c.text || c.spokenText || c.ttsText || c.title || '').trim();
       const title = String(c.title || content || `Card ${idx + 1}`).trim();
       if (!content && !title) return;
       if (isMetadataNoiseLine(content)) return;
