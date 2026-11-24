@@ -5,7 +5,9 @@ import {
   cuesToSrt,
   interpolateWordTimings,
   parseTranscriptAuto,
+  stripTimestampsFromScript,
 } from './transcriptParser';
+import { inferSpokenLanguageFromText } from '../server/mediaHelpers';
 import { buildSceneGenerationPrompt } from './aiPromptBuilder';
 import { choreographFromTranscript } from './autoChoreographer';
 import { computeElementFrameState } from './animationMath';
@@ -1184,6 +1186,63 @@ test('supports 50+ @englishpracticing168 Bootstrap/CSS variants, inline customPr
   assert.ok(reelsPrompt.includes('LUẬT KHÔNG ĐỤNG HÀNG'));
   assert.ok(reelsPrompt.includes('bs-badge-cluster'));
 });
+
+test('stripTimestampsFromScript removes SRT, VTT, block-timestamps, inline ranges, and JSON timestamps for clean TTS speech', () => {
+  const blockTranscript = `00:00:00.000
+Stop saying very tired all the time.
+
+00:00:03.200
+Instead, try saying I am exhausted.`;
+  assert.equal(
+    stripTimestampsFromScript(blockTranscript),
+    'Stop saying very tired all the time.\nInstead, try saying I am exhausted.',
+  );
+
+  const srtTranscript = `1
+00:00:00,000 --> 00:00:02,500
+At the airport, keep your boarding pass ready.
+
+2
+00:00:02,600 --> 00:00:05,100
+Practice speaking one natural phrase every morning.`;
+  assert.equal(
+    stripTimestampsFromScript(srtTranscript),
+    'At the airport, keep your boarding pass ready.\nPractice speaking one natural phrase every morning.',
+  );
+
+  const vttAndInline = `WEBVTT
+
+[00:12 - 00:15] Could I have a quiet room?
+[0:16] Yes, right this way.`;
+  assert.equal(
+    stripTimestampsFromScript(vttAndInline),
+    'Could I have a quiet room?\nYes, right this way.',
+  );
+
+  const jsonTranscript = JSON.stringify({
+    segments: [
+      { start: 0, end: 2, text: 'First spoken line.' },
+      { start: 2.2, end: 4, text: 'Second spoken line.' },
+    ],
+  });
+  assert.equal(
+    stripTimestampsFromScript(jsonTranscript),
+    'First spoken line.\nSecond spoken line.',
+  );
+
+  // Plain sentences with numbers must NOT be mangled
+  const plainScript = 'Line 1 has 500 dollars at 3 PM.\nSecond line stays intact.';
+  assert.equal(stripTimestampsFromScript(plainScript), plainScript);
+});
+
+test('inferSpokenLanguageFromText detects Vietnamese, Japanese, Korean, Chinese, and English', () => {
+  assert.equal(inferSpokenLanguageFromText('Xin chào các bạn học tiếng Anh mỗi ngày.'), 'Vietnamese');
+  assert.equal(inferSpokenLanguageFromText('このシーンを想像してみて。'), 'Japanese');
+  assert.equal(inferSpokenLanguageFromText('안녕하세요 오늘 영어 표현을 배워봅시다.'), 'Korean');
+  assert.equal(inferSpokenLanguageFromText('每天练习口语非常有用'), 'Chinese');
+  assert.equal(inferSpokenLanguageFromText('Practice speaking one natural phrase every morning.'), 'English');
+});
+
 
 
 

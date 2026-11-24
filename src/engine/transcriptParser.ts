@@ -325,3 +325,49 @@ export function cuesToBlockTranscript(cues: TranscriptCue[]): string {
     .map((cue) => `${formatTimeToken(cue.start)}\n${cue.text}`)
     .join('\n\n');
 }
+
+const SRT_ARROW_RE = /\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d+)?\s*-->\s*\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d+)?/;
+const INLINE_TS_PREFIX_RE = /^\[?\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d+)?(?:\s*[-–>to]+\s*\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d+)?)?\]?\s*/i;
+
+/**
+ * Extracts pure spoken lines from SRT, VTT, JSON, or block-timestamp transcripts
+ * so TTS never reads "00:00:00.000" or cue numbers aloud.
+ */
+export function stripTimestampsFromScript(rawInput: string): string {
+  const trimmed = rawInput
+    .trim()
+    .replace(/^WEBVTT[^\r\n]*(?:\r?\n)+/i, '')
+    .trim();
+  if (!trimmed) return '';
+
+  const hasJson = trimmed.startsWith('{') || trimmed.startsWith('[');
+  const hasTimestamps =
+    hasJson ||
+    trimmed.includes('-->') ||
+    trimmed.split(/\r?\n/).some((line) => STANDALONE_TIMESTAMP_RE.test(line.trim())) ||
+    /^\s*(?:\[\d{1,2}:\d{2}|\d{2}:\d{2}:\d{2})/m.test(trimmed);
+
+  if (hasTimestamps) {
+    const parsed = parseTranscriptAuto(trimmed);
+    if (parsed.length > 0) {
+      return parsed
+        .map((c) => c.text.replace(/\s+/g, ' ').trim())
+        .filter((line) => Boolean(line) && !/^WEBVTT\b/i.test(line))
+        .join('\n');
+    }
+  }
+
+  const lines = trimmed.split(/\r?\n/);
+  const cleanedLines: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    if (/^WEBVTT\b/i.test(line)) continue;
+    if (STANDALONE_TIMESTAMP_RE.test(line) || SRT_ARROW_RE.test(line)) continue;
+    if (/^\d+$/.test(line) && lines[i + 1] && SRT_ARROW_RE.test(lines[i + 1].trim())) continue;
+    const withoutPrefix = line.replace(INLINE_TS_PREFIX_RE, '').trim();
+    if (withoutPrefix) cleanedLines.push(withoutPrefix);
+  }
+  return cleanedLines.join('\n');
+}
+

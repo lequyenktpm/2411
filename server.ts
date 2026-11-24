@@ -11,9 +11,16 @@ import { load as loadHtml } from 'cheerio';
 import { MsEdgeTTS, OUTPUT_FORMAT, ProsodyOptions } from 'msedge-tts';
 import { buildFfmpegArgs } from './src/engine/ffmpegArgs.ts';
 import { detectReelMode, splitMultipleExercisesFromText } from './src/engine/englishReelsEngine.ts';
-import { formatTimeToken, interpolateWordTimings } from './src/engine/transcriptParser.ts';
+import {
+  formatTimeToken,
+  interpolateWordTimings,
+  parseTranscriptAuto,
+  stripTimestampsFromScript,
+} from './src/engine/transcriptParser.ts';
 import {
   ELEVENLABS_DEFAULT_VOICES,
+  getWhisperCacheStatus,
+  preloadWhisperModel,
   probeMediaMeta,
   resolveSafeOutputDir,
   resolveSafeOutputFile,
@@ -21,6 +28,7 @@ import {
   sanitizeOutputStem,
   spawnTrackedFfmpeg,
   synthesizeElevenLabsTtsBuffer,
+  translateLinesWithGeminiOrFree,
 } from './src/server/mediaHelpers.ts';
 
 interface RenderJob {
@@ -945,11 +953,19 @@ async function startServer(): Promise<void> {
       }
     }
 
+    const whisperStatus = await getWhisperCacheStatus().catch(() => ({
+      fasterWhisperAvailable: false,
+      cachedOnnxModels: [] as string[],
+      loadedInMemory: [] as string[],
+    }));
+
     res.json({
       ok: true,
       hasGeminiKey: Boolean(process.env.GEMINI_API_KEY),
       hasElevenLabsKey: Boolean(elevenLabsKey),
       hasWhisperLocal: true,
+      fasterWhisperAvailable: whisperStatus.fasterWhisperAvailable,
+      whisperStatus,
       providers: [
         {
           id: 'edge',
@@ -1027,8 +1043,14 @@ async function startServer(): Promise<void> {
       const rate = Number(req.body?.rate ?? 1.0);
       const rawSegments = Array.isArray(req.body?.segments)
         ? req.body.segments
+            .map((seg: { id?: string; text?: string; pauseAfterSec?: number }, i: number) => ({
+              id: seg?.id || `seg-${i + 1}`,
+              text: stripTimestampsFromScript(String(seg?.text || '')),
+              pauseAfterSec: seg?.pauseAfterSec,
+            }))
+            .filter((s: { text: string }) => s.text.length > 0)
         : typeof req.body?.text === 'string' && req.body.text.trim()
-          ? req.body.text
+          ? stripTimestampsFromScript(req.body.text)
               .split(/\r?\n+/)
               .map((t: string, i: number) => ({ id: `seg-${i + 1}`, text: t.trim() }))
               .filter((s: { text: string }) => s.text.length > 0)
@@ -1228,11 +1250,13 @@ async function startServer(): Promise<void> {
     }
   });
 
-  // ── Multi-Language Subtitle Extractor (Whisper Local + Gemini Fallback) ──
+  // ── Multi-Language Subtitle Extractor (Whisper Local + Gemini / Free Translation) ──
   app.post(
     '/api/subtitles/transcribe',
-    express.raw({ type: () => true, limit: '50mb' }),
+    express.raw({ type: () => true, limit: '250mb' }),
     async (req, res) => {
+      req.setTimeout(600_000);
+      res.setTimeout(600_000);
       const tmpDir = path.join(os.tmpdir(), `ks-sub-${crypto.randomUUID()}`);
       await fs.promises.mkdir(tmpDir, { recursive: true });
       try {
@@ -1292,6 +1316,7 @@ async function startServer(): Promise<void> {
         let rawSegs: Array<{ start: number; end: number; text: string; translation?: string }> = [];
         let detectedLang = sourceLang;
         let engineUsed = 'faster-whisper (Built-in)';
+        let translationEngineUsed = '';
         let whisperWords: Array<{ word: string; start: number; end: number }> = [];
 
         const tryGeminiTranscribe = async () => {
@@ -1334,6 +1359,9 @@ async function startServer(): Promise<void> {
                 config: { responseMimeType: 'application/json' },
               });
               engineUsed = `gemini (${modelName})`;
+              if (translateLang && translateLang !== 'none') {
+                translationEngineUsed = `gemini (${modelName})`;
+              }
               break;
             } catch (err) {
               lastErr = err;
@@ -1369,42 +1397,36 @@ async function startServer(): Promise<void> {
               preferFasterWhisper: true,
             });
             rawSegs = wRes.segments;
+            detectedLang = wRes.language || sourceLang;
             whisperWords = wRes.words.map((w) => ({ word: w.text, start: w.start, end: w.end }));
             engineUsed = `${wRes.backendUsed || 'faster-whisper (Built-in)'} · ${wRes.modelUsed || whisperModel}`;
             if (rawSegs.length === 0) throw gemErr;
           }
         } else {
-          // Default 'faster-whisper' or 'auto' or 'whisper-local': Run Local Whisper (0 API key required)
+          // Default 'faster-whisper' or 'auto' or 'whisper': Run Local Whisper (0 API key required)
           const wRes = await runLocalWhisperOnWav(wavPath, {
             sourceLang,
             modelId: whisperModel,
             wordLevel: true,
-            preferFasterWhisper: engineReq !== 'whisper-onnx',
+            preferFasterWhisper: engineReq !== 'whisper',
           });
           rawSegs = wRes.segments;
+          detectedLang = wRes.language || sourceLang;
           whisperWords = wRes.words.map((w) => ({ word: w.text, start: w.start, end: w.end }));
           engineUsed = `${wRes.backendUsed || 'faster-whisper (Built-in)'} · ${wRes.modelUsed || whisperModel}`;
 
-          // Optional bilingual translation using Gemini if requested & key present
-          if (rawSegs.length > 0 && translateLang && translateLang !== 'none' && apiKey) {
+          // Optional bilingual translation: uses Gemini LLM if GEMINI_API_KEY is set, otherwise free Google Translate fallback
+          if (rawSegs.length > 0 && translateLang && translateLang !== 'none') {
             try {
-              const { GoogleGenAI } = await import('@google/genai');
-              const ai = new GoogleGenAI({
-                apiKey,
-                httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
-              });
-              const trRes = await ai.models.generateContent({
-                model: 'gemini-3.1-flash-lite',
-                contents: `Translate each line into ${translateLang}. Return JSON { "translations": string[] } matching exact array length (${rawSegs.length}):\n${JSON.stringify(rawSegs.map((s) => s.text))}`,
-                config: { responseMimeType: 'application/json' },
-              });
-              const trParsed = JSON.parse(trRes.text || '{}') as { translations?: string[] };
-              if (Array.isArray(trParsed.translations)) {
-                rawSegs = rawSegs.map((s, idx) => ({
-                  ...s,
-                  translation: String(trParsed.translations?.[idx] || '').trim(),
-                }));
-              }
+              const tr = await translateLinesWithGeminiOrFree(
+                rawSegs.map((s) => s.text),
+                translateLang,
+              );
+              translationEngineUsed = tr.engineUsed;
+              rawSegs = rawSegs.map((s, idx) => ({
+                ...s,
+                translation: String(tr.translations?.[idx] || '').trim(),
+              }));
             } catch {
               // Keep original language cleanly if translation fails
             }
@@ -1439,6 +1461,7 @@ async function startServer(): Promise<void> {
         res.json({
           ok: true,
           engineUsed,
+          translationEngineUsed: translationEngineUsed || undefined,
           language: detectedLang,
           durationSec: totalDur,
           cues,
@@ -1458,8 +1481,10 @@ async function startServer(): Promise<void> {
   // ── Whisper Local Word-Level Alignment (for Reading Along Studio 1.19) ───
   app.post(
     '/api/subtitles/align',
-    express.raw({ type: () => true, limit: '50mb' }),
+    express.raw({ type: () => true, limit: '250mb' }),
     async (req, res) => {
+      req.setTimeout(600_000);
+      res.setTimeout(600_000);
       const tmpDir = path.join(os.tmpdir(), `ks-align-${crypto.randomUUID()}`);
       await fs.promises.mkdir(tmpDir, { recursive: true });
       try {
@@ -1531,6 +1556,7 @@ async function startServer(): Promise<void> {
         }));
         res.json({
           ok: true,
+          language: aligned.language || sourceLang,
           modelUsed: aligned.modelUsed || whisperModel,
           backendUsed: aligned.backendUsed || 'faster-whisper-built-in',
           durationSec,
@@ -1547,6 +1573,91 @@ async function startServer(): Promise<void> {
       }
     },
   );
+
+  // ── Whisper Model Cache Status, Preload & Subtitle File Translator ───────
+  app.get('/api/whisper/status', async (_req, res) => {
+    try {
+      const status = await getWhisperCacheStatus();
+      res.json({ ok: true, ...status });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Không kiểm tra được Whisper cache.' });
+    }
+  });
+
+  app.post('/api/whisper/preload', express.json({ limit: '64kb' }), async (req, res) => {
+    req.setTimeout(600_000);
+    res.setTimeout(600_000);
+    try {
+      const model =
+        typeof req.body?.model === 'string' && req.body.model.trim()
+          ? req.body.model.trim()
+          : 'large-v3-turbo';
+      const loaded = await preloadWhisperModel(model);
+      const status = await getWhisperCacheStatus();
+      res.json({ ok: true, ...loaded, status });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Không tải được model Whisper.' });
+    }
+  });
+
+  app.post('/api/subtitles/translate', express.json({ limit: '5mb' }), async (req, res) => {
+    try {
+      const targetLang = typeof req.body?.targetLang === 'string' ? req.body.targetLang.trim() : '';
+      if (!targetLang || targetLang === 'none') {
+        res.status(400).json({ error: 'Vui lòng chọn ngôn ngữ đích để dịch.' });
+        return;
+      }
+      const bilingual = req.body?.bilingual !== false;
+      const rawCues = Array.isArray(req.body?.cues)
+        ? (req.body.cues as Array<{ id?: string; start?: number; end?: number; text?: string; words?: any[] }>)
+        : typeof req.body?.srt === 'string' && req.body.srt.trim()
+          ? parseTranscriptAuto(req.body.srt)
+          : [];
+
+      if (rawCues.length === 0) {
+        res.status(400).json({ error: 'Không có câu phụ đề hoặc file .srt hợp lệ để dịch.' });
+        return;
+      }
+
+      const sourceTexts = rawCues.map((c) => String(c.text || '').split('\n')[0].trim());
+      const tr = await translateLinesWithGeminiOrFree(sourceTexts, targetLang);
+
+      const translatedCues = rawCues.map((c, idx) => {
+        const st = Math.max(0, Number(c.start ?? 0));
+        const en = Math.max(st + 0.3, Number(c.end ?? st + 2.5));
+        const mainText = sourceTexts[idx] || String(c.text || '').trim();
+        const transText = String(tr.translations[idx] || '').trim();
+        const finalText = bilingual
+          ? transText && transText !== mainText
+            ? `${mainText}\n${transText}`
+            : mainText
+          : transText || mainText;
+        const wordSource = bilingual ? mainText : transText || mainText;
+        return {
+          id: String(c.id || `tr-cue-${idx + 1}`),
+          start: Number(st.toFixed(3)),
+          end: Number(en.toFixed(3)),
+          text: finalText,
+          words:
+            bilingual && Array.isArray(c.words) && c.words.length > 0
+              ? c.words
+              : interpolateWordTimings(wordSource, st, en),
+        };
+      });
+
+      res.json({
+        ok: true,
+        engineUsed: tr.engineUsed,
+        targetLang,
+        bilingual,
+        cues: translatedCues,
+        srt: cuesToSrt(translatedCues),
+        vtt: cuesToVtt(translatedCues),
+      });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Lỗi dịch phụ đề.' });
+    }
+  });
 
   app.post('/api/ai/generate-scene', express.json({ limit: '2mb' }), async (req, res) => {
     try {
@@ -2151,6 +2262,32 @@ async function startServer(): Promise<void> {
     await cleanupStudioJob(req.params.jobId);
     res.json({ ok: true });
   });
+
+  // Always return JSON errors for /api/* routes (including PayloadTooLargeError 413)
+  app.use(
+    '/api',
+    (
+      err: { status?: number; statusCode?: number; type?: string; message?: string },
+      _req: express.Request,
+      res: express.Response,
+      _next: express.NextFunction,
+    ) => {
+      if (res.headersSent) return;
+      const status =
+        typeof err?.status === 'number'
+          ? err.status
+          : typeof err?.statusCode === 'number'
+            ? err.statusCode
+            : err?.type === 'entity.too.large'
+              ? 413
+              : 500;
+      const message =
+        status === 413
+          ? 'File tải lên vượt quá giới hạn dung lượng 250MB.'
+          : err?.message || 'Lỗi xử lý API trên server.';
+      res.status(status).json({ error: message });
+    },
+  );
 
   if (process.env.NODE_ENV === 'production') {
     const distDir = path.resolve('dist');

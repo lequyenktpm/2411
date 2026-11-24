@@ -32,6 +32,31 @@ interface EducationalStudioTabProps {
 
 const CHUNK_SIZE = 4 * 1024 * 1024;
 
+async function parseApiJson<T = Record<string, any>>(
+  res: Response,
+  fallbackError: string,
+): Promise<T> {
+  const raw = await res.text();
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    if (!res.ok) throw new Error(`${fallbackError} (HTTP ${res.status})`);
+    return {} as T;
+  }
+  if (trimmed.startsWith('<')) {
+    if (res.status === 413) {
+      throw new Error('File tải lên vượt quá giới hạn dung lượng (tối đa 250MB).');
+    }
+    throw new Error(
+      `Server trả về HTML (HTTP ${res.status}) thay vì JSON — kiểm tra server Node.js hoặc dung lượng file tải lên.`,
+    );
+  }
+  try {
+    return JSON.parse(trimmed) as T;
+  } catch {
+    throw new Error(res.ok ? `${fallbackError}: JSON không hợp lệ.` : `${fallbackError} (HTTP ${res.status})`);
+  }
+}
+
 async function uploadStudioFileChunked(
   jobId: string,
   role: string,
@@ -53,7 +78,9 @@ async function uploadStudioFileChunked(
       signal,
     });
     if (!res.ok) {
-      const err = (await res.json().catch(() => ({}))) as { error?: string };
+      const err = await parseApiJson<{ error?: string }>(res, `Upload ${role} thất bại`).catch(() => ({
+        error: undefined,
+      }));
       throw new Error(err.error || `Upload ${role} thất bại (HTTP ${res.status})`);
     }
   }
@@ -207,7 +234,10 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
         headers: { 'Content-Type': 'application/json' },
         signal: controller.signal,
       });
-      const startData = (await startRes.json()) as { jobId?: string; error?: string };
+      const startData = await parseApiJson<{ jobId?: string; error?: string }>(
+        startRes,
+        'Không khởi tạo được job ghép video',
+      );
       if (!startRes.ok || !startData.jobId) {
         throw new Error(startData.error || 'Không khởi tạo được job ghép video.');
       }
@@ -236,13 +266,13 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
           savePath: 'edu-studio',
         }),
       });
-      const data = (await finishRes.json()) as {
+      const data = await parseApiJson<{
         ok?: boolean;
         fileName?: string;
         relativePath?: string;
         savedPath?: string;
         error?: string;
-      };
+      }>(finishRes, 'Ghép video thất bại');
       if (!finishRes.ok) {
         throw new Error(data.error || 'Ghép video thất bại.');
       }
@@ -320,7 +350,10 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
         headers: { 'Content-Type': 'application/json' },
         signal: controller.signal,
       });
-      const startData = (await startRes.json()) as { jobId?: string; error?: string };
+      const startData = await parseApiJson<{ jobId?: string; error?: string }>(
+        startRes,
+        'Không tạo được Studio job',
+      );
       if (!startRes.ok || !startData.jobId) {
         throw new Error(startData.error || 'Không tạo được Studio job.');
       }
@@ -368,13 +401,13 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
           savePath: 'edu-studio',
         }),
       });
-      const data = (await mixRes.json()) as {
+      const data = await parseApiJson<{
         ok?: boolean;
         fileName?: string;
         relativePath?: string;
         savedPath?: string;
         error?: string;
-      };
+      }>(mixRes, 'Lỗi render Karaoke & Mix');
       if (!mixRes.ok) {
         throw new Error(data.error || 'Lỗi render Karaoke & Mix.');
       }
@@ -406,6 +439,7 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
   const [alignError, setAlignError] = useState<string | null>(null);
   const [alignCurrentSec, setAlignCurrentSec] = useState(0);
   const [alignResult, setAlignResult] = useState<{
+    language?: string;
     modelUsed: string;
     backendUsed: string;
     durationSec: number;
@@ -440,11 +474,22 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
         },
         body: buf,
       });
-      const data = await res.json();
+      const data = await parseApiJson<{
+        language?: string;
+        modelUsed?: string;
+        backendUsed?: string;
+        durationSec?: number;
+        text?: string;
+        words?: WordTiming[];
+        cues?: TranscriptCue[];
+        srt?: string;
+        error?: string;
+      }>(res, 'Không thể căn chỉnh word-level');
       if (!res.ok) {
         throw new Error(data?.error || 'Không thể căn chỉnh word-level.');
       }
       setAlignResult({
+        language: data.language,
         modelUsed: data.modelUsed || alignModel,
         backendUsed: data.backendUsed || 'faster-whisper',
         durationSec: Number(data.durationSec || 0),
@@ -1053,7 +1098,8 @@ export const EducationalStudioTab: React.FC<EducationalStudioTabProps> = ({
                     <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
                       <span className="font-bold text-emerald-800 inline-flex items-center gap-1.5">
                         <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                        {alignResult.backendUsed} ({alignResult.modelUsed}) · {alignResult.words.length} từ
+                        {alignResult.backendUsed} ({alignResult.modelUsed})
+                        {alignResult.language ? ` · ${alignResult.language}` : ''} · {alignResult.words.length} từ
                       </span>
                       <div className="flex items-center gap-2">
                         <button

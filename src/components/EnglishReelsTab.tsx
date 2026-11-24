@@ -88,6 +88,26 @@ function base64ToMp3File(base64: string, fileName: string): File {
   return new File([bytes], fileName, { type: 'audio/mpeg' });
 }
 
+async function parseApiJson<T = Record<string, any>>(
+  res: Response,
+  fallbackError: string,
+): Promise<T> {
+  const raw = await res.text();
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    if (!res.ok) throw new Error(`${fallbackError} (HTTP ${res.status})`);
+    return {} as T;
+  }
+  if (trimmed.startsWith('<')) {
+    throw new Error(`Server trả về HTML (HTTP ${res.status}) thay vì JSON.`);
+  }
+  try {
+    return JSON.parse(trimmed) as T;
+  } catch {
+    throw new Error(res.ok ? `${fallbackError}: JSON không hợp lệ.` : `${fallbackError} (HTTP ${res.status})`);
+  }
+}
+
 export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio }) => {
   // ── 1. URL Scraper & Content ───────────────────────────────────────────────
   const [urlInput, setUrlInput] = useState('');
@@ -318,7 +338,10 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: cleanUrl }),
       });
-      const data = await res.json();
+      const data = await parseApiJson<ReelScrapeResult & { error?: string }>(
+        res,
+        'Không thể bóc nội dung từ URL',
+      );
       if (!res.ok) {
         throw new Error(data?.error || 'Không thể bóc nội dung từ URL.');
       }
@@ -510,7 +533,10 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
           segments,
         }),
       });
-      const data = await res.json();
+      const data = await parseApiJson<{ audioBase64?: string; error?: string }>(
+        res,
+        'Không phát thử được TTS',
+      );
       if (!res.ok || !data?.audioBase64) {
         throw new Error(data?.error || 'Không phát thử được TTS.');
       }
@@ -575,7 +601,13 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
         segments,
       }),
     });
-    const data = await res.json();
+    const data = await parseApiJson<{
+      audioBase64?: string;
+      segmentDurations?: number[];
+      spokenDurations?: number[];
+      pauseDurations?: number[];
+      error?: string;
+    }>(res, 'Không thể tạo audio TTS từ server');
     if (!res.ok || !data?.audioBase64) {
       throw new Error(data?.error || 'Không thể tạo audio TTS từ server.');
     }
@@ -713,7 +745,10 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt: webAiPrompt }),
       });
-      const data = await res.json();
+      const data = await parseApiJson<{ text?: string; error?: string }>(
+        res,
+        'Gemini không trả về kết quả hợp lệ',
+      );
       if (!res.ok || !data?.text) {
         throw new Error(data?.error || 'Gemini không trả về kết quả hợp lệ.');
       }
@@ -1620,16 +1655,17 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
                   className="w-full px-2 py-1.5 text-xs bg-white border border-slate-200 rounded-lg"
                 >
                   <option value="auto">Tự động miễn phí (Edge → Google → Polly)</option>
-                  {ttsProviders.map((p) => {
-                    const disabled =
-                      (p.id === 'gemini' && !hasGeminiKey) ||
-                      (p.id === 'elevenlabs' && !hasElevenLabsKey);
-                    return (
-                      <option key={p.id} value={p.id} disabled={disabled}>
+                  {ttsProviders
+                    .filter(
+                      (p) =>
+                        (p.id !== 'gemini' || hasGeminiKey) &&
+                        (p.id !== 'elevenlabs' || hasElevenLabsKey),
+                    )
+                    .map((p) => (
+                      <option key={p.id} value={p.id}>
                         {p.name}
                       </option>
-                    );
-                  })}
+                    ))}
                 </select>
               </div>
               <div>

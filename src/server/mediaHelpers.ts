@@ -1,6 +1,8 @@
 import { spawn, ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { interpolateWordTimings } from '../engine/transcriptParser.ts';
 
 export interface WhisperWordChunk {
   text: string;
@@ -12,6 +14,7 @@ export interface WhisperTranscribeResult {
   text: string;
   segments: Array<{ start: number; end: number; text: string }>;
   words: WhisperWordChunk[];
+  language?: string;
   modelUsed?: string;
   backendUsed?: string;
 }
@@ -29,6 +32,45 @@ export async function isFasterWhisperPythonAvailable(): Promise<boolean> {
     });
   cachedFasterWhisperAvailable = (await check('python3')) || (await check('python'));
   return cachedFasterWhisperAvailable;
+}
+
+export function inferSpokenLanguageFromText(text: string, fallback = 'English'): string {
+  const s = (text || '').trim();
+  if (!s) return fallback;
+  if (/[\u3040-\u30ff]/.test(s)) return 'Japanese';
+  if (/[\uac00-\ud7af\u1100-\u11ff]/.test(s)) return 'Korean';
+  if (/[\u4e00-\u9fff]/.test(s)) return 'Chinese';
+  if (/[ăâđêôơưàáạảãằắặẳẵầấậẩẫèéẹẻẽềếệểễìíịỉĩòóọỏõồốộổỗờớợởỡùúụủũừứựửữỳýỵỷỹ]/i.test(s)) {
+    return 'Vietnamese';
+  }
+  if (/[ñ¿¡]/i.test(s)) return 'Spanish';
+  if (/[çœæ]/i.test(s)) return 'French';
+  return fallback;
+}
+
+function normalizeLanguageName(codeOrName: string | undefined, textSample = ''): string {
+  const low = (codeOrName || '').trim().toLowerCase();
+  if (!low || low === 'auto') {
+    return inferSpokenLanguageFromText(textSample, 'English');
+  }
+  const map: Record<string, string> = {
+    en: 'English',
+    english: 'English',
+    vi: 'Vietnamese',
+    vietnamese: 'Vietnamese',
+    ja: 'Japanese',
+    japanese: 'Japanese',
+    zh: 'Chinese',
+    'zh-cn': 'Chinese',
+    chinese: 'Chinese',
+    ko: 'Korean',
+    korean: 'Korean',
+    fr: 'French',
+    french: 'French',
+    es: 'Spanish',
+    spanish: 'Spanish',
+  };
+  return map[low] || codeOrName || inferSpokenLanguageFromText(textSample, 'English');
 }
 
 async function runFasterWhisperPython(
@@ -61,7 +103,8 @@ for s in segs_gen:
             wt = (w.word or "").strip()
             if wt:
                 words.append({"text": wt, "start": round(float(w.start), 3), "end": round(float(w.end), 3)})
-print(json.dumps({"text": " ".join(texts), "segments": segs, "words": words}, ensure_ascii=False))
+detected_lang = getattr(info, "language", "") or ""
+print(json.dumps({"text": " ".join(texts), "segments": segs, "words": words, "language": detected_lang}, ensure_ascii=False))
 `;
 
   const runPy = (pyCmd: string) =>
@@ -93,6 +136,7 @@ print(json.dumps({"text": " ".join(texts), "segments": segs, "words": words}, en
       text: parsed.text || '',
       segments: Array.isArray(parsed.segments) ? parsed.segments : [],
       words: Array.isArray(parsed.words) ? parsed.words : [],
+      language: normalizeLanguageName(parsed.language, parsed.text || ''),
       modelUsed: modelName,
       backendUsed: 'faster-whisper',
     };
@@ -158,6 +202,18 @@ function mapLanguageToWhisper(lang: string): string | undefined {
   return undefined;
 }
 
+function mapLanguageToGoogleCode(lang: string): string {
+  const low = (lang || '').trim().toLowerCase();
+  if (low.startsWith('vi') || low.includes('việt')) return 'vi';
+  if (low.startsWith('en') || low.includes('anh')) return 'en';
+  if (low.startsWith('ja') || low.includes('nhật')) return 'ja';
+  if (low.startsWith('zh') || low.includes('trung')) return 'zh-CN';
+  if (low.startsWith('ko') || low.includes('hàn')) return 'ko';
+  if (low.startsWith('fr') || low.includes('pháp')) return 'fr';
+  if (low.startsWith('es') || low.includes('tây ban nha')) return 'es';
+  return 'vi';
+}
+
 async function getWhisperPipeline(modelId: string) {
   let pending = whisperPipelines.get(modelId);
   if (!pending) {
@@ -192,8 +248,95 @@ function resolveOnnxModelCandidates(requestedModel: string): string[] {
 
   const candidates = [mapped];
   if (mapped !== 'Xenova/whisper-small') candidates.push('Xenova/whisper-small');
+  if (mapped !== 'Xenova/whisper-base') candidates.push('Xenova/whisper-base');
   if (mapped !== 'Xenova/whisper-tiny') candidates.push('Xenova/whisper-tiny');
   return candidates;
+}
+
+export async function getWhisperCacheStatus(): Promise<{
+  fasterWhisperAvailable: boolean;
+  cachedOnnxModels: string[];
+  loadedInMemory: string[];
+}> {
+  const fasterWhisperAvailable = await isFasterWhisperPythonAvailable();
+  const loadedInMemory = Array.from(whisperPipelines.keys());
+  const cachedOnnxModels: string[] = [];
+
+  const candidateCacheRoots = [
+    path.resolve('node_modules/@huggingface/transformers/.cache'),
+    path.join(os.homedir(), '.cache', 'huggingface', 'hub'),
+    path.join(os.homedir(), '.cache', 'transformers.js'),
+  ];
+
+  for (const root of candidateCacheRoots) {
+    try {
+      const orgEntries = await fs.promises.readdir(root, { withFileTypes: true }).catch(() => []);
+      for (const org of orgEntries) {
+        if (!org.isDirectory()) continue;
+        if (org.name.startsWith('models--')) {
+          const modelName = org.name.replace(/^models--/, '').replace(/--/g, '/');
+          if (modelName.toLowerCase().includes('whisper') && !cachedOnnxModels.includes(modelName)) {
+            cachedOnnxModels.push(modelName);
+          }
+          continue;
+        }
+        const subEntries = await fs.promises
+          .readdir(path.join(root, org.name), { withFileTypes: true })
+          .catch(() => []);
+        for (const sub of subEntries) {
+          if (sub.isDirectory() && sub.name.toLowerCase().includes('whisper')) {
+            const fullId = `${org.name}/${sub.name}`;
+            if (!cachedOnnxModels.includes(fullId)) cachedOnnxModels.push(fullId);
+          }
+        }
+      }
+    } catch {
+      // ignore missing cache dir
+    }
+  }
+
+  return { fasterWhisperAvailable, cachedOnnxModels, loadedInMemory };
+}
+
+export async function preloadWhisperModel(modelId = 'large-v3-turbo'): Promise<{
+  backendUsed: string;
+  modelUsed: string;
+}> {
+  if (await isFasterWhisperPythonAvailable()) {
+    const fwModel =
+      modelId.replace(/^onnx-community\/whisper-/i, '').replace(/^Xenova\/whisper-/i, '') ||
+      'large-v3-turbo';
+    const pyScript = `
+import sys
+from faster_whisper import WhisperModel
+WhisperModel(sys.argv[1], device="auto", compute_type="int8")
+print("OK")
+`;
+    const downloaded = await new Promise<boolean>((resolve) => {
+      const run = (cmd: string) =>
+        new Promise<boolean>((res) => {
+          const p = spawn(cmd, ['-c', pyScript, fwModel], { shell: false });
+          p.on('error', () => res(false));
+          p.on('close', (code) => res(code === 0));
+        });
+      void run('python3').then((ok) => (ok ? resolve(true) : void run('python').then(resolve)));
+    });
+    if (downloaded) {
+      return { backendUsed: 'faster-whisper', modelUsed: fwModel };
+    }
+  }
+
+  const candidates = resolveOnnxModelCandidates(modelId);
+  let lastErr: unknown = null;
+  for (const candidate of candidates) {
+    try {
+      await getWhisperPipeline(candidate);
+      return { backendUsed: 'faster-whisper-built-in (ONNX)', modelUsed: candidate };
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error('Không tải được model Whisper.');
 }
 
 export async function runLocalWhisperOnWav(
@@ -230,34 +373,64 @@ export async function runLocalWhisperOnWav(
   const wavBuf = await fs.promises.readFile(wavPath);
   const audioFloat = parseWavToFloat32Mono16k(wavBuf);
   if (audioFloat.length < 160) {
-    return { text: '', segments: [], words: [], modelUsed: requestedModel, backendUsed: 'whisper-onnx' };
+    return { text: '', segments: [], words: [], language: 'English', modelUsed: requestedModel, backendUsed: 'whisper-onnx' };
   }
 
   const candidates = resolveOnnxModelCandidates(requestedModel);
-  let transcriber: any = null;
+  const whisperLang = mapLanguageToWhisper(options?.sourceLang || 'auto');
+  let result: any = null;
   let modelUsed = candidates[0];
+  let wordTimestampsActuallyUsed = Boolean(options?.wordLevel);
   let lastLoadErr: unknown = null;
 
   for (const candidate of candidates) {
     try {
-      transcriber = await getWhisperPipeline(candidate);
+      const transcriber = await getWhisperPipeline(candidate);
+      const baseOpts = {
+        chunk_length_s: 30,
+        stride_length_s: 5,
+        ...(whisperLang ? { language: whisperLang, task: 'transcribe' } : {}),
+      };
+
+      if (options?.wordLevel) {
+        try {
+          result = await transcriber(audioFloat, {
+            ...baseOpts,
+            return_timestamps: 'word',
+          });
+          wordTimestampsActuallyUsed = true;
+        } catch (wordErr) {
+          const msg = wordErr instanceof Error ? wordErr.message : String(wordErr);
+          if (/cross attentions|output_attentions|extract timestamps|word/i.test(msg)) {
+            // Model lacks exported decoder cross-attentions -> gracefully fall back to segment timestamps + word interpolation!
+            result = await transcriber(audioFloat, {
+              ...baseOpts,
+              return_timestamps: true,
+            });
+            wordTimestampsActuallyUsed = false;
+          } else {
+            throw wordErr;
+          }
+        }
+      } else {
+        result = await transcriber(audioFloat, {
+          ...baseOpts,
+          return_timestamps: true,
+        });
+        wordTimestampsActuallyUsed = false;
+      }
+
       modelUsed = candidate;
       break;
     } catch (err) {
       lastLoadErr = err;
+      result = null;
     }
   }
-  if (!transcriber) {
-    throw lastLoadErr instanceof Error ? lastLoadErr : new Error('Không thể tải mô hình Whisper local.');
-  }
 
-  const whisperLang = mapLanguageToWhisper(options?.sourceLang || 'auto');
-  const result = await transcriber(audioFloat, {
-    chunk_length_s: 30,
-    stride_length_s: 5,
-    return_timestamps: options?.wordLevel ? 'word' : true,
-    ...(whisperLang ? { language: whisperLang, task: 'transcribe' } : {}),
-  });
+  if (!result) {
+    throw lastLoadErr instanceof Error ? lastLoadErr : new Error('Không thể tải hoặc chạy mô hình Whisper local.');
+  }
 
   const chunks: Array<{ text?: string; timestamp?: [number | null, number | null] }> = Array.isArray(
     result?.chunks,
@@ -266,32 +439,34 @@ export async function runLocalWhisperOnWav(
     : [];
 
   const totalDur = Number((audioFloat.length / 16000).toFixed(3));
-  const rawWords: WhisperWordChunk[] = [];
+  const rawChunks: WhisperWordChunk[] = [];
   for (let i = 0; i < chunks.length; i++) {
     const chunk = chunks[i];
     const txt = String(chunk?.text || '').trim();
     if (!txt) continue;
     const ts = Array.isArray(chunk?.timestamp) ? chunk.timestamp : [0, totalDur];
-    const start = Math.max(0, Number(ts[0] ?? (i === 0 ? 0 : rawWords[rawWords.length - 1]?.end ?? 0)));
-    const rawEnd = ts[1] !== null && ts[1] !== undefined ? Number(ts[1]) : Math.min(totalDur, start + 0.65);
+    const start = Math.max(0, Number(ts[0] ?? (i === 0 ? 0 : rawChunks[rawChunks.length - 1]?.end ?? 0)));
+    const rawEnd = ts[1] !== null && ts[1] !== undefined ? Number(ts[1]) : Math.min(totalDur, start + 1.5);
     const end = Math.max(start + 0.08, Math.min(totalDur, rawEnd));
-    rawWords.push({
+    rawChunks.push({
       text: txt,
       start: Number(start.toFixed(3)),
       end: Number(end.toFixed(3)),
     });
   }
 
-  // Group word chunks into subtitle-length segments (~8-12 words or punctuation boundary)
   const segments: Array<{ start: number; end: number; text: string }> = [];
-  if (options?.wordLevel) {
+  let words: WhisperWordChunk[] = [];
+
+  if (wordTimestampsActuallyUsed) {
+    words = rawChunks;
     let curWords: WhisperWordChunk[] = [];
-    for (let i = 0; i < rawWords.length; i++) {
-      const w = rawWords[i];
+    for (let i = 0; i < words.length; i++) {
+      const w = words[i];
       curWords.push(w);
       const isSentenceEnd = /[.!?。！？]$/.test(w.text);
-      const nextGap = i + 1 < rawWords.length ? rawWords[i + 1].start - w.end : 1;
-      if (isSentenceEnd || curWords.length >= 9 || nextGap >= 0.65 || i === rawWords.length - 1) {
+      const nextGap = i + 1 < words.length ? words[i + 1].start - w.end : 1;
+      if (isSentenceEnd || curWords.length >= 9 || nextGap >= 0.65 || i === words.length - 1) {
         segments.push({
           start: curWords[0].start,
           end: curWords[curWords.length - 1].end,
@@ -301,21 +476,153 @@ export async function runLocalWhisperOnWav(
       }
     }
   } else {
-    for (const c of rawWords) {
-      segments.push({ start: c.start, end: c.end, text: c.text });
+    for (const seg of rawChunks) {
+      segments.push({ start: seg.start, end: seg.end, text: seg.text });
+      const interp = interpolateWordTimings(seg.text, seg.start, seg.end);
+      for (const w of interp) {
+        words.push({ text: w.word, start: w.start, end: w.end });
+      }
     }
   }
 
   if (segments.length === 0 && typeof result?.text === 'string' && result.text.trim()) {
-    segments.push({ start: 0, end: Math.max(1.5, totalDur), text: result.text.trim() });
+    const segText = result.text.trim();
+    const safeEnd = Math.max(1.5, totalDur);
+    segments.push({ start: 0, end: safeEnd, text: segText });
+    words = interpolateWordTimings(segText, 0, safeEnd).map((w) => ({
+      text: w.word,
+      start: w.start,
+      end: w.end,
+    }));
+  }
+
+  const fullText = String(result?.text || segments.map((s) => s.text).join(' ')).trim();
+  return {
+    text: fullText,
+    segments,
+    words,
+    language: normalizeLanguageName(
+      typeof result?.language === 'string' ? result.language : options?.sourceLang,
+      fullText,
+    ),
+    modelUsed,
+    backendUsed: wordTimestampsActuallyUsed
+      ? 'faster-whisper-built-in (ONNX)'
+      : 'faster-whisper-built-in (ONNX · Segment Sync)',
+  };
+}
+
+export async function translateLinesWithGeminiOrFree(
+  lines: string[],
+  targetLang: string,
+): Promise<{ translations: string[]; engineUsed: string }> {
+  const cleanLines = lines.map((l) => l.trim());
+  if (cleanLines.length === 0 || !targetLang || targetLang === 'none') {
+    return { translations: cleanLines, engineUsed: 'none' };
+  }
+
+  const apiKey = process.env.GEMINI_API_KEY || '';
+  if (apiKey) {
+    try {
+      const { GoogleGenAI, Type } = await import('@google/genai');
+      const ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+      });
+      for (const model of ['gemini-4-hydrogen', 'gemini-3.1-flash-lite']) {
+        try {
+          const trRes = await ai.models.generateContent({
+            model,
+            contents: `Translate each subtitle line naturally into ${targetLang}. Keep concise for video subtitles and match exact array length (${cleanLines.length}):\n${JSON.stringify(cleanLines)}`,
+            config: {
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  translations: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
+                  },
+                },
+              },
+            },
+          });
+          const parsed = JSON.parse(trRes.text || '{}') as { translations?: string[] };
+          if (Array.isArray(parsed.translations) && parsed.translations.length === cleanLines.length) {
+            return {
+              translations: parsed.translations.map((t, idx) => String(t || cleanLines[idx] || '').trim()),
+              engineUsed: `gemini (${model})`,
+            };
+          }
+        } catch {
+          // try next Gemini model or fallback to free translator
+        }
+      }
+    } catch {
+      // fallback to free translator
+    }
+  }
+
+  // Free zero-key Google Translate fallback (batched into chunks separated by sentinel line)
+  const tl = mapLanguageToGoogleCode(targetLang);
+  const translatedAll = new Array<string>(cleanLines.length).fill('');
+  const BATCH_SIZE = 15;
+
+  for (let start = 0; start < cleanLines.length; start += BATCH_SIZE) {
+    const slice = cleanLines.slice(start, start + BATCH_SIZE);
+    const joined = slice.map((l) => l.replace(/\r?\n+/g, ' ')).join('\n');
+    try {
+      const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${encodeURIComponent(tl)}&dt=t&q=${encodeURIComponent(joined)}`;
+      const res = await fetch(url, {
+        headers: { 'User-Agent': 'Mozilla/5.0' },
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = (await res.json()) as Array<Array<[string]>>;
+      const combined = Array.isArray(json?.[0])
+        ? json[0].map((part) => String(part?.[0] || '')).join('')
+        : '';
+      const splitLines = combined.split(/\r?\n/);
+      if (splitLines.length === slice.length) {
+        for (let i = 0; i < slice.length; i++) {
+          translatedAll[start + i] = splitLines[i].trim() || slice[i];
+        }
+        continue;
+      }
+    } catch {
+      // per-line fallback below
+    }
+
+    for (let i = 0; i < slice.length; i++) {
+      const line = slice[i];
+      if (!line) {
+        translatedAll[start + i] = '';
+        continue;
+      }
+      try {
+        const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${encodeURIComponent(tl)}&dt=t&q=${encodeURIComponent(line)}`;
+        const res = await fetch(url, {
+          headers: { 'User-Agent': 'Mozilla/5.0' },
+          signal: AbortSignal.timeout(8000),
+        });
+        if (res.ok) {
+          const json = (await res.json()) as Array<Array<[string]>>;
+          const txt = Array.isArray(json?.[0])
+            ? json[0].map((part) => String(part?.[0] || '')).join('').trim()
+            : '';
+          translatedAll[start + i] = txt || line;
+          continue;
+        }
+      } catch {
+        // keep source
+      }
+      translatedAll[start + i] = line;
+    }
   }
 
   return {
-    text: String(result?.text || segments.map((s) => s.text).join(' ')).trim(),
-    segments,
-    words: rawWords,
-    modelUsed,
-    backendUsed: 'faster-whisper-built-in (ONNX)',
+    translations: translatedAll,
+    engineUsed: 'google-translate-free',
   };
 }
 
