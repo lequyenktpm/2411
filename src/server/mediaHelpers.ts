@@ -20,6 +20,7 @@ export interface WhisperTranscribeResult {
 }
 
 const whisperPipelines = new Map<string, Promise<any>>();
+const whisperProgressListeners = new Map<string, Set<(pct: number, label: string) => void>>();
 let cachedFasterWhisperAvailable: boolean | null = null;
 
 export async function isFasterWhisperPythonAvailable(): Promise<boolean> {
@@ -214,22 +215,92 @@ function mapLanguageToGoogleCode(lang: string): string {
   return 'vi';
 }
 
-async function getWhisperPipeline(modelId: string) {
+async function getWhisperPipeline(
+  modelId: string,
+  onProgress?: (pct: number, label: string) => void,
+) {
+  let listeners = whisperProgressListeners.get(modelId);
+  if (!listeners) {
+    listeners = new Set();
+    whisperProgressListeners.set(modelId, listeners);
+  }
+  if (onProgress) {
+    listeners.add(onProgress);
+  }
+
+  const notify = (pct: number, label: string) => {
+    const clamped = Math.max(0, Math.min(100, Math.round(pct)));
+    whisperPreloadState.progress = clamped;
+    whisperPreloadState.progressLabel = label;
+    whisperPreloadState.updatedAt = Date.now();
+    const activeListeners = whisperProgressListeners.get(modelId);
+    if (activeListeners) {
+      for (const cb of activeListeners) {
+        try {
+          cb(clamped, label);
+        } catch {
+          // ignore listener error
+        }
+      }
+    }
+  };
+
   let pending = whisperPipelines.get(modelId);
   if (!pending) {
     pending = (async () => {
-      const { pipeline } = await import('@huggingface/transformers');
-      return pipeline('automatic-speech-recognition', modelId, {
+      const { pipeline, env } = await import('@huggingface/transformers');
+      env.allowRemoteModels = true;
+      env.allowLocalModels = true;
+      notify(2, `Đang kiểm tra / tải model ${modelId}...`);
+      const fileProgress = new Map<string, number>();
+      const pipe = await pipeline('automatic-speech-recognition', modelId, {
         dtype: 'q8',
+        progress_callback: (info: any) => {
+          if (!info || typeof info !== 'object') return;
+          const fileName = String(info.file || modelId).split('/').pop() || modelId;
+          if (info.status === 'initiate' || info.status === 'download') {
+            if (!fileProgress.has(fileName)) fileProgress.set(fileName, 0);
+            notify(
+              Math.max(3, whisperPreloadState.progress),
+              `Đang tải tệp model ${fileName}...`,
+            );
+          } else if (info.status === 'progress') {
+            const rawPct =
+              typeof info.progress === 'number'
+                ? info.progress
+                : info.total
+                  ? (Number(info.loaded || 0) / Number(info.total || 1)) * 100
+                  : 0;
+            fileProgress.set(fileName, Math.max(0, Math.min(100, rawPct)));
+            const vals = Array.from(fileProgress.values());
+            const avg = vals.length > 0 ? vals.reduce((a, b) => a + b, 0) / vals.length : rawPct;
+            notify(Math.max(5, Math.min(95, avg)), `Đang tải ${fileName} (${Math.round(rawPct)}%)...`);
+          } else if (info.status === 'done') {
+            fileProgress.set(fileName, 100);
+            const vals = Array.from(fileProgress.values());
+            const avg = vals.length > 0 ? vals.reduce((a, b) => a + b, 0) / vals.length : 100;
+            notify(Math.min(96, avg), `Đã nạp ${fileName}`);
+          } else if (info.status === 'ready') {
+            notify(100, `Model ${modelId} đã sẵn sàng`);
+          }
+        },
       });
+      notify(100, `Model ${modelId} đã sẵn sàng`);
+      return pipe;
     })();
     whisperPipelines.set(modelId, pending);
   }
   try {
-    return await pending;
+    const res = await pending;
+    onProgress?.(100, `Model ${modelId} đã sẵn sàng`);
+    return res;
   } catch (err) {
     whisperPipelines.delete(modelId);
     throw err;
+  } finally {
+    if (onProgress && listeners) {
+      listeners.delete(onProgress);
+    }
   }
 }
 
@@ -244,7 +315,7 @@ function resolveOnnxModelCandidates(requestedModel: string): string[] {
           ? 'Xenova/whisper-base'
           : clean === 'tiny'
             ? 'Xenova/whisper-tiny'
-            : clean || 'onnx-community/whisper-large-v3-turbo';
+            : clean || 'Xenova/whisper-small';
 
   const candidates = [mapped];
   if (mapped !== 'Xenova/whisper-small') candidates.push('Xenova/whisper-small');
@@ -253,10 +324,33 @@ function resolveOnnxModelCandidates(requestedModel: string): string[] {
   return candidates;
 }
 
+const whisperPreloadState: {
+  status: 'idle' | 'downloading' | 'ready' | 'error';
+  requestedModel: string | null;
+  modelUsed: string | null;
+  backendUsed: string | null;
+  progress: number;
+  progressLabel: string | null;
+  error: string | null;
+  updatedAt: number;
+} = {
+  status: 'idle',
+  requestedModel: null,
+  modelUsed: null,
+  backendUsed: null,
+  progress: 0,
+  progressLabel: null,
+  error: null,
+  updatedAt: 0,
+};
+
+let activePreloadPromise: Promise<void> | null = null;
+
 export async function getWhisperCacheStatus(): Promise<{
   fasterWhisperAvailable: boolean;
   cachedOnnxModels: string[];
   loadedInMemory: string[];
+  preloadState: typeof whisperPreloadState;
 }> {
   const fasterWhisperAvailable = await isFasterWhisperPythonAvailable();
   const loadedInMemory = Array.from(whisperPipelines.keys());
@@ -295,10 +389,10 @@ export async function getWhisperCacheStatus(): Promise<{
     }
   }
 
-  return { fasterWhisperAvailable, cachedOnnxModels, loadedInMemory };
+  return { fasterWhisperAvailable, cachedOnnxModels, loadedInMemory, preloadState: { ...whisperPreloadState } };
 }
 
-export async function preloadWhisperModel(modelId = 'large-v3-turbo'): Promise<{
+export async function preloadWhisperModel(modelId = 'Xenova/whisper-small'): Promise<{
   backendUsed: string;
   modelUsed: string;
 }> {
@@ -330,13 +424,55 @@ print("OK")
   let lastErr: unknown = null;
   for (const candidate of candidates) {
     try {
-      await getWhisperPipeline(candidate);
+      await getWhisperPipeline(candidate, (pct, label) => {
+        whisperPreloadState.status = 'downloading';
+        whisperPreloadState.progress = pct;
+        whisperPreloadState.progressLabel = label;
+        whisperPreloadState.updatedAt = Date.now();
+      });
       return { backendUsed: 'faster-whisper-built-in (ONNX)', modelUsed: candidate };
     } catch (err) {
       lastErr = err;
     }
   }
   throw lastErr instanceof Error ? lastErr : new Error('Không tải được model Whisper.');
+}
+
+export function startWhisperPreloadJob(modelId = 'Xenova/whisper-small'): typeof whisperPreloadState {
+  if (whisperPreloadState.status === 'downloading' && activePreloadPromise) {
+    return { ...whisperPreloadState };
+  }
+  whisperPreloadState.status = 'downloading';
+  whisperPreloadState.requestedModel = modelId;
+  whisperPreloadState.modelUsed = null;
+  whisperPreloadState.backendUsed = null;
+  whisperPreloadState.progress = 2;
+  whisperPreloadState.progressLabel = `Đang chuẩn bị tải ${modelId}...`;
+  whisperPreloadState.error = null;
+  whisperPreloadState.updatedAt = Date.now();
+
+  activePreloadPromise = preloadWhisperModel(modelId)
+    .then((res) => {
+      whisperPreloadState.status = 'ready';
+      whisperPreloadState.modelUsed = res.modelUsed;
+      whisperPreloadState.backendUsed = res.backendUsed;
+      whisperPreloadState.progress = 100;
+      whisperPreloadState.progressLabel = `Đã tải xong ${res.modelUsed}`;
+      whisperPreloadState.error = null;
+      whisperPreloadState.updatedAt = Date.now();
+    })
+    .catch((err) => {
+      whisperPreloadState.status = 'error';
+      whisperPreloadState.progress = 0;
+      whisperPreloadState.progressLabel = null;
+      whisperPreloadState.error = err instanceof Error ? err.message : 'Không tải được model Whisper.';
+      whisperPreloadState.updatedAt = Date.now();
+    })
+    .finally(() => {
+      activePreloadPromise = null;
+    });
+
+  return { ...whisperPreloadState };
 }
 
 export async function runLocalWhisperOnWav(
@@ -346,12 +482,15 @@ export async function runLocalWhisperOnWav(
     modelId?: string;
     wordLevel?: boolean;
     preferFasterWhisper?: boolean;
+    onProgress?: (progress: number, label: string) => void;
   },
 ): Promise<WhisperTranscribeResult> {
   const requestedModel =
     options?.modelId?.trim() ||
     process.env.WHISPER_MODEL?.trim() ||
-    'large-v3-turbo';
+    'Xenova/whisper-small';
+
+  options?.onProgress?.(6, `Đang khởi tạo Whisper (${requestedModel})...`);
 
   // 1. Try native faster-whisper Python library if installed on the machine
   if (options?.preferFasterWhisper !== false) {
@@ -365,6 +504,7 @@ export async function runLocalWhisperOnWav(
       options?.wordLevel,
     );
     if (fwRes && (fwRes.segments.length > 0 || fwRes.text)) {
+      options?.onProgress?.(100, 'Nhận diện faster-whisper hoàn tất');
       return fwRes;
     }
   }
@@ -373,6 +513,7 @@ export async function runLocalWhisperOnWav(
   const wavBuf = await fs.promises.readFile(wavPath);
   const audioFloat = parseWavToFloat32Mono16k(wavBuf);
   if (audioFloat.length < 160) {
+    options?.onProgress?.(100, 'Audio trống');
     return { text: '', segments: [], words: [], language: 'English', modelUsed: requestedModel, backendUsed: 'whisper-onnx' };
   }
 
@@ -380,43 +521,61 @@ export async function runLocalWhisperOnWav(
   const whisperLang = mapLanguageToWhisper(options?.sourceLang || 'auto');
   let result: any = null;
   let modelUsed = candidates[0];
-  let wordTimestampsActuallyUsed = Boolean(options?.wordLevel);
+  let wordTimestampsActuallyUsed = false;
   let lastLoadErr: unknown = null;
 
   for (const candidate of candidates) {
     try {
-      const transcriber = await getWhisperPipeline(candidate);
+      const transcriber = await getWhisperPipeline(candidate, (dlPct, dlLabel) => {
+        const scaled = Math.min(68, Math.max(8, Math.round(8 + dlPct * 0.6)));
+        options?.onProgress?.(scaled, dlLabel);
+      });
+      options?.onProgress?.(74, `Đang chạy nhận diện Whisper (${candidate})...`);
       const baseOpts = {
         chunk_length_s: 30,
         stride_length_s: 5,
         ...(whisperLang ? { language: whisperLang, task: 'transcribe' } : {}),
       };
 
-      if (options?.wordLevel) {
+      // Models like onnx-community/whisper-large-v3-turbo lack output_attentions=True in ONNX,
+      // so skip return_timestamps: 'word' directly for them and use segment timestamps + interpolation.
+      const supportsWordAttentions = !/large-v3-turbo/i.test(candidate);
+
+      if (options?.wordLevel && supportsWordAttentions) {
         try {
           result = await transcriber(audioFloat, {
             ...baseOpts,
             return_timestamps: 'word',
           });
           wordTimestampsActuallyUsed = true;
-        } catch (wordErr) {
-          const msg = wordErr instanceof Error ? wordErr.message : String(wordErr);
-          if (/cross attentions|output_attentions|extract timestamps|word/i.test(msg)) {
-            // Model lacks exported decoder cross-attentions -> gracefully fall back to segment timestamps + word interpolation!
+        } catch {
+          // Gracefully fall back to segment timestamps + word interpolation on any attention/timestamp error
+          try {
             result = await transcriber(audioFloat, {
               ...baseOpts,
               return_timestamps: true,
             });
             wordTimestampsActuallyUsed = false;
-          } else {
-            throw wordErr;
+          } catch {
+            result = await transcriber(audioFloat, {
+              ...baseOpts,
+              return_timestamps: false,
+            });
+            wordTimestampsActuallyUsed = false;
           }
         }
       } else {
-        result = await transcriber(audioFloat, {
-          ...baseOpts,
-          return_timestamps: true,
-        });
+        try {
+          result = await transcriber(audioFloat, {
+            ...baseOpts,
+            return_timestamps: true,
+          });
+        } catch {
+          result = await transcriber(audioFloat, {
+            ...baseOpts,
+            return_timestamps: false,
+          });
+        }
         wordTimestampsActuallyUsed = false;
       }
 
@@ -773,13 +932,26 @@ export function spawnTrackedFfmpeg(
   args: string[],
   cwd: string,
   registerProc?: (proc: ChildProcess) => void,
+  onProgressTimeSec?: (sec: number) => void,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
-    const proc = spawn('ffmpeg', args, { cwd, shell: false });
+    const finalArgs = onProgressTimeSec && !args.includes('-stats')
+      ? ['-stats', ...args]
+      : args;
+    const proc = spawn('ffmpeg', finalArgs, { cwd, shell: false });
     registerProc?.(proc);
     let stderr = '';
     proc.stderr?.on('data', (c: Buffer) => {
-      stderr = (stderr + c.toString('utf8')).slice(-8000);
+      const txt = c.toString('utf8');
+      stderr = (stderr + txt).slice(-8000);
+      if (onProgressTimeSec) {
+        const matches = [...txt.matchAll(/time=(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)/g)];
+        if (matches.length > 0) {
+          const m = matches[matches.length - 1];
+          const sec = Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
+          if (Number.isFinite(sec)) onProgressTimeSec(sec);
+        }
+      }
     });
     proc.on('error', (err) => reject(err));
     proc.on('close', (code) => {
@@ -787,4 +959,88 @@ export function spawnTrackedFfmpeg(
       else reject(new Error(`FFmpeg lỗi (${code}): ${stderr.slice(-500)}`));
     });
   });
+}
+
+export type StudioDefaultAudioPreset = 'lofi-calm' | 'soft-study' | 'soft-rain' | 'cafe-room';
+
+const STUDIO_DEFAULT_AUDIO_SPECS: Record<
+  StudioDefaultAudioPreset,
+  { lavfi: string; af: string; duration: number }
+> = {
+  'lofi-calm': {
+    // Gentle warm ambient pad cycling Cmaj7 / Fmaj7 overtones
+    lavfi:
+      'aevalsrc=0.14*sin(2*PI*220*t)+0.11*sin(2*PI*277.18*t)+0.09*sin(2*PI*329.63*t)+0.06*sin(2*PI*440*t)*(0.5+0.5*sin(2*PI*0.25*t)):s=44100',
+    af: 'lowpass=f=1100,afade=t=in:st=0:d=1.2,afade=t=out:st=22.5:d=1.5,volume=0.35',
+    duration: 24,
+  },
+  'soft-study': {
+    lavfi:
+      'aevalsrc=0.14*sin(2*PI*196*t)+0.11*sin(2*PI*246.94*t)+0.09*sin(2*PI*293.66*t)+0.05*sin(2*PI*392*t)*(0.5+0.5*cos(2*PI*0.2*t)):s=44100',
+    af: 'lowpass=f=950,afade=t=in:st=0:d=1.2,afade=t=out:st=22.5:d=1.5,volume=0.32',
+    duration: 24,
+  },
+  'soft-rain': {
+    lavfi: 'anoisesrc=color=pink:r=44100:a=0.45',
+    af: 'highpass=f=350,lowpass=f=2400,afade=t=in:st=0:d=1.0,afade=t=out:st=16.8:d=1.2,volume=0.22',
+    duration: 18,
+  },
+  'cafe-room': {
+    lavfi: 'anoisesrc=color=brown:r=44100:a=0.55',
+    af: 'highpass=f=120,lowpass=f=700,afade=t=in:st=0:d=1.0,afade=t=out:st=16.8:d=1.2,volume=0.28',
+    duration: 18,
+  },
+};
+
+const pendingDefaultAudioCache = new Map<string, Promise<string | null>>();
+
+export async function ensureDefaultStudioAudio(presetId: string): Promise<string | null> {
+  if (!presetId || presetId === 'none') return null;
+  if (!(presetId in STUDIO_DEFAULT_AUDIO_SPECS)) return null;
+  const spec = STUDIO_DEFAULT_AUDIO_SPECS[presetId as StudioDefaultAudioPreset];
+
+  const defaultsDir = path.resolve('.studio-tmp', 'defaults');
+  const outPath = path.join(defaultsDir, `${presetId}.mp3`);
+
+  try {
+    const st = await fs.promises.stat(outPath);
+    if (st.size > 1024) return outPath;
+  } catch {
+    // will synthesize
+  }
+
+  let job = pendingDefaultAudioCache.get(presetId);
+  if (!job) {
+    job = (async () => {
+      await fs.promises.mkdir(defaultsDir, { recursive: true });
+      const tmpPath = path.join(defaultsDir, `${presetId}.tmp.mp3`);
+      await spawnTrackedFfmpeg(
+        [
+          '-y',
+          '-f',
+          'lavfi',
+          '-t',
+          String(spec.duration),
+          '-i',
+          spec.lavfi,
+          '-af',
+          spec.af,
+          '-c:a',
+          'libmp3lame',
+          '-b:a',
+          '128k',
+          tmpPath,
+        ],
+        process.cwd(),
+      );
+      await fs.promises.rename(tmpPath, outPath);
+      return outPath;
+    })();
+    pendingDefaultAudioCache.set(presetId, job);
+  }
+  try {
+    return await job;
+  } finally {
+    pendingDefaultAudioCache.delete(presetId);
+  }
 }

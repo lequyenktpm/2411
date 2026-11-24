@@ -1,12 +1,12 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Code2, Database, Layers, X } from 'lucide-react';
+import { Clapperboard, Database, Film, Layers, Sparkles, X } from 'lucide-react';
 import { AudioSubtitleStudioModal } from './components/AudioSubtitleStudioModal';
 import { AutomationPipelinePanel, PresetId } from './components/AutomationPipelinePanel';
 import { BatchQueueModal } from './components/BatchQueueModal';
 import { ComponentDatabaseModal } from './components/ComponentDatabaseModal';
 import { EducationalStudioTab } from './components/EducationalStudioTab';
 import { EnglishReelsTab } from './components/EnglishReelsTab';
-import { PythonExportModal } from './components/PythonExportModal';
+import { GlobalOutputPanel, emitOutputUpdated } from './components/GlobalOutputPanel';
 import { StagePreview } from './components/StagePreview';
 import { TimelineAndInspector } from './components/TimelineAndInspector';
 import { choreographFromTranscript } from './engine/autoChoreographer';
@@ -43,6 +43,7 @@ import {
   SceneElement,
   ScenePlanDocument,
   TranscriptCue,
+  WatermarkOutroConfig,
   WordTiming,
 } from './engine/types';
 
@@ -52,7 +53,6 @@ export default function App() {
   const [currentTime, setCurrentTime] = useState<number>(4.8);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [selectedElementId, setSelectedElementId] = useState<string | null>(null);
-  const [isPythonModalOpen, setIsPythonModalOpen] = useState<boolean>(false);
   const [isBatchModalOpen, setIsBatchModalOpen] = useState<boolean>(false);
   const [isComponentDbOpen, setIsComponentDbOpen] = useState<boolean>(false);
   const [isAudioSubStudioOpen, setIsAudioSubStudioOpen] = useState<boolean>(false);
@@ -197,23 +197,31 @@ export default function App() {
   const handleApplyTranscript = useCallback(
     (cues: TranscriptCue[], title: string) => {
       setIsPlaying(false);
-      const built = choreographFromTranscript(cues, {
-        title,
-        theme: isDarkCanvasTheme(project.theme) ? 'pastel-sunrise' : project.theme,
-        audioFileName,
+      setProject((prev) => {
+        const built = choreographFromTranscript(cues, {
+          title,
+          theme: isDarkCanvasTheme(prev.theme) ? 'pastel-sunrise' : prev.theme,
+          compositionId: prev.compositionId,
+          audioFileName,
+        });
+        const nextDur = audioDurationSec
+          ? Number(Math.max(built.duration, audioDurationSec).toFixed(2))
+          : built.duration;
+        return {
+          ...built,
+          duration: nextDur,
+          backgroundImage: prev.backgroundImage,
+          watermark: prev.watermark,
+        };
       });
-      const next: LessonProject = audioDurationSec
-        ? { ...built, duration: Number(Math.max(built.duration, audioDurationSec).toFixed(2)) }
-        : built;
-      setProject(next);
       const firstCue = cues[0];
       const previewTime = firstCue
         ? Number((firstCue.start + Math.min(0.5, (firstCue.end - firstCue.start) * 0.45)).toFixed(2))
         : 0.4;
-      setCurrentTime(Math.min(next.duration, previewTime));
+      setCurrentTime(previewTime);
       setSelectedElementId(null);
     },
-    [project.theme, audioFileName, audioDurationSec],
+    [audioFileName, audioDurationSec],
   );
 
   const handleApplyScenePlan = useCallback(
@@ -228,12 +236,18 @@ export default function App() {
       const built = scenePlanToProject(words, flexPlan, {
         title,
         theme: flexPlan.theme,
+        compositionId: flexPlan.compositionId ?? project.compositionId,
         audioFileName,
         cuesOverride,
       });
-      const next: LessonProject = audioDurationSec
-        ? { ...built, duration: Number(Math.max(built.duration, audioDurationSec).toFixed(2)) }
-        : built;
+      const next: LessonProject = {
+        ...built,
+        duration: audioDurationSec
+          ? Number(Math.max(built.duration, audioDurationSec).toFixed(2))
+          : built.duration,
+        backgroundImage: project.backgroundImage,
+        watermark: project.watermark,
+      };
       setProject(next);
       const firstVisual = next.elements.find((e) => e.type !== 'karaoke-card');
       const firstWord = words[0];
@@ -246,7 +260,7 @@ export default function App() {
       setSelectedElementId(null);
       return next;
     },
-    [audioFileName, audioDurationSec],
+    [audioFileName, audioDurationSec, project.backgroundImage, project.compositionId, project.watermark],
   );
 
   const handleSeek = useCallback(
@@ -279,24 +293,29 @@ export default function App() {
         setAudioFileName(nextAudioFile.name);
         setAudioDurationSec(null);
       }
-      const nextCues = cues.length > 0 ? cues : project.cues;
-      const built = choreographFromTranscript(nextCues, {
-        title: title?.trim() || project.title,
-        theme: project.theme,
-        audioFileName: nextAudioFile?.name ?? audioFileName,
+      setProject((prev) => {
+        const nextCues = cues.length > 0 ? cues : prev.cues;
+        const built = choreographFromTranscript(nextCues, {
+          title: title?.trim() || prev.title,
+          theme: prev.theme,
+          compositionId: prev.compositionId,
+          audioFileName: nextAudioFile?.name ?? audioFileName,
+        });
+        return {
+          ...built,
+          backgroundImage: prev.backgroundImage,
+          watermark: prev.watermark,
+        };
       });
-      setProject((prev) => ({
-        ...built,
-        backgroundImage: prev.backgroundImage,
-      }));
-      const firstCue = nextCues[0];
+      const nextCuesForTime = cues.length > 0 ? cues : project.cues;
+      const firstCue = nextCuesForTime[0];
       const previewTime = firstCue
         ? Number((firstCue.start + Math.min(0.5, (firstCue.end - firstCue.start) * 0.45)).toFixed(2))
         : 0.4;
-      setCurrentTime(Math.min(built.duration, previewTime));
+      setCurrentTime(previewTime);
       setSelectedElementId(null);
     },
-    [project.title, project.theme, project.cues, audioFileName],
+    [project.cues, audioFileName],
   );
 
   const handleReceiveFromReelsTab = useCallback(
@@ -332,6 +351,30 @@ export default function App() {
       ...prev,
       backgroundImage: bg,
     }));
+  }, []);
+
+  const handleChangeWatermark = useCallback((wm: WatermarkOutroConfig) => {
+    setProject((prev) => {
+      const cuesMax = prev.cues.reduce((mx, c) => Math.max(mx, c.end), 0);
+      const elMax = prev.elements.reduce((mx, el) => Math.max(mx, el.endTime), 0);
+      const prevHasOutro = Boolean(
+        prev.watermark &&
+          prev.watermark.outroSeconds > 0 &&
+          (prev.watermark.outroLine1.trim() || prev.watermark.outroLine2.trim()),
+      );
+      const prevOutroSec = prevHasOutro ? Number(prev.watermark?.outroSeconds || 0) : 0;
+      const baseDur = Math.max(3, cuesMax, elMax, Number((prev.duration - prevOutroSec).toFixed(2)));
+      const nextHasOutro = Boolean(
+        wm.outroSeconds > 0 && (wm.outroLine1.trim() || wm.outroLine2.trim()),
+      );
+      const nextOutroSec = nextHasOutro ? Math.max(0, Number(wm.outroSeconds || 0)) : 0;
+      const nextDuration = Number((baseDur + nextOutroSec).toFixed(2));
+      return {
+        ...prev,
+        duration: nextDuration,
+        watermark: wm,
+      };
+    });
   }, []);
 
   const handleRandomizeComposition = useCallback(() => {
@@ -495,8 +538,10 @@ export default function App() {
           {
             signal: controller.signal,
             alsoSaveToServerOutput: true,
+            sourceTab: 'Studio 9:16',
           },
         );
+        emitOutputUpdated({ sourceTab: 'Studio 9:16' });
         try {
           const outRes = await fetch('/api/output/files');
           const outData = (await outRes.json().catch(() => ({}))) as {
@@ -567,88 +612,93 @@ export default function App() {
         />
       )}
 
-      {/* Top Bar Contract: 3 zones separated by gap-8 */}
-      <header className="bg-white border-b border-slate-200 px-6 py-3.5 flex items-center justify-between gap-8">
-        <a
-          href="#studio"
-          className="text-lg font-bold tracking-tight text-slate-900 font-display whitespace-nowrap shrink-0"
-        >
-          KineticSub Studio
-        </a>
+      {/* Modern Studio Navigation Bar */}
+      <header className="sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-slate-200/90 px-4 lg:px-6 py-2.5 shadow-xs">
+        <div className="max-w-[1400px] mx-auto flex flex-wrap items-center justify-between gap-3">
+          <a
+            href="#studio"
+            onClick={(e) => {
+              e.preventDefault();
+              setActiveTab('studio');
+            }}
+            className="flex items-center gap-2.5 shrink-0 group"
+          >
+            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-indigo-600 via-violet-600 to-fuchsia-600 text-white flex items-center justify-center shadow-sm group-hover:shadow transition-shadow">
+              <Clapperboard className="w-4 h-4" />
+            </div>
+            <div className="leading-tight">
+              <div className="text-base font-bold tracking-tight text-slate-900 font-display">
+                KineticSub Studio
+              </div>
+              <div className="text-[10px] font-medium text-slate-500">
+                Video Học Ngoại Ngữ 9:16
+              </div>
+            </div>
+          </a>
 
-        <nav className="flex items-center gap-6 text-sm font-medium text-slate-600 overflow-x-auto">
-          <button
-            type="button"
-            onClick={() => setActiveTab('studio')}
-            className={`transition-colors whitespace-nowrap shrink-0 pb-0.5 ${
-              activeTab === 'studio'
-                ? 'text-indigo-700 font-semibold border-b-2 border-indigo-600'
-                : 'hover:text-slate-900'
-            }`}
+          <nav
+            aria-label="Menu chính"
+            className="flex items-center gap-1.5 bg-slate-100/90 p-1 rounded-2xl border border-slate-200/80 overflow-x-auto max-w-full"
           >
-            Studio Video 9:16
-          </button>
-          <span aria-hidden="true" className="text-slate-300">·</span>
-          <button
-            type="button"
-            onClick={() => setActiveTab('reels')}
-            className={`transition-colors whitespace-nowrap shrink-0 pb-0.5 ${
-              activeTab === 'reels'
-                ? 'text-indigo-700 font-semibold border-b-2 border-indigo-600'
-                : 'hover:text-slate-900'
-            }`}
-          >
-            English Reels Studio
-          </button>
-          <span aria-hidden="true" className="text-slate-300">·</span>
-          <button
-            type="button"
-            onClick={() => setActiveTab('edu-studio')}
-            className={`transition-colors whitespace-nowrap shrink-0 pb-0.5 ${
-              activeTab === 'edu-studio'
-                ? 'text-indigo-700 font-semibold border-b-2 border-indigo-600'
-                : 'hover:text-slate-900'
-            }`}
-          >
-            Edu Studio 1.19 &amp; Output
-          </button>
-          <span aria-hidden="true" className="text-slate-300 hidden md:inline">·</span>
-          <button
-            type="button"
-            onClick={() => setIsComponentDbOpen(true)}
-            className="hidden md:inline-flex items-center gap-1.5 hover:text-slate-900 transition-colors whitespace-nowrap shrink-0"
-          >
-            <Database className="w-3.5 h-3.5 text-indigo-600" />
-            <span>Kho Component</span>
-          </button>
-          <span aria-hidden="true" className="text-slate-300 hidden md:inline">·</span>
-          <button
-            type="button"
-            onClick={() => setIsBatchModalOpen(true)}
-            className="hidden md:inline-flex items-center gap-1.5 hover:text-slate-900 transition-colors whitespace-nowrap shrink-0"
-          >
-            <Layers className="w-3.5 h-3.5 text-indigo-600" />
-            <span>Chạy Batch Hàng Loạt</span>
-          </button>
-        </nav>
+            <button
+              type="button"
+              onClick={() => setActiveTab('studio')}
+              className={`inline-flex items-center gap-2 px-3.5 py-2 text-xs font-semibold rounded-xl transition-all whitespace-nowrap shrink-0 ${
+                activeTab === 'studio'
+                  ? 'bg-white text-indigo-700 shadow-sm ring-1 ring-slate-200/80'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-white/60'
+              }`}
+            >
+              <Clapperboard className={`w-3.5 h-3.5 ${activeTab === 'studio' ? 'text-indigo-600' : 'text-slate-400'}`} />
+              <span>Studio Video 9:16</span>
+            </button>
 
-        <div className="flex items-center gap-2 shrink-0">
-          <button
-            type="button"
-            onClick={() => setIsComponentDbOpen(true)}
-            className="md:hidden inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-700 bg-slate-100 rounded-lg whitespace-nowrap shrink-0"
-          >
-            <Database className="w-3.5 h-3.5" />
-            <span>Kho</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => setIsPythonModalOpen(true)}
-            className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 transition-colors whitespace-nowrap shrink-0"
-          >
-            <Code2 className="w-3.5 h-3.5" />
-            <span>Xuất Code Python</span>
-          </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('reels')}
+              className={`inline-flex items-center gap-2 px-3.5 py-2 text-xs font-semibold rounded-xl transition-all whitespace-nowrap shrink-0 ${
+                activeTab === 'reels'
+                  ? 'bg-white text-violet-700 shadow-sm ring-1 ring-slate-200/80'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-white/60'
+              }`}
+            >
+              <Sparkles className={`w-3.5 h-3.5 ${activeTab === 'reels' ? 'text-violet-600' : 'text-slate-400'}`} />
+              <span>English Reels Studio</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab('edu-studio')}
+              className={`inline-flex items-center gap-2 px-3.5 py-2 text-xs font-semibold rounded-xl transition-all whitespace-nowrap shrink-0 ${
+                activeTab === 'edu-studio'
+                  ? 'bg-white text-emerald-700 shadow-sm ring-1 ring-slate-200/80'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-white/60'
+              }`}
+            >
+              <Film className={`w-3.5 h-3.5 ${activeTab === 'edu-studio' ? 'text-emerald-600' : 'text-slate-400'}`} />
+              <span>Edu Studio 1.19 &amp; Output</span>
+            </button>
+          </nav>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => setIsComponentDbOpen(true)}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-slate-700 bg-white border border-slate-200 rounded-xl hover:border-indigo-300 hover:bg-indigo-50/50 hover:text-indigo-700 transition-all shadow-xs whitespace-nowrap shrink-0"
+            >
+              <Database className="w-3.5 h-3.5 text-indigo-600" />
+              <span>Kho Component</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setIsBatchModalOpen(true)}
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-gradient-to-r from-indigo-600 to-violet-600 rounded-xl hover:from-indigo-700 hover:to-violet-700 transition-all shadow-sm whitespace-nowrap shrink-0"
+            >
+              <Layers className="w-3.5 h-3.5" />
+              <span>Chạy Batch Hàng Loạt</span>
+            </button>
+          </div>
         </div>
       </header>
 
@@ -691,6 +741,7 @@ export default function App() {
             <div className="lg:col-span-7 min-h-0">
               <AutomationPipelinePanel
                 project={project}
+                audioUrl={audioUrl}
                 audioFileName={audioFileName}
                 currentTime={currentTime}
                 mp4Settings={mp4Settings}
@@ -705,6 +756,7 @@ export default function App() {
                 onUploadAudio={handleUploadAudio}
                 onClearAudio={handleClearAudio}
                 onApplyTranscript={handleApplyTranscript}
+                onApplyAudioAndCues={handleApplyGeneratedAudioAndCues}
                 onApplyScenePlan={handleApplyScenePlan}
                 onApplyAndRenderVideo={handleApplyAndRenderVideo}
                 onSeek={handleSeek}
@@ -757,6 +809,7 @@ export default function App() {
                   })
                 }
                 onChangeBackgroundImage={handleChangeBackgroundImage}
+                onChangeWatermark={handleChangeWatermark}
                 onSelectElement={setSelectedElementId}
                 onMoveElement={handleMoveElement}
                 onExportVideo={() => void handleExportVideo()}
@@ -792,17 +845,19 @@ export default function App() {
             <div>
               <p className="text-xs font-semibold text-indigo-600 mb-1">03. Render tự động 9:16</p>
               <h3 className="text-sm font-semibold text-slate-900 mb-1.5">
-                Render &amp; tải MP4 trực tiếp hoặc Python
+                Render &amp; lưu MP4 trực tiếp
               </h3>
               <p className="text-xs text-slate-600 leading-relaxed">
                 Chọn độ phân giải (540p–2K), ảnh nền 9:16, chất lượng &amp; FPS để render file{' '}
-                <code>.mp4</code> có tiếng ngay trên trình duyệt, hoặc tải gói Python (
-                <code>video_maker/</code>) chạy offline.
+                <code>.mp4</code> có tiếng ngay trên trình duyệt, hoặc ghép &amp; mix âm thanh nâng cao tại Edu Studio 1.19.
               </p>
             </div>
           </section>
         </main>
       )}
+
+      {/* Global Output Panel visible across ALL tabs at the bottom */}
+      <GlobalOutputPanel activeTab={activeTab} />
 
       {/* Optional Advanced Editor Modal (Hidden by default so user doesn't have to design) */}
       {isAdvancedOpen && (
@@ -864,12 +919,6 @@ export default function App() {
         initialTranscriptText={cuesToBlockTranscript(project.cues)}
         onClose={() => setIsAudioSubStudioOpen(false)}
         onApplyAudioAndCues={handleApplyGeneratedAudioAndCues}
-      />
-
-      <PythonExportModal
-        isOpen={isPythonModalOpen}
-        project={project}
-        onClose={() => setIsPythonModalOpen(false)}
       />
     </div>
   );

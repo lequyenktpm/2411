@@ -19,6 +19,7 @@ import {
   Plus,
   RotateCcw,
   Sparkles,
+  Stamp,
   Square,
   Trash2,
   Volume2,
@@ -45,9 +46,15 @@ import {
   sanitizeTtsSpeech,
 } from '../engine/englishReelsEngine';
 import { LAYOUT_COMPOSITIONS } from '../engine/illustrationLayouts';
-import { DEFAULT_MP4_EXPORT_SETTINGS } from '../engine/mp4Config';
+import {
+  DEFAULT_MP4_EXPORT_SETTINGS,
+  ExportFpsOption,
+  ExportQualityId,
+  ExportResolutionId,
+} from '../engine/mp4Config';
 import { ExportAbortedError, exportProjectToVideo } from '../engine/mp4Exporter';
 import { FlexibleSceneDocument } from '../engine/scenePlanAdapter';
+import { synthesizeAudioWithProgressJob } from '../engine/ttsSyncHelper';
 import {
   CANVAS_THEMES,
   CanvasThemeId,
@@ -55,12 +62,15 @@ import {
   IllustrationVariant,
   LayoutCompositionId,
   LessonProject,
+  WatermarkCorner,
+  WatermarkOutroConfig,
 } from '../engine/types';
 import {
   ALL_SCENE_ICONS,
   getEffectiveVectorCatalog,
 } from '../engine/vectorComponentDb';
 import { TtsProviderInfo } from './AudioSubtitleStudioModal';
+import { emitOutputUpdated } from './GlobalOutputPanel';
 
 interface EnglishReelsTabProps {
   onSendToStudio: (project: LessonProject, audioFile: File | null) => void;
@@ -150,8 +160,20 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
   const [isGeneratingAudio, setIsGeneratingAudio] = useState(false);
   const [isGeneratingAiCards, setIsGeneratingAiCards] = useState(false);
   const [isPreviewingVoice, setIsPreviewingVoice] = useState(false);
+  const [ttsProgress, setTtsProgress] = useState(0);
+  const [ttsStageLabel, setTtsStageLabel] = useState('');
   const [studioError, setStudioError] = useState<string | null>(null);
   const [previewAudioUrl, setPreviewAudioUrl] = useState<string | null>(null);
+  const [watermarkConfig, setWatermarkConfig] = useState<WatermarkOutroConfig>({
+    watermarkEnabled: false,
+    watermarkText: '@EnglishReels',
+    watermarkCorner: 'bottom-right',
+    watermarkOpacity: 0.7,
+    outroSeconds: 0,
+    outroLine1: 'Thanks for watching!',
+    outroLine2: 'Follow for more English tips',
+  });
+  const [isWatermarkExpanded, setIsWatermarkExpanded] = useState(false);
 
   // Live Video 9:16 preview & direct MP4 export state
   const [previewViewMode, setPreviewViewMode] = useState<'video' | 'cards'>('video');
@@ -165,6 +187,9 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
   const [exportProgress, setExportProgress] = useState(0);
   const [exportStageLabel, setExportStageLabel] = useState('');
   const [exportNotice, setExportNotice] = useState<string | null>(null);
+  const [mp4Resolution, setMp4Resolution] = useState<ExportResolutionId>(DEFAULT_MP4_EXPORT_SETTINGS.resolution);
+  const [mp4Quality, setMp4Quality] = useState<ExportQualityId>(DEFAULT_MP4_EXPORT_SETTINGS.quality);
+  const [mp4Fps, setMp4Fps] = useState<ExportFpsOption>(DEFAULT_MP4_EXPORT_SETTINGS.fps);
 
   const videoCanvasRef = useRef<HTMLCanvasElement>(null);
   const lessonAudioRef = useRef<HTMLAudioElement>(null);
@@ -232,6 +257,7 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
             : undefined,
         audioFileName: generatedAudioFile?.name,
         sceneJsonOverride,
+        watermark: watermarkConfig,
       }),
     [
       cards,
@@ -242,6 +268,7 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
       generatedTimings,
       generatedAudioFile?.name,
       sceneJsonOverride,
+      watermarkConfig,
     ],
   );
 
@@ -505,6 +532,8 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
   const handlePreviewSingleCardVoice = async () => {
     if (!activeCard) return;
     setIsPreviewingVoice(true);
+    setTtsProgress(5);
+    setTtsStageLabel('Đang tạo audio nghe thử thẻ...');
     setStudioError(null);
     try {
       const segments: Array<{ id: string; text: string; pauseAfterSec?: number }> = [];
@@ -522,22 +551,20 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
           activeCard.content;
         segments.push({ id: activeCard.id, text: cleanSpeech });
       }
-      const res = await fetch('/api/tts/synthesize', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const data = await synthesizeAudioWithProgressJob(
+        {
           provider: ttsProvider,
           voice: ttsVoice,
           lang: selectedVoiceLang,
           rate: ttsRate,
           segments,
-        }),
-      });
-      const data = await parseApiJson<{ audioBase64?: string; error?: string }>(
-        res,
-        'Không phát thử được TTS',
+        },
+        (pct, lbl) => {
+          setTtsProgress(pct);
+          setTtsStageLabel(lbl);
+        },
       );
-      if (!res.ok || !data?.audioBase64) {
+      if (!data?.audioBase64) {
         throw new Error(data?.error || 'Không phát thử được TTS.');
       }
       const file = base64ToMp3File(data.audioBase64, 'preview.mp3');
@@ -550,6 +577,8 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
       setStudioError(err instanceof Error ? err.message : 'Lỗi phát thử giọng đọc.');
     } finally {
       setIsPreviewingVoice(false);
+      setTtsProgress(0);
+      setTtsStageLabel('');
     }
   };
 
@@ -590,25 +619,22 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
       }
     }
 
-    const res = await fetch('/api/tts/synthesize', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    setTtsProgress(4);
+    setTtsStageLabel('Đang tạo giọng đọc bài học...');
+    const data = await synthesizeAudioWithProgressJob(
+      {
         provider: ttsProvider,
         voice: ttsVoice,
         lang: selectedVoiceLang,
         rate: ttsRate,
         segments,
-      }),
-    });
-    const data = await parseApiJson<{
-      audioBase64?: string;
-      segmentDurations?: number[];
-      spokenDurations?: number[];
-      pauseDurations?: number[];
-      error?: string;
-    }>(res, 'Không thể tạo audio TTS từ server');
-    if (!res.ok || !data?.audioBase64) {
+      },
+      (pct, lbl) => {
+        setTtsProgress(pct);
+        setTtsStageLabel(lbl);
+      },
+    );
+    if (!data?.audioBase64) {
       throw new Error(data?.error || 'Không thể tạo audio TTS từ server.');
     }
 
@@ -654,6 +680,7 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
       cardTimings: timings,
       audioFileName: safeFileName,
       sceneJsonOverride,
+      watermark: watermarkConfig,
     });
     return { audioFile, durations, timings, project: proj };
   };
@@ -673,6 +700,8 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
       setStudioError(err instanceof Error ? err.message : 'Lỗi khi tạo Audio TTS.');
     } finally {
       setIsGeneratingAudio(false);
+      setTtsProgress(0);
+      setTtsStageLabel('');
     }
   };
 
@@ -710,13 +739,20 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
           setExportProgress(progress);
           setExportStageLabel(stageLabel);
         },
-        DEFAULT_MP4_EXPORT_SETTINGS,
+        {
+          aspectRatio: '9:16',
+          resolution: mp4Resolution,
+          quality: mp4Quality,
+          fps: mp4Fps,
+        },
         {
           signal: controller.signal,
           alsoSaveToServerOutput: true,
+          sourceTab: 'English Reels',
         },
       );
 
+      emitOutputUpdated({ sourceTab: 'English Reels' });
       setExportNotice(
         `Đã xuất thành công ${result.fileName}${result.savedPath ? ` (lưu tại ${result.savedPath})` : ''}!`,
       );
@@ -1642,6 +1678,136 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
             )
           )}
 
+          {/* Watermark & Outro (Tùy chọn) */}
+          <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-2 text-[11px]">
+            <div className="flex items-center justify-between gap-2">
+              <button
+                type="button"
+                onClick={() => setIsWatermarkExpanded((v) => !v)}
+                className="inline-flex items-center gap-1.5 font-semibold text-slate-800 hover:text-indigo-700"
+              >
+                <Stamp className="w-3.5 h-3.5 text-indigo-600" />
+                <span>Watermark &amp; Outro (Tùy chọn)</span>
+                {(watermarkConfig.watermarkEnabled || watermarkConfig.outroSeconds > 0) && (
+                  <span className="px-1.5 py-0.5 text-[9px] font-bold bg-emerald-100 text-emerald-700 rounded">
+                    Bật
+                  </span>
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsWatermarkExpanded((v) => !v)}
+                className="text-[10px] font-medium text-indigo-600 hover:underline"
+              >
+                {isWatermarkExpanded ? 'Thu gọn' : 'Chỉnh sửa'}
+              </button>
+            </div>
+            {isWatermarkExpanded && (
+              <div className="pt-2 border-t border-slate-200/80 space-y-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <label className="inline-flex items-center gap-1.5 font-medium text-slate-700 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={watermarkConfig.watermarkEnabled}
+                      onChange={(e) =>
+                        setWatermarkConfig((prev) => ({
+                          ...prev,
+                          watermarkEnabled: e.target.checked,
+                        }))
+                      }
+                      className="rounded border-slate-300 text-indigo-600"
+                    />
+                    <span>Hiện Watermark</span>
+                  </label>
+                  <input
+                    type="text"
+                    aria-label="Watermark Reels"
+                    value={watermarkConfig.watermarkText}
+                    onChange={(e) =>
+                      setWatermarkConfig((prev) => ({
+                        ...prev,
+                        watermarkEnabled: true,
+                        watermarkText: e.target.value,
+                      }))
+                    }
+                    placeholder="@EnglishReels"
+                    className="flex-1 min-w-[90px] px-2 py-1 bg-white border border-slate-200 rounded"
+                  />
+                  <select
+                    aria-label="Góc Watermark Reels"
+                    value={watermarkConfig.watermarkCorner}
+                    onChange={(e) =>
+                      setWatermarkConfig((prev) => ({
+                        ...prev,
+                        watermarkCorner: e.target.value as WatermarkCorner,
+                      }))
+                    }
+                    className="px-2 py-1 bg-white border border-slate-200 rounded"
+                  >
+                    <option value="top-left">Trên Trái</option>
+                    <option value="top-right">Trên Phải</option>
+                    <option value="bottom-left">Dưới Trái</option>
+                    <option value="bottom-right">Dưới Phải</option>
+                  </select>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-slate-600">Độ mờ: {Math.round(watermarkConfig.watermarkOpacity * 100)}%</span>
+                  <input
+                    type="range"
+                    min={0.15}
+                    max={1}
+                    step={0.05}
+                    value={watermarkConfig.watermarkOpacity}
+                    onChange={(e) =>
+                      setWatermarkConfig((prev) => ({
+                        ...prev,
+                        watermarkOpacity: Number(e.target.value),
+                      }))
+                    }
+                    className="w-20 accent-indigo-600 h-1"
+                  />
+                  <span className="text-slate-600 ml-auto">Outro (s):</span>
+                  <input
+                    type="number"
+                    min={0}
+                    max={10}
+                    step={0.5}
+                    value={watermarkConfig.outroSeconds}
+                    onChange={(e) =>
+                      setWatermarkConfig((prev) => ({
+                        ...prev,
+                        outroSeconds: Math.max(0, Math.min(10, Number(e.target.value) || 0)),
+                      }))
+                    }
+                    className="w-14 px-1.5 py-0.5 bg-white border border-slate-200 rounded font-mono"
+                  />
+                </div>
+                {watermarkConfig.outroSeconds > 0 && (
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <input
+                      type="text"
+                      value={watermarkConfig.outroLine1}
+                      onChange={(e) =>
+                        setWatermarkConfig((prev) => ({ ...prev, outroLine1: e.target.value }))
+                      }
+                      placeholder="Outro dòng 1"
+                      className="px-2 py-1 bg-white border border-slate-200 rounded"
+                    />
+                    <input
+                      type="text"
+                      value={watermarkConfig.outroLine2}
+                      onChange={(e) =>
+                        setWatermarkConfig((prev) => ({ ...prev, outroLine2: e.target.value }))
+                      }
+                      placeholder="Outro dòng 2"
+                      className="px-2 py-1 bg-white border border-slate-200 rounded"
+                    />
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
           {/* Audio Engine & Video Output Settings */}
           <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-2.5">
             <div className="grid grid-cols-2 gap-2">
@@ -1655,17 +1821,11 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
                   className="w-full px-2 py-1.5 text-xs bg-white border border-slate-200 rounded-lg"
                 >
                   <option value="auto">Tự động miễn phí (Edge → Google → Polly)</option>
-                  {ttsProviders
-                    .filter(
-                      (p) =>
-                        (p.id !== 'gemini' || hasGeminiKey) &&
-                        (p.id !== 'elevenlabs' || hasElevenLabsKey),
-                    )
-                    .map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.name}
-                      </option>
-                    ))}
+                  {ttsProviders.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
                 </select>
               </div>
               <div>
@@ -1685,6 +1845,15 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
                 </select>
               </div>
             </div>
+
+            {((ttsProvider === 'elevenlabs' && !hasElevenLabsKey) ||
+              (ttsProvider === 'gemini' && !hasGeminiKey)) && (
+              <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
+                {ttsProvider === 'elevenlabs'
+                  ? 'Cần thiết lập ELEVENLABS_API_KEY trong Environment Secrets / .env trên server để đọc bằng ElevenLabs.'
+                  : 'Cần thiết lập GEMINI_API_KEY trong Environment Secrets / .env trên server để đọc bằng Gemini Flash TTS.'}
+              </p>
+            )}
 
             <div>
               <input
@@ -1733,7 +1902,84 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
                 </select>
               </div>
             </div>
+            <div className="grid grid-cols-3 gap-2 pt-1 border-t border-slate-200/80">
+              <div>
+                <label className="block text-[10px] font-semibold text-slate-600 mb-1">
+                  Độ phân giải
+                </label>
+                <select
+                  value={mp4Resolution}
+                  onChange={(e) => setMp4Resolution(e.target.value as ExportResolutionId)}
+                  className="w-full px-2 py-1 text-[11px] bg-white border border-slate-200 rounded-lg"
+                >
+                  <option value="540p">540p</option>
+                  <option value="720p">720p (HD)</option>
+                  <option value="1080p">1080p (FHD)</option>
+                  <option value="1440p">1440p (2K)</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-[10px] font-semibold text-slate-600 mb-1">
+                  Chất lượng
+                </label>
+                <select
+                  value={mp4Quality}
+                  onChange={(e) => setMp4Quality(e.target.value as ExportQualityId)}
+                  className="w-full px-2 py-1 text-[11px] bg-white border border-slate-200 rounded-lg"
+                >
+                  <option value="standard">Chuẩn</option>
+                  <option value="high">Cao</option>
+                  <option value="ultra">Ultra</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-[10px] font-semibold text-slate-600 mb-1">
+                  FPS
+                </label>
+                <select
+                  value={mp4Fps}
+                  onChange={(e) => setMp4Fps(Number(e.target.value) as ExportFpsOption)}
+                  className="w-full px-2 py-1 text-[11px] bg-white border border-slate-200 rounded-lg"
+                >
+                  <option value={24}>24 fps</option>
+                  <option value={30}>30 fps</option>
+                  <option value={60}>60 fps</option>
+                </select>
+              </div>
+            </div>
           </div>
+
+          {(isGeneratingAudio || isPreviewingVoice) && (
+            <div className="p-2.5 rounded-lg bg-indigo-50 border border-indigo-200 space-y-1.5">
+              <div className="flex items-center justify-between text-[11px] font-medium text-indigo-900">
+                <span className="truncate">{ttsStageLabel || 'Đang tổng hợp Audio TTS...'}</span>
+                <span className="font-mono tabular-nums shrink-0 ml-2">{ttsProgress}%</span>
+              </div>
+              <div className="w-full h-1.5 bg-indigo-200 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-indigo-600 transition-all duration-200"
+                  style={{ width: `${Math.max(4, ttsProgress)}%` }}
+                />
+              </div>
+            </div>
+          )}
+
+          {isExportingVideo && (
+            <div className="p-2.5 rounded-lg bg-emerald-50 border border-emerald-200 space-y-1.5">
+              <div className="flex items-center justify-between text-[11px] font-medium text-emerald-900">
+                <span className="truncate">{exportStageLabel || 'Đang render Video MP4...'}</span>
+                <span className="font-mono font-bold tabular-nums shrink-0 ml-2">
+                  {Math.round(exportProgress * 100)}%
+                </span>
+              </div>
+              <div className="w-full h-1.5 bg-emerald-200 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-emerald-600 transition-all duration-200"
+                  style={{ width: `${Math.max(4, Math.round(exportProgress * 100))}%` }}
+                />
+              </div>
+            </div>
+          )}
 
           {studioError && (
             <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg p-2.5">
@@ -1759,7 +2005,13 @@ export const EnglishReelsTab: React.FC<EnglishReelsTabProps> = ({ onSendToStudio
                 ) : (
                   <Volume2 className="w-3.5 h-3.5" />
                 )}
-                <span>{generatedAudioFile ? 'Tạo lại Audio & Xem' : 'Tạo Audio & Xem Video'}</span>
+                <span>
+                  {isGeneratingAudio
+                    ? `Đang tạo Audio ${ttsProgress}%...`
+                    : generatedAudioFile
+                      ? 'Tạo lại Audio & Xem'
+                      : 'Tạo Audio & Xem Video'}
+                </span>
               </button>
 
               {isExportingVideo ? (

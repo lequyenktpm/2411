@@ -15,8 +15,14 @@ import {
   Sparkles,
   Square,
   Upload,
+  Volume2,
 } from 'lucide-react';
 import { buildSceneGenerationPrompt } from '../engine/aiPromptBuilder';
+import {
+  fetchTtsVoicesCatalog,
+  synthesizeAudioAndSyncCues,
+  TtsProviderItem,
+} from '../engine/ttsSyncHelper';
 import type { PromptVideoStyle } from '../engine/aiPromptBuilder';
 import { subscribeCustomComponents } from '../engine/customComponentStore';
 import { LAYOUT_COMPOSITIONS, pickRandomComposition } from '../engine/illustrationLayouts';
@@ -60,6 +66,7 @@ export type PresetId = 'jp-en' | 'water' | 'ed' | '3d' | 'xun';
 
 interface AutomationPipelinePanelProps {
   project: LessonProject;
+  audioUrl?: string | null;
   audioFileName?: string;
   currentTime: number;
   isExportingVideo: boolean;
@@ -74,6 +81,7 @@ interface AutomationPipelinePanelProps {
   onUploadAudio: (file: File) => void;
   onClearAudio: () => void;
   onApplyTranscript: (cues: TranscriptCue[], title: string) => void;
+  onApplyAudioAndCues?: (audioFile: File | null, cues: TranscriptCue[], title?: string) => void;
   onApplyScenePlan: (
     words: WordTiming[],
     plan: ScenePlanDocument,
@@ -94,6 +102,7 @@ interface AutomationPipelinePanelProps {
 
 export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = ({
   project,
+  audioUrl,
   audioFileName,
   currentTime,
   isExportingVideo,
@@ -108,6 +117,7 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
   onUploadAudio,
   onClearAudio,
   onApplyTranscript,
+  onApplyAudioAndCues,
   onApplyScenePlan,
   onApplyAndRenderVideo,
   onSeek,
@@ -135,8 +145,52 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [renderNotice, setRenderNotice] = useState<string | null>(null);
 
+  // Inline TTS synthesis & auto-sync state (mirrors English Reels Studio)
+  const [ttsProviders, setTtsProviders] = useState<TtsProviderItem[]>([]);
+  const [hasGeminiKey, setHasGeminiKey] = useState(false);
+  const [hasElevenLabsKey, setHasElevenLabsKey] = useState(false);
+  const [inlineProvider, setInlineProvider] = useState('auto');
+  const [inlineVoice, setInlineVoice] = useState('en-US-JennyNeural');
+  const [inlineRate, setInlineRate] = useState(1.0);
+  const [inlineWhisperSync, setInlineWhisperSync] = useState(true);
+  const [isGeneratingInlineAudio, setIsGeneratingInlineAudio] = useState(false);
+  const [inlineTtsProgress, setInlineTtsProgress] = useState(0);
+  const [inlineTtsStageLabel, setInlineTtsStageLabel] = useState('');
+  const [inlineTtsNotice, setInlineTtsNotice] = useState<string | null>(null);
+  const [inlineGeneratedSrt, setInlineGeneratedSrt] = useState<string | null>(null);
+
   const audioInputRef = useRef<HTMLInputElement>(null);
   const transcriptInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    void fetchTtsVoicesCatalog()
+      .then((res) => {
+        setTtsProviders(res.providers);
+        setHasGeminiKey(res.hasGeminiKey);
+        setHasElevenLabsKey(res.hasElevenLabsKey);
+      })
+      .catch(() => undefined);
+  }, []);
+
+  const inlineAvailableVoices = useMemo(() => {
+    if (inlineProvider === 'auto') {
+      return ttsProviders.flatMap((p) => {
+        if (p.id === 'gemini' && !hasGeminiKey) return [];
+        if (p.id === 'elevenlabs' && !hasElevenLabsKey) return [];
+        return p.voices;
+      });
+    }
+    return ttsProviders.find((p) => p.id === inlineProvider)?.voices ?? [];
+  }, [ttsProviders, inlineProvider, hasGeminiKey, hasElevenLabsKey]);
+
+  useEffect(() => {
+    if (
+      inlineAvailableVoices.length > 0 &&
+      !inlineAvailableVoices.some((v) => v.id === inlineVoice)
+    ) {
+      setInlineVoice(inlineAvailableVoices[0].id);
+    }
+  }, [inlineAvailableVoices, inlineVoice]);
 
   useEffect(() => {
     return subscribeCustomComponents(() => setDbVersion((v) => v + 1));
@@ -237,11 +291,87 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
     }
   };
 
+  const parseTranscriptOrPlainLines = (text: string): TranscriptCue[] => {
+    const parsed = parseTranscriptAuto(text);
+    if (parsed.length > 0) return parsed;
+    const lines = text
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+    if (lines.length === 0) return [];
+    let cursor = 0;
+    return lines.map((line, idx) => {
+      const wordsRaw = line.split(/\s+/).filter(Boolean);
+      const dur = Math.max(1.8, Math.min(7.5, wordsRaw.length * 0.42 + 0.6));
+      const start = Number(cursor.toFixed(2));
+      const end = Number((cursor + dur).toFixed(2));
+      cursor = end + 0.15;
+      const wordDur = (end - start) / Math.max(1, wordsRaw.length);
+      return {
+        id: `cue-${idx + 1}`,
+        start,
+        end,
+        text: line,
+        words: wordsRaw.map((w, wi) => ({
+          word: w,
+          start: Number((start + wi * wordDur).toFixed(3)),
+          end: Number((start + (wi + 1) * wordDur).toFixed(3)),
+        })),
+      };
+    });
+  };
+
+  const handleGenerateInlineAudioAndSync = async () => {
+    if (isGeneratingInlineAudio) return;
+    setErrorMsg(null);
+    setInlineTtsNotice(null);
+    setIsGeneratingInlineAudio(true);
+    setInlineTtsProgress(3);
+    setInlineTtsStageLabel('Đang khởi tạo tác vụ đọc TTS...');
+    try {
+      const selectedVoiceObj = inlineAvailableVoices.find((v) => v.id === inlineVoice);
+      const res = await synthesizeAudioAndSyncCues({
+        rawScript: rawTranscript,
+        title: customTitle || project.title,
+        provider: inlineProvider,
+        voice: inlineVoice,
+        lang: selectedVoiceObj?.lang || 'en-US',
+        rate: inlineRate,
+        alignWithWhisper: inlineWhisperSync,
+        onProgress: (pct, label) => {
+          setInlineTtsProgress(pct);
+          setInlineTtsStageLabel(label);
+        },
+      });
+      if (res.blockTranscript) {
+        setRawTranscript(res.blockTranscript);
+      }
+      setInlineGeneratedSrt(res.srt);
+      if (onApplyAudioAndCues) {
+        onApplyAudioAndCues(res.audioFile, res.cues, customTitle);
+      } else {
+        onUploadAudio(res.audioFile);
+        if (res.cues.length > 0) {
+          onApplyTranscript(res.cues, customTitle);
+        }
+      }
+      setInlineTtsNotice(
+        `Đã xuất Audio (${res.durationSec.toFixed(1)}s · ${res.providerUsed}) và tự đồng bộ lại toàn bộ ${res.cues.length} mốc Sub khớp 100% với Audio${res.whisperAligned ? ' (đã căn từng từ bằng Whisper)' : ''}.`,
+      );
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Không thể xuất Audio TTS từ Sub.');
+    } finally {
+      setIsGeneratingInlineAudio(false);
+      setInlineTtsProgress(0);
+      setInlineTtsStageLabel('');
+    }
+  };
+
   const handleCommitTranscriptAndGoPrompt = () => {
-    const parsed = parseTranscriptAuto(rawTranscript);
+    const parsed = parseTranscriptOrPlainLines(rawTranscript);
     if (parsed.length === 0) {
       setErrorMsg(
-        'Chưa nhận diện được mốc thời gian. Hãy dán định dạng HH:MM:SS.mmm + Nội dung, SRT, VTT hoặc JSON.',
+        'Hãy dán Transcript (có timestamp SRT/VTT/Block HOẶC mỗi câu 1 dòng để xuất Audio TTS).',
       );
       return;
     }
@@ -470,58 +600,199 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
         <div className="p-5 space-y-4">
           {step === 1 && (
             <>
-              {/* Audio Input */}
-              <div className="flex flex-wrap items-center justify-between gap-3 p-3.5 rounded-xl bg-slate-50 border border-slate-200">
-                <div className="flex items-center gap-3 min-w-0">
-                  <div className="w-9 h-9 rounded-lg bg-indigo-100 text-indigo-600 flex items-center justify-center shrink-0">
-                    <FileAudio className="w-4 h-4" />
-                  </div>
-                  <div className="min-w-0">
-                    <div className="text-xs font-semibold text-slate-900 truncate">
-                      {audioFileName ? `Audio đã nạp: ${audioFileName}` : '1. File Audio giọng đọc'}
+              {/* Audio Input + Inline TTS Synthesis (No upfront audio file required) */}
+              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="w-9 h-9 rounded-lg bg-indigo-100 text-indigo-600 flex items-center justify-center shrink-0">
+                      <FileAudio className="w-4 h-4" />
                     </div>
-                    <div className="text-[11px] text-slate-500">
-                      Hỗ trợ .mp3, .wav, .m4a · Phát đồng bộ và ghép tiếng khi render MP4
+                    <div className="min-w-0">
+                      <div className="text-xs font-semibold text-slate-900 truncate">
+                        {audioFileName
+                          ? `Audio đã nạp: ${audioFileName}`
+                          : '1. Audio giọng đọc (Tải file lên HOẶC Xuất trực tiếp từ Sub bên dưới)'}
+                      </div>
+                      <div className="text-[11px] text-slate-500">
+                        Không bắt buộc có sẵn audio — có thể nhập Sub trước rồi bấm Xuất Audio &amp; Sync Sub như English Reels
+                      </div>
                     </div>
                   </div>
-                </div>
-                <div className="flex flex-wrap items-center gap-2 shrink-0">
-                  <input
-                    ref={audioInputRef}
-                    type="file"
-                    accept="audio/*"
-                    className="hidden"
-                    onChange={(e) => {
-                      const f = e.target.files?.[0];
-                      if (f) onUploadAudio(f);
-                    }}
-                  />
-                  <button
-                    type="button"
-                    onClick={onOpenAudioSubtitleStudio}
-                    className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-lg hover:bg-indigo-100 transition-colors"
-                  >
-                    <Mic className="w-3.5 h-3.5" />
-                    <span>Tạo Audio TTS / Bóc Sub Video</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => audioInputRef.current?.click()}
-                    className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-100 transition-colors"
-                  >
-                    <Upload className="w-3.5 h-3.5 text-indigo-600" />
-                    <span>{audioFileName ? 'Đổi Audio' : 'Chọn file Audio'}</span>
-                  </button>
-                  {audioFileName && (
+                  <div className="flex flex-wrap items-center gap-2 shrink-0">
+                    <input
+                      ref={audioInputRef}
+                      type="file"
+                      accept="audio/*"
+                      className="hidden"
+                      onChange={(e) => {
+                        const f = e.target.files?.[0];
+                        if (f) onUploadAudio(f);
+                      }}
+                    />
                     <button
                       type="button"
-                      onClick={onClearAudio}
-                      className="px-2.5 py-2 text-xs font-medium text-slate-600 hover:text-red-600 border border-slate-200 rounded-lg bg-white"
+                      onClick={onOpenAudioSubtitleStudio}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-lg hover:bg-indigo-100 transition-colors"
                     >
-                      Xóa
+                      <Mic className="w-3.5 h-3.5" />
+                      <span>Bóc Sub Video / Dịch Song Ngữ</span>
                     </button>
+                    <button
+                      type="button"
+                      onClick={() => audioInputRef.current?.click()}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-100 transition-colors"
+                    >
+                      <Upload className="w-3.5 h-3.5 text-indigo-600" />
+                      <span>{audioFileName ? 'Đổi Audio' : 'Nạp file Audio'}</span>
+                    </button>
+                    {audioFileName && (
+                      <button
+                        type="button"
+                        onClick={onClearAudio}
+                        className="px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:text-red-600 border border-slate-200 rounded-lg bg-white"
+                      >
+                        Xóa
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Inline TTS Bar like English Reels Studio */}
+                <div className="pt-2.5 border-t border-slate-200/80 space-y-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <select
+                      aria-label="Chọn nhà cung cấp TTS"
+                      value={inlineProvider}
+                      onChange={(e) => setInlineProvider(e.target.value)}
+                      className="min-w-[165px] px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-lg"
+                    >
+                      <option value="auto">Tự động miễn phí (Edge → Google)</option>
+                      {ttsProviders.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name}
+                        </option>
+                      ))}
+                    </select>
+                    <select
+                      aria-label="Chọn giọng đọc TTS"
+                      value={inlineVoice}
+                      onChange={(e) => setInlineVoice(e.target.value)}
+                      className="flex-1 min-w-[160px] px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-lg"
+                    >
+                      {inlineAvailableVoices.length === 0 ? (
+                        <option value="en-US-JennyNeural">Edge TTS — Jenny (English US)</option>
+                      ) : (
+                        inlineAvailableVoices.map((v) => (
+                          <option key={v.id} value={v.id}>
+                            {v.label} ({v.lang})
+                          </option>
+                        ))
+                      )}
+                    </select>
+                    <select
+                      aria-label="Tốc độ đọc TTS"
+                      value={inlineRate}
+                      onChange={(e) => setInlineRate(Number(e.target.value))}
+                      className="px-2 py-1.5 text-xs bg-white border border-slate-200 rounded-lg"
+                    >
+                      <option value={0.85}>0.85x (Chậm)</option>
+                      <option value={0.95}>0.95x</option>
+                      <option value={1.0}>1.0x (Chuẩn)</option>
+                      <option value={1.1}>1.1x</option>
+                      <option value={1.2}>1.2x (Nhanh)</option>
+                    </select>
+                    <label className="inline-flex items-center gap-1.5 text-[11px] text-slate-700 cursor-pointer px-1">
+                      <input
+                        type="checkbox"
+                        checked={inlineWhisperSync}
+                        onChange={(e) => setInlineWhisperSync(e.target.checked)}
+                        className="rounded border-slate-300 text-indigo-600"
+                      />
+                      <span>Whisper Sync Sub</span>
+                    </label>
+                    <button
+                      type="button"
+                      disabled={isGeneratingInlineAudio}
+                      onClick={() => void handleGenerateInlineAudioAndSync()}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition-colors"
+                    >
+                      {isGeneratingInlineAudio ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Volume2 className="w-3.5 h-3.5" />
+                      )}
+                      <span>
+                        {isGeneratingInlineAudio
+                          ? `Đang xuất ${inlineTtsProgress}%...`
+                          : 'Xuất Audio & Sync Sub'}
+                      </span>
+                    </button>
+                  </div>
+
+                  {((inlineProvider === 'elevenlabs' && !hasElevenLabsKey) ||
+                    (inlineProvider === 'gemini' && !hasGeminiKey)) && (
+                    <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
+                      {inlineProvider === 'elevenlabs'
+                        ? 'Cần thiết lập ELEVENLABS_API_KEY trong Environment Secrets / .env trên server để dùng giọng ElevenLabs (hoặc chọn Edge Neural / Google miễn phí).'
+                        : 'Cần thiết lập GEMINI_API_KEY trong Environment Secrets / .env trên server để dùng Gemini Flash TTS.'}
+                    </p>
+                  )}
+
+                  {isGeneratingInlineAudio && (
+                    <div className="p-2.5 rounded-lg bg-emerald-50 border border-emerald-200 space-y-1.5">
+                      <div className="flex items-center justify-between text-[11px] font-medium text-emerald-900">
+                        <span className="truncate">{inlineTtsStageLabel || 'Đang tổng hợp Audio TTS...'}</span>
+                        <span className="font-mono tabular-nums shrink-0 ml-2">{inlineTtsProgress}%</span>
+                      </div>
+                      <div className="w-full h-1.5 bg-emerald-200 rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-emerald-600 transition-all duration-200"
+                          style={{ width: `${Math.max(4, inlineTtsProgress)}%` }}
+                        />
+                      </div>
+                    </div>
                   )}
                 </div>
+
+                {audioUrl && (
+                  <div className="flex flex-wrap items-center gap-2 pt-1">
+                    <audio controls src={audioUrl} className="flex-1 min-w-[200px] h-8" />
+                    <a
+                      href={audioUrl}
+                      download={audioFileName || 'kineticsub_audio.mp3'}
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-semibold text-emerald-700 bg-white border border-emerald-200 rounded-lg hover:bg-emerald-50"
+                    >
+                      <Download className="w-3 h-3" />
+                      <span>Tải .MP3</span>
+                    </a>
+                    {inlineGeneratedSrt && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const blob = new Blob([inlineGeneratedSrt], {
+                            type: 'text/plain;charset=utf-8',
+                          });
+                          const u = URL.createObjectURL(blob);
+                          const a = document.createElement('a');
+                          a.href = u;
+                          a.download = `${(customTitle || 'subtitles').replace(/[^a-zA-Z0-9-_]+/g, '_')}.srt`;
+                          a.click();
+                          setTimeout(() => URL.revokeObjectURL(u), 3000);
+                        }}
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-semibold text-indigo-700 bg-white border border-indigo-200 rounded-lg hover:bg-indigo-50"
+                      >
+                        <Download className="w-3 h-3" />
+                        <span>Tải .SRT mới</span>
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                {inlineTtsNotice && (
+                  <p className="text-[11px] text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-1.5 font-medium">
+                    {inlineTtsNotice}
+                  </p>
+                )}
               </div>
 
               {/* Title + Transcript Input */}
@@ -578,10 +849,10 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
                     htmlFor="pipeline-transcript-input"
                     className="text-xs font-medium text-slate-700"
                   >
-                    2. Dán Transcript có timestamp (dạng <code>00:00:00.000</code> xuống dòng hoặc SRT/VTT/JSON)
+                    2. Nội dung Sub / Kịch bản (dán SRT/VTT/Block HOẶC gõ mỗi câu 1 dòng rồi bấm Xuất Audio)
                   </label>
                   <span className="text-[11px] font-medium text-emerald-700 tabular-nums">
-                    Nhận diện: {liveTranscriptCues.length} câu thoại
+                    Nhận diện: {liveTranscriptCues.length || rawTranscript.split(/\r?\n/).filter((l) => l.trim()).length} câu
                   </span>
                 </div>
                 <textarea
@@ -592,7 +863,7 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
                     setRawTranscript(e.target.value);
                     setErrorMsg(null);
                   }}
-                  placeholder={'00:00:00.000\nこのシーンを想像してみて...\n\n00:00:11.960\nまずは can から...'}
+                  placeholder={'Dán SRT / timestamp 00:00:00.000 HOẶC gõ từng câu (mỗi câu 1 dòng):\nStop saying very tired.\nInstead, try saying I am exhausted.'}
                   className="w-full p-3 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 leading-relaxed"
                 />
               </div>
@@ -607,7 +878,7 @@ export const AutomationPipelinePanel: React.FC<AutomationPipelinePanelProps> = (
                 <button
                   type="button"
                   onClick={() => {
-                    const parsed = parseTranscriptAuto(rawTranscript);
+                    const parsed = parseTranscriptOrPlainLines(rawTranscript);
                     if (parsed.length > 0) onApplyTranscript(parsed, customTitle);
                   }}
                   className="px-4 py-2.5 text-xs font-medium text-slate-700 bg-slate-100 rounded-lg hover:bg-slate-200 transition-colors"

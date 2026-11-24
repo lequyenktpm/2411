@@ -3647,6 +3647,61 @@ export function renderProjectFrame(
 
     ctx.restore();
   }
+
+  // 3. Optional Watermark & Outro overlay (shared across Studio 9:16 & English Reels)
+  const wm = project.watermark;
+  if (wm) {
+    if (wm.watermarkEnabled && wm.watermarkText.trim()) {
+      const wmText = wm.watermarkText.trim();
+      ctx.save();
+      ctx.globalAlpha = Math.max(0.15, Math.min(1, wm.watermarkOpacity ?? 0.65));
+      ctx.font = '700 24px "Plus Jakarta Sans", "Inter", sans-serif';
+      const tw = ctx.measureText(wmText).width;
+      const boxW = Math.min(STAGE_WIDTH - 80, tw + 36);
+      const boxH = 48;
+      const padX = 36;
+      const padY = 44;
+      const x =
+        wm.watermarkCorner === 'top-left' || wm.watermarkCorner === 'bottom-left'
+          ? padX
+          : STAGE_WIDTH - padX - boxW;
+      const y =
+        wm.watermarkCorner === 'top-left' || wm.watermarkCorner === 'top-right'
+          ? padY
+          : STAGE_HEIGHT - padY - boxH;
+      ctx.fillStyle = 'rgba(15, 23, 42, 0.58)';
+      drawRoundedRectPath(ctx, x, y, boxW, boxH, 14);
+      ctx.fill();
+      ctx.fillStyle = '#FFFFFF';
+      ctx.textBaseline = 'middle';
+      ctx.textAlign = 'left';
+      ctx.fillText(wmText, x + 18, y + boxH / 2, boxW - 36);
+      ctx.restore();
+    }
+
+    const outroLines = [wm.outroLine1?.trim() || '', wm.outroLine2?.trim() || ''].filter(Boolean);
+    if (wm.outroSeconds > 0 && outroLines.length > 0 && project.duration > 0) {
+      const outroStart = Math.max(0, project.duration - wm.outroSeconds);
+      if (time >= outroStart) {
+        const fadeDur = Math.min(0.55, wm.outroSeconds);
+        const progress = fadeDur > 0 ? Math.min(1, (time - outroStart) / fadeDur) : 1;
+        ctx.save();
+        ctx.fillStyle = `rgba(15, 23, 42, ${(0.9 * progress).toFixed(3)})`;
+        ctx.fillRect(0, 0, STAGE_WIDTH, STAGE_HEIGHT);
+        ctx.globalAlpha = progress;
+        ctx.fillStyle = '#FFFFFF';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.font = '800 54px "Outfit", "Plus Jakarta Sans", sans-serif';
+        const lineGap = 76;
+        const baseLineY = STAGE_HEIGHT / 2 - ((outroLines.length - 1) * lineGap) / 2;
+        outroLines.forEach((line, idx) => {
+          ctx.fillText(line, STAGE_WIDTH / 2, baseLineY + idx * lineGap, STAGE_WIDTH * 0.84);
+        });
+        ctx.restore();
+      }
+    }
+  }
 }
 
 export function hitTestElements(

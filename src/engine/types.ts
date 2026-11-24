@@ -360,6 +360,18 @@ export interface SceneElement {
   atWordIndex?: number;
 }
 
+export type WatermarkCorner = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
+
+export interface WatermarkOutroConfig {
+  watermarkEnabled: boolean;
+  watermarkText: string;
+  watermarkCorner: WatermarkCorner;
+  watermarkOpacity: number; // 0.15..1.0
+  outroSeconds: number; // 0..6
+  outroLine1: string;
+  outroLine2: string;
+}
+
 export interface LessonProject {
   id: string;
   title: string;
@@ -367,6 +379,7 @@ export interface LessonProject {
   theme: CanvasThemeId;
   compositionId?: LayoutCompositionId;
   backgroundImage?: BackgroundImageConfig;
+  watermark?: WatermarkOutroConfig;
   duration: number;
   fps: 30 | 60;
   cues: TranscriptCue[];

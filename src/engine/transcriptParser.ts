@@ -327,7 +327,8 @@ export function cuesToBlockTranscript(cues: TranscriptCue[]): string {
 }
 
 const SRT_ARROW_RE = /\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d+)?\s*-->\s*\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d+)?/;
-const INLINE_TS_PREFIX_RE = /^\[?\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d+)?(?:\s*[-–>to]+\s*\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d+)?)?\]?\s*/i;
+const INLINE_TS_PREFIX_RE = /^(?:[-•*]|\d+[.)])?\s*\[?\(?\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d+)?(?:\s*[-–>to]+\s*\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d+)?)?\)?\]?\s*/i;
+const ANY_TIMESTAMP_TOKEN_RE = /\[?\(?\b\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d{1,3})?\b\)?\]?/g;
 
 /**
  * Extracts pure spoken lines from SRT, VTT, JSON, or block-timestamp transcripts
@@ -341,17 +342,11 @@ export function stripTimestampsFromScript(rawInput: string): string {
   if (!trimmed) return '';
 
   const hasJson = trimmed.startsWith('{') || trimmed.startsWith('[');
-  const hasTimestamps =
-    hasJson ||
-    trimmed.includes('-->') ||
-    trimmed.split(/\r?\n/).some((line) => STANDALONE_TIMESTAMP_RE.test(line.trim())) ||
-    /^\s*(?:\[\d{1,2}:\d{2}|\d{2}:\d{2}:\d{2})/m.test(trimmed);
-
-  if (hasTimestamps) {
+  if (hasJson) {
     const parsed = parseTranscriptAuto(trimmed);
     if (parsed.length > 0) {
       return parsed
-        .map((c) => c.text.replace(/\s+/g, ' ').trim())
+        .map((c) => c.text.replace(ANY_TIMESTAMP_TOKEN_RE, ' ').replace(/\s+/g, ' ').trim())
         .filter((line) => Boolean(line) && !/^WEBVTT\b/i.test(line))
         .join('\n');
     }
@@ -362,12 +357,79 @@ export function stripTimestampsFromScript(rawInput: string): string {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
     if (!line) continue;
-    if (/^WEBVTT\b/i.test(line)) continue;
+    if (/^(?:WEBVTT|NOTE\b|Kind:|Language:)/i.test(line)) continue;
     if (STANDALONE_TIMESTAMP_RE.test(line) || SRT_ARROW_RE.test(line)) continue;
     if (/^\d+$/.test(line) && lines[i + 1] && SRT_ARROW_RE.test(lines[i + 1].trim())) continue;
-    const withoutPrefix = line.replace(INLINE_TS_PREFIX_RE, '').trim();
-    if (withoutPrefix) cleanedLines.push(withoutPrefix);
+
+    let cleanLine = line.replace(/<[^>]+>/g, ' ').replace(INLINE_TS_PREFIX_RE, '').trim();
+    // Also strip any stray timestamp tokens like 00:00:11.960 embedded inside the line
+    cleanLine = cleanLine.replace(/\b\d{1,2}:\d{2}:\d{2}(?:[.,]\d{1,3})?\b/g, ' ');
+    cleanLine = cleanLine.replace(/\[\d{1,2}:\d{2}(?:[.,]\d{1,3})?\]/g, ' ');
+    cleanLine = cleanLine.replace(/\s+/g, ' ').trim();
+    if (cleanLine && !STANDALONE_TIMESTAMP_RE.test(cleanLine)) {
+      cleanedLines.push(cleanLine);
+    }
   }
   return cleanedLines.join('\n');
 }
+
+/**
+ * Keeps the user's exact script lines and exact measured [start, end] audio cues,
+ * while refining per-word karaoke timings using Whisper word timestamps when available.
+ */
+export function refineCuesWithWhisperWords(
+  originalCues: TranscriptCue[],
+  whisperWords: Array<{ word?: string; text?: string; start: number; end: number }>,
+): TranscriptCue[] {
+  if (!Array.isArray(originalCues) || originalCues.length === 0) return [];
+  if (!Array.isArray(whisperWords) || whisperWords.length === 0) return originalCues;
+
+  const normWords = whisperWords
+    .map((w) => ({
+      word: String(w.word ?? w.text ?? '').trim(),
+      start: Number(w.start ?? 0),
+      end: Number(w.end ?? 0),
+    }))
+    .filter((w) => w.word.length > 0 && Number.isFinite(w.start) && Number.isFinite(w.end));
+
+  return originalCues.map((cue) => {
+    const tokens = tokenizeTextForKaraoke(cue.text);
+    if (tokens.length === 0) return cue;
+
+    const inWindow = normWords.filter(
+      (w) => w.end > cue.start - 0.12 && w.start < cue.end + 0.12,
+    );
+
+    if (inWindow.length === tokens.length) {
+      return {
+        ...cue,
+        words: tokens.map((tok, i) => {
+          const st = Math.max(cue.start, Math.min(cue.end - 0.04, inWindow[i].start));
+          const en = Math.max(st + 0.04, Math.min(cue.end, inWindow[i].end));
+          return {
+            word: tok,
+            start: Number(st.toFixed(3)),
+            end: Number(en.toFixed(3)),
+          };
+        }),
+      };
+    }
+
+    if (inWindow.length >= 2) {
+      // Distribute original tokens proportionally across Whisper's detected speech span inside this cue
+      const speechStart = Math.max(cue.start, inWindow[0].start);
+      const speechEnd = Math.min(cue.end, Math.max(speechStart + 0.25, inWindow[inWindow.length - 1].end));
+      return {
+        ...cue,
+        words: interpolateWordTimings(cue.text, speechStart, speechEnd),
+      };
+    }
+
+    return {
+      ...cue,
+      words: interpolateWordTimings(cue.text, cue.start, cue.end),
+    };
+  });
+}
+
 

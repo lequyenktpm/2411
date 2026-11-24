@@ -1243,6 +1243,80 @@ test('inferSpokenLanguageFromText detects Vietnamese, Japanese, Korean, Chinese,
   assert.equal(inferSpokenLanguageFromText('Practice speaking one natural phrase every morning.'), 'English');
 });
 
+test('watermark & outro config is preserved in Studio 9:16 recompose and extends English Reels duration', () => {
+  const wm = {
+    watermarkEnabled: true,
+    watermarkText: '@MyEnglishStudio',
+    watermarkCorner: 'top-right' as const,
+    watermarkOpacity: 0.7,
+    outroSeconds: 3,
+    outroLine1: 'Thanks for watching!',
+    outroLine2: 'Follow for daily practice',
+  };
 
+  const withWm = { ...PRESET_JP_EN_POLITE, watermark: wm };
+  const recomposed = recomposeProjectWithStyle(withWm, 'story-scenes');
+  assert.deepEqual(recomposed.watermark, wm);
 
+  const sampleCards = buildReelCardsRuleBased('Hello world.\nPractice daily.', {
+    title: 'WM Reel',
+    mode: 'reading',
+    targetLang: 'Tiếng Việt',
+  }).cards;
+
+  const baseReel = reelCardsToLessonProject(sampleCards, {
+    title: 'WM Reel',
+    theme: 'pastel-sunrise',
+    compositionId: 'story-scenes',
+  });
+
+  const wmReel = reelCardsToLessonProject(sampleCards, {
+    title: 'WM Reel',
+    theme: 'pastel-sunrise',
+    compositionId: 'story-scenes',
+    watermark: wm,
+  });
+
+  assert.deepEqual(wmReel.watermark, wm);
+  assert.ok(Math.abs(wmReel.duration - (baseReel.duration + 3)) < 0.01);
+});
+
+test('resolveMp4EncodingParams returns even dimensions across 9:16, 16:9, 1:1, and 4:5', () => {
+  const portrait = resolveMp4EncodingParams({
+    aspectRatio: '9:16',
+    resolution: '720p',
+    quality: 'high',
+    fps: 30,
+  });
+  assert.equal(portrait.width, 720);
+  assert.equal(portrait.height, 1280);
+
+  const landscape = resolveMp4EncodingParams({
+    aspectRatio: '16:9',
+    resolution: '1080p',
+    quality: 'ultra',
+    fps: 60,
+  });
+  assert.equal(landscape.width, 1920);
+  assert.equal(landscape.height, 1080);
+  assert.equal(landscape.fps, 60);
+
+  const square = resolveMp4EncodingParams({
+    aspectRatio: '1:1',
+    resolution: '720p',
+    quality: 'standard',
+    fps: 24,
+  });
+  assert.equal(square.width, square.height);
+  assert.equal(square.width % 2, 0);
+
+  const social45 = resolveMp4EncodingParams({
+    aspectRatio: '4:5',
+    resolution: '720p',
+    quality: 'high',
+    fps: 30,
+  });
+  assert.equal(social45.width, 720);
+  assert.equal(social45.height, 900);
+});
 

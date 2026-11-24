@@ -222,7 +222,12 @@ async function exportWithWebCodecsMp4(
   audioFile: File | null,
   encoding: ResolvedMp4Encoding,
   onProgress: (info: ExportVideoProgress) => void,
-  options?: { signal?: AbortSignal; skipDownload?: boolean; customFileBase?: string },
+  options?: {
+    signal?: AbortSignal;
+    skipDownload?: boolean;
+    customFileBase?: string;
+    customRenderFrame?: (ctx: CanvasRenderingContext2D, time: number, width: number, height: number) => void;
+  },
 ): Promise<ExportVideoResult | null> {
   checkAborted(options?.signal);
   const videoSpec = await pickSupportedVideoCodec(
@@ -323,7 +328,11 @@ async function exportWithWebCodecsMp4(
       if (encoderError) throw encoderError;
 
       const t = Math.min(project.duration, i / encoding.fps);
-      renderScaledProjectFrame(ctx, project, t, encoding.width, encoding.height);
+      if (options?.customRenderFrame) {
+        options.customRenderFrame(ctx, t, encoding.width, encoding.height);
+      } else {
+        renderScaledProjectFrame(ctx, project, t, encoding.width, encoding.height);
+      }
 
       const frame = new VideoFrame(offscreenCanvas, {
         timestamp: Math.round((i * 1_000_000) / encoding.fps),
@@ -501,6 +510,7 @@ export async function exportBlobToServerOutput(
   fileName: string,
   savePath?: string,
   signal?: AbortSignal,
+  sourceTab?: string,
 ): Promise<{ savedPath: string; relativePath?: string; fileName: string; byteLength: number }> {
   const chunkLimit = 4 * 1024 * 1024;
   let lastJson: { savedPath?: string; relativePath?: string; fileName?: string; bytes?: number } = {};
@@ -515,6 +525,7 @@ export async function exportBlobToServerOutput(
         'Content-Type': 'application/octet-stream',
         'x-file-name': encodeURIComponent(fileName),
         ...(savePath ? { 'x-save-path': encodeURIComponent(savePath) } : {}),
+        ...(sourceTab ? { 'x-source-tab': encodeURIComponent(sourceTab) } : {}),
       },
       'Lỗi lưu file MP4 vào thư mục output',
       signal,
@@ -803,6 +814,7 @@ export async function exportProjectToVideo(
     customFileBase?: string;
     alsoSaveToServerOutput?: boolean;
     savePath?: string;
+    sourceTab?: string;
   },
 ): Promise<ExportVideoResult> {
   const encoding = resolveMp4EncodingParams(settings);
@@ -821,6 +833,7 @@ export async function exportProjectToVideo(
           res.fileName,
           options.savePath,
           options.signal,
+          options.sourceTab,
         );
         onProgress({ progress: 1, stageLabel: `Hoàn tất! Đã lưu: ${saved.savedPath}` });
         return { ...res, savedPath: saved.savedPath };
@@ -867,7 +880,12 @@ export async function exportProjectToServerDisk(
   settings: Mp4ExportSettings = DEFAULT_MP4_EXPORT_SETTINGS,
   customBaseName?: string,
   customSavePath?: string,
-  options?: { signal?: AbortSignal; directoryHandle?: any },
+  options?: {
+    signal?: AbortSignal;
+    directoryHandle?: any;
+    sourceTab?: string;
+    customRenderFrame?: (ctx: CanvasRenderingContext2D, time: number, width: number, height: number) => void;
+  },
 ): Promise<{ savedPath: string; relativePath?: string; fileName: string; byteLength: number }> {
   checkAborted(options?.signal);
   await ensureProjectAssetsLoaded(project);
@@ -883,6 +901,7 @@ export async function exportProjectToServerDisk(
       signal: options?.signal,
       skipDownload: true,
       customFileBase: baseName,
+      customRenderFrame: options?.customRenderFrame,
     });
     if (webResult?.blob) {
       if (options?.directoryHandle) {
@@ -906,6 +925,7 @@ export async function exportProjectToServerDisk(
         targetFileName,
         customSavePath,
         options?.signal,
+        options?.sourceTab,
       );
       onProgress({ progress: 1, stageLabel: 'Hoàn tất lưu vào thư mục output!' });
       return saved;
@@ -986,7 +1006,11 @@ export async function exportProjectToServerDisk(
     for (let i = 0; i < totalFrames; i++) {
       checkAborted(options?.signal);
       const t = Math.min(project.duration, i / encoding.fps);
-      renderScaledProjectFrame(ctx, project, t, encoding.width, encoding.height);
+      if (options?.customRenderFrame) {
+        options.customRenderFrame(ctx, t, encoding.width, encoding.height);
+      } else {
+        renderScaledProjectFrame(ctx, project, t, encoding.width, encoding.height);
+      }
       const jpeg = await canvasToJpegBlob(offscreenCanvas, 0.85);
 
       if (

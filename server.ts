@@ -19,14 +19,15 @@ import {
 } from './src/engine/transcriptParser.ts';
 import {
   ELEVENLABS_DEFAULT_VOICES,
+  ensureDefaultStudioAudio,
   getWhisperCacheStatus,
-  preloadWhisperModel,
   probeMediaMeta,
   resolveSafeOutputDir,
   resolveSafeOutputFile,
   runLocalWhisperOnWav,
   sanitizeOutputStem,
   spawnTrackedFfmpeg,
+  startWhisperPreloadJob,
   synthesizeElevenLabsTtsBuffer,
   translateLinesWithGeminiOrFree,
 } from './src/server/mediaHelpers.ts';
@@ -47,6 +48,39 @@ interface StudioJob {
   dir: string;
   createdAt: number;
   files: Record<string, string>;
+  status?: 'idle' | 'running' | 'done' | 'error';
+  progress?: number;
+  stageLabel?: string;
+}
+
+interface TranscribeJobState {
+  id: string;
+  status: 'running' | 'done' | 'error';
+  progress?: number;
+  stageLabel: string;
+  createdAt: number;
+  result?: Record<string, unknown>;
+  error?: string;
+}
+
+interface TtsJobState {
+  id: string;
+  status: 'running' | 'done' | 'error';
+  progress: number;
+  stageLabel: string;
+  createdAt: number;
+  result?: Record<string, unknown>;
+  error?: string;
+}
+
+interface AlignJobState {
+  id: string;
+  status: 'running' | 'done' | 'error';
+  progress: number;
+  stageLabel: string;
+  createdAt: number;
+  result?: Record<string, unknown>;
+  error?: string;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -57,11 +91,57 @@ const COMPONENTS_DATA_DIR = path.resolve('data');
 const COMPONENTS_DATA_FILE = path.join(COMPONENTS_DATA_DIR, 'custom-components.json');
 const RENDER_TMP_ROOT = path.resolve('.render-tmp');
 const STUDIO_TMP_ROOT = path.resolve('.studio-tmp');
+const OUTPUT_META_FILE = path.join(STUDIO_TMP_ROOT, 'output-meta.json');
+
+interface OutputFileMeta {
+  sourceTab: string;
+  updatedAt: number;
+}
+
+async function readOutputMeta(): Promise<Record<string, OutputFileMeta>> {
+  try {
+    const raw = await fs.promises.readFile(OUTPUT_META_FILE, 'utf8');
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, OutputFileMeta>) : {};
+  } catch {
+    return {};
+  }
+}
+
+async function recordOutputMeta(relativePath: string, sourceTab: string): Promise<void> {
+  if (!relativePath || !sourceTab.trim()) return;
+  try {
+    await fs.promises.mkdir(STUDIO_TMP_ROOT, { recursive: true });
+    const meta = await readOutputMeta();
+    const key = relativePath.replace(/\\/g, '/');
+    meta[key] = { sourceTab: sourceTab.trim(), updatedAt: Date.now() };
+    await fs.promises.writeFile(OUTPUT_META_FILE, JSON.stringify(meta, null, 2), 'utf8');
+  } catch {
+    // non-fatal metadata write failure
+  }
+}
+
+async function removeOutputMeta(relativePath: string): Promise<void> {
+  if (!relativePath) return;
+  try {
+    const meta = await readOutputMeta();
+    const key = relativePath.replace(/\\/g, '/');
+    if (key in meta) {
+      delete meta[key];
+      await fs.promises.writeFile(OUTPUT_META_FILE, JSON.stringify(meta, null, 2), 'utf8');
+    }
+  } catch {
+    // ignore
+  }
+}
 
 const jobs = new Map<string, RenderJob>();
 const activeJobProcs = new Map<string, ChildProcess>();
 const studioJobs = new Map<string, StudioJob>();
 const activeStudioProcs = new Map<string, ChildProcess>();
+const transcribeJobs = new Map<string, TranscribeJobState>();
+const ttsJobs = new Map<string, TtsJobState>();
+const alignJobs = new Map<string, AlignJobState>();
 
 function getJobDir(jobId: string): string {
   return path.join(RENDER_TMP_ROOT, `ks-render-${jobId}`);
@@ -676,12 +756,20 @@ async function startServer(): Promise<void> {
         }
         const stat = await fs.promises.stat(diskPath);
         const relPath = path.relative(baseDir, diskPath).replace(/\\/g, '/');
+        const sourceTabHeader =
+          typeof req.headers['x-source-tab'] === 'string'
+            ? decodeURIComponent(req.headers['x-source-tab']).trim()
+            : '';
+        if (sourceTabHeader && req.query.append !== '1') {
+          await recordOutputMeta(relPath, sourceTabHeader);
+        }
         res.json({
           ok: true,
           fileName,
           relativePath: relPath,
           savedPath: diskPath,
           bytes: stat.size,
+          sourceTab: sourceTabHeader || undefined,
         });
       } catch (err) {
         res.status(500).json({ error: err instanceof Error ? err.message : 'Lỗi lưu file vào output.' });
@@ -694,12 +782,14 @@ async function startServer(): Promise<void> {
       const subPath = typeof req.query.path === 'string' ? req.query.path : '';
       const { baseDir, targetDir } = resolveSafeOutputDir(subPath);
       await fs.promises.mkdir(targetDir, { recursive: true });
+      const metaMap = await readOutputMeta();
       const items: Array<{
         name: string;
         relativePath: string;
         savedPath: string;
         bytes: number;
         updatedAt: number;
+        sourceTab?: string;
       }> = [];
 
       const scan = async (dir: string, depth: number) => {
@@ -712,12 +802,14 @@ async function startServer(): Promise<void> {
           } else if (entry.isFile() && /\.(mp4|webm|srt|vtt|mp3)$/i.test(entry.name)) {
             const st = await fs.promises.stat(full).catch(() => null);
             if (st) {
+              const relPath = path.relative(baseDir, full).replace(/\\/g, '/');
               items.push({
                 name: entry.name,
-                relativePath: path.relative(baseDir, full).replace(/\\/g, '/'),
+                relativePath: relPath,
                 savedPath: full,
                 bytes: st.size,
                 updatedAt: st.mtimeMs,
+                sourceTab: metaMap[relPath]?.sourceTab,
               });
             }
           }
@@ -729,6 +821,23 @@ async function startServer(): Promise<void> {
       res.json({ ok: true, outputDir: targetDir, baseDir, files: items });
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : 'Không đọc được thư mục output.' });
+    }
+  });
+
+  app.get('/api/output/folders', async (_req, res) => {
+    try {
+      const { baseDir } = resolveSafeOutputDir('');
+      await fs.promises.mkdir(baseDir, { recursive: true });
+      const folders: string[] = [''];
+      const entries = await fs.promises.readdir(baseDir, { withFileTypes: true }).catch(() => []);
+      for (const entry of entries) {
+        if (entry.isDirectory() && !entry.name.startsWith('.')) {
+          folders.push(entry.name);
+        }
+      }
+      res.json({ ok: true, baseDir, folders });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Không đọc được danh sách thư mục.' });
     }
   });
 
@@ -760,6 +869,7 @@ async function startServer(): Promise<void> {
       return;
     }
     await fs.promises.unlink(resolved.filePath).catch(() => undefined);
+    await removeOutputMeta(rel);
     res.json({ ok: true });
   });
 
@@ -988,8 +1098,8 @@ async function startServer(): Promise<void> {
         {
           id: 'elevenlabs',
           name: elevenLabsKey
-            ? 'ElevenLabs AI Voice (Đã kết nối ELEVENLABS_API_KEY)'
-            : 'ElevenLabs AI Voice (Cần ELEVENLABS_API_KEY trong Secrets / .env)',
+            ? 'ElevenLabs AI Voice (Đã kết nối Secrets)'
+            : 'ElevenLabs AI Voice (Cần ELEVENLABS_API_KEY trong Secrets)',
           voices: elevenLabsVoices,
         },
         {
@@ -1020,8 +1130,8 @@ async function startServer(): Promise<void> {
         {
           id: 'gemini',
           name: process.env.GEMINI_API_KEY
-            ? 'Gemini 3.8 Flash Lite TTS (Đã kết nối GEMINI_API_KEY)'
-            : 'Gemini 3.8 Flash Lite TTS (Cần GEMINI_API_KEY trong Secrets / .env)',
+            ? 'Gemini Flash TTS (Đã kết nối Secrets)'
+            : 'Gemini Flash TTS (Cần GEMINI_API_KEY trong Secrets)',
           voices: [
             { id: 'Kore', label: 'Kore (Tự nhiên · Rõ nét)', lang: 'multi' },
             { id: 'Puck', label: 'Puck (Năng động)', lang: 'multi' },
@@ -1033,47 +1143,53 @@ async function startServer(): Promise<void> {
     });
   });
 
-  app.post('/api/tts/synthesize', express.json({ limit: '1mb' }), async (req, res) => {
+  async function executeTtsSynthesis(
+    body: Record<string, any>,
+    onProgress?: (progress: number, stageLabel: string) => void,
+  ) {
     const tmpDir = path.join(os.tmpdir(), `ks-tts-${crypto.randomUUID()}`);
     await fs.promises.mkdir(tmpDir, { recursive: true });
     try {
-      const providerReq = typeof req.body?.provider === 'string' ? req.body.provider : 'auto';
-      const voice = typeof req.body?.voice === 'string' ? req.body.voice : 'en-US-JennyNeural';
-      const lang = typeof req.body?.lang === 'string' ? req.body.lang : 'en';
-      const rate = Number(req.body?.rate ?? 1.0);
-      const rawSegments = Array.isArray(req.body?.segments)
-        ? req.body.segments
+      const providerReq = typeof body?.provider === 'string' ? body.provider : 'auto';
+      const voice = typeof body?.voice === 'string' ? body.voice : 'en-US-JennyNeural';
+      const lang = typeof body?.lang === 'string' ? body.lang : 'en';
+      const rate = Number(body?.rate ?? 1.0);
+      const rawSegments = Array.isArray(body?.segments)
+        ? body.segments
             .map((seg: { id?: string; text?: string; pauseAfterSec?: number }, i: number) => ({
               id: seg?.id || `seg-${i + 1}`,
               text: stripTimestampsFromScript(String(seg?.text || '')),
               pauseAfterSec: seg?.pauseAfterSec,
             }))
             .filter((s: { text: string }) => s.text.length > 0)
-        : typeof req.body?.text === 'string' && req.body.text.trim()
-          ? stripTimestampsFromScript(req.body.text)
+        : typeof body?.text === 'string' && body.text.trim()
+          ? stripTimestampsFromScript(body.text)
               .split(/\r?\n+/)
-              .map((t: string, i: number) => ({ id: `seg-${i + 1}`, text: t.trim() }))
+              .map((t: string, i: number) => ({ id: `seg-${i + 1}`, text: t.trim(), pauseAfterSec: 0 }))
               .filter((s: { text: string }) => s.text.length > 0)
           : [];
 
       if (rawSegments.length === 0) {
-        res.status(400).json({ error: 'Vui lòng nhập nội dung văn bản để tạo giọng đọc.' });
-        return;
+        const err = new Error('Vui lòng nhập nội dung văn bản để tạo giọng đọc.');
+        (err as any).statusCode = 400;
+        throw err;
       }
 
       const geminiKey = process.env.GEMINI_API_KEY || '';
       const elevenLabsKey = process.env.ELEVENLABS_API_KEY || '';
       if (providerReq === 'elevenlabs' && !elevenLabsKey) {
-        res.status(400).json({
-          error: 'Chưa cấu hình ELEVENLABS_API_KEY trên server (vào Settings > Secrets hoặc file .env để thêm key).',
-        });
-        return;
+        const err = new Error(
+          'ELEVENLABS_API_KEY chưa được cấu hình trong Environment Secrets / .env trên server. Hãy thêm key vào Secrets hoặc chọn giọng miễn phí (Edge Neural / Google / Polly).',
+        );
+        (err as any).statusCode = 400;
+        throw err;
       }
       if (providerReq === 'gemini' && !geminiKey) {
-        res.status(400).json({
-          error: 'Chưa cấu hình GEMINI_API_KEY trên server (vào Settings > Secrets hoặc file .env để thêm key).',
-        });
-        return;
+        const err = new Error(
+          'GEMINI_API_KEY chưa được cấu hình trong Environment Secrets / .env trên server. Hãy thêm key vào Secrets hoặc chọn giọng miễn phí (Edge Neural / Google / Polly).',
+        );
+        (err as any).statusCode = 400;
+        throw err;
       }
 
       const segFiles: string[] = [];
@@ -1094,6 +1210,11 @@ async function startServer(): Promise<void> {
         const segText = sanitizeTtsSegmentText(String(rawSegments[i]?.text || ''));
         const pauseAfterSec = Math.max(0, Math.min(12, Number(rawSegments[i]?.pauseAfterSec || 0)));
         if (!segText) continue;
+
+        onProgress?.(
+          Math.max(6, Math.round((i / rawSegments.length) * 84)),
+          `Đang đọc đoạn ${i + 1}/${rawSegments.length} (${providerReq === 'auto' ? 'Auto' : providerReq})...`,
+        );
 
         let buf: Buffer | null = null;
         const attemptOrder = Array.from(
@@ -1208,12 +1329,17 @@ async function startServer(): Promise<void> {
           words: interpolateWordTimings(segText, start, spokenEnd),
         });
         cursor = Number((cursor + totalSegDur).toFixed(3));
+        onProgress?.(
+          Math.min(88, Math.max(8, Math.round(((i + 1) / rawSegments.length) * 86))),
+          `Đã hoàn thành đoạn ${i + 1}/${rawSegments.length}`,
+        );
       }
 
       if (segFiles.length === 0) {
         throw new Error('Các đoạn văn bản sau khi lọc ký tự đặc biệt đều bị rỗng.');
       }
 
+      onProgress?.(92, 'Đang ghép file Audio MP3 hoàn chỉnh...');
       const finalAudioPath = path.join(tmpDir, 'combined.mp3');
       if (segFiles.length === 1) {
         await fs.promises.copyFile(segFiles[0], finalAudioPath);
@@ -1229,8 +1355,9 @@ async function startServer(): Promise<void> {
 
       const finalBuf = await fs.promises.readFile(finalAudioPath);
       const totalDur = Number(cursor.toFixed(3));
+      onProgress?.(100, 'Tổng hợp Audio TTS hoàn tất!');
 
-      res.json({
+      return {
         ok: true,
         providerUsed,
         mimeType: 'audio/mpeg',
@@ -1242,12 +1369,83 @@ async function startServer(): Promise<void> {
         cues,
         srt: cuesToSrt(cues),
         vtt: cuesToVtt(cues),
-      });
-    } catch (err) {
-      res.status(500).json({ error: err instanceof Error ? err.message : 'Lỗi tạo Audio TTS.' });
+      };
     } finally {
       await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
     }
+  }
+
+  app.post('/api/tts/synthesize', express.json({ limit: '10mb' }), async (req, res) => {
+    try {
+      const result = await executeTtsSynthesis(req.body || {});
+      res.json(result);
+    } catch (err: any) {
+      const status = Number(err?.statusCode) || 500;
+      res.status(status).json({ error: err instanceof Error ? err.message : 'Lỗi tạo Audio TTS.' });
+    }
+  });
+
+  app.post('/api/tts/synthesize/start', express.json({ limit: '10mb' }), (req, res) => {
+    const body = req.body || {};
+    const providerReq = typeof body?.provider === 'string' ? body.provider : 'auto';
+    if (providerReq === 'elevenlabs' && !process.env.ELEVENLABS_API_KEY) {
+      res.status(400).json({
+        error: 'ELEVENLABS_API_KEY chưa được cấu hình trong Environment Secrets / .env trên server.',
+      });
+      return;
+    }
+    if (providerReq === 'gemini' && !process.env.GEMINI_API_KEY) {
+      res.status(400).json({
+        error: 'GEMINI_API_KEY chưa được cấu hình trong Environment Secrets / .env trên server.',
+      });
+      return;
+    }
+
+    const jobId = crypto.randomUUID();
+    const jobState: TtsJobState = {
+      id: jobId,
+      status: 'running',
+      progress: 4,
+      stageLabel: 'Đang chuẩn bị tạo giọng đọc TTS...',
+      createdAt: Date.now(),
+    };
+    ttsJobs.set(jobId, jobState);
+    res.status(202).json({ ok: true, jobId });
+
+    void (async () => {
+      try {
+        const result = await executeTtsSynthesis(body, (pct, label) => {
+          jobState.progress = pct;
+          jobState.stageLabel = label;
+        });
+        jobState.status = 'done';
+        jobState.progress = 100;
+        jobState.stageLabel = 'Tổng hợp Audio hoàn tất!';
+        jobState.result = result;
+      } catch (err) {
+        jobState.status = 'error';
+        jobState.error = err instanceof Error ? err.message : 'Lỗi tạo Audio TTS.';
+      } finally {
+        setTimeout(() => ttsJobs.delete(jobId), 15 * 60 * 1000).unref();
+      }
+    })();
+  });
+
+  app.get('/api/tts/synthesize/:jobId', (req, res) => {
+    const job = ttsJobs.get(req.params.jobId);
+    if (!job) {
+      res.status(404).json({ error: 'Không tìm thấy tác vụ tổng hợp Audio TTS.' });
+      return;
+    }
+    res.json({
+      ok: true,
+      id: job.id,
+      status: job.status,
+      progress: job.progress,
+      stageLabel: job.stageLabel,
+      result: job.result,
+      error: job.error,
+    });
   });
 
   // ── Multi-Language Subtitle Extractor (Whisper Local + Gemini / Free Translation) ──
@@ -1278,7 +1476,7 @@ async function startServer(): Promise<void> {
         const whisperModel =
           typeof req.headers['x-whisper-model'] === 'string' && req.headers['x-whisper-model'].trim()
             ? req.headers['x-whisper-model'].trim()
-            : 'large-v3-turbo';
+            : 'Xenova/whisper-small';
 
         const inputPath = path.join(tmpDir, `input${ext}`);
         const wavPath = path.join(tmpDir, 'extracted_16k.wav');
@@ -1479,102 +1677,193 @@ async function startServer(): Promise<void> {
   );
 
   // ── Whisper Local Word-Level Alignment (for Reading Along Studio 1.19) ───
+  async function executeWhisperAlign(
+    audioBuf: Buffer,
+    ext: string,
+    sourceLang: string,
+    whisperModel: string,
+    onProgress?: (progress: number, label: string) => void,
+  ) {
+    const tmpDir = path.join(os.tmpdir(), `ks-align-${crypto.randomUUID()}`);
+    await fs.promises.mkdir(tmpDir, { recursive: true });
+    try {
+      const inPath = path.join(tmpDir, `audio${ext}`);
+      const wavPath = path.join(tmpDir, 'align_16k.wav');
+      await fs.promises.writeFile(inPath, audioBuf);
+      onProgress?.(6, 'Đang chuyển đổi audio sang WAV 16kHz...');
+      await runProcess('ffmpeg', [
+        '-y',
+        '-i',
+        inPath,
+        '-vn',
+        '-ac',
+        '1',
+        '-ar',
+        '16000',
+        '-c:a',
+        'pcm_s16le',
+        wavPath,
+      ]);
+      const durationSec = await getAudioDurationSec(wavPath);
+      const aligned = await runLocalWhisperOnWav(wavPath, {
+        sourceLang,
+        modelId: whisperModel,
+        wordLevel: true,
+        preferFasterWhisper: true,
+        onProgress: (pct, lbl) => onProgress?.(pct, lbl),
+      });
+      const mappedWords = aligned.words.map((w) => ({
+        word: w.text,
+        start: w.start,
+        end: w.end,
+      }));
+      const cues = aligned.segments.map((seg, idx) => ({
+        id: `align-cue-${idx + 1}`,
+        start: seg.start,
+        end: seg.end,
+        text: seg.text,
+        words: mappedWords.filter((w) => w.start >= seg.start - 0.06 && w.end <= seg.end + 0.08),
+      }));
+      onProgress?.(100, 'Căn chỉnh Whisper hoàn tất!');
+      return {
+        ok: true,
+        language: aligned.language || sourceLang,
+        modelUsed: aligned.modelUsed || whisperModel,
+        backendUsed: aligned.backendUsed || 'faster-whisper-built-in',
+        durationSec,
+        text: aligned.text,
+        segments: aligned.segments,
+        words: mappedWords,
+        cues,
+        srt: cuesToSrt(cues),
+      };
+    } finally {
+      await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+
+  function parseAlignRequest(req: express.Request): {
+    audioBuf: Buffer | null;
+    ext: string;
+    sourceLang: string;
+    whisperModel: string;
+  } {
+    const isJson =
+      typeof req.headers['content-type'] === 'string' &&
+      req.headers['content-type'].includes('application/json');
+    let audioBuf: Buffer | null = Buffer.isBuffer(req.body) ? req.body : null;
+    let ext = '.mp3';
+    let sourceLang = 'auto';
+    let whisperModel = 'Xenova/whisper-small';
+
+    if (isJson && audioBuf) {
+      const parsed = JSON.parse(audioBuf.toString('utf8')) as {
+        audioBase64?: string;
+        ext?: string;
+        lang?: string;
+        model?: string;
+      };
+      audioBuf = parsed.audioBase64 ? Buffer.from(parsed.audioBase64, 'base64') : null;
+      ext = sanitizeAudioExt(parsed.ext || '.mp3');
+      sourceLang = parsed.lang?.trim() || 'auto';
+      whisperModel = parsed.model?.trim() || 'Xenova/whisper-small';
+    } else {
+      ext = sanitizeAudioExt(
+        typeof req.headers['x-file-ext'] === 'string' ? req.headers['x-file-ext'] : '.mp3',
+      );
+      sourceLang =
+        typeof req.headers['x-source-lang'] === 'string' ? req.headers['x-source-lang'].trim() : 'auto';
+      whisperModel =
+        typeof req.headers['x-whisper-model'] === 'string' && req.headers['x-whisper-model'].trim()
+          ? req.headers['x-whisper-model'].trim()
+          : 'Xenova/whisper-small';
+    }
+
+    return { audioBuf, ext, sourceLang, whisperModel };
+  }
+
   app.post(
     '/api/subtitles/align',
     express.raw({ type: () => true, limit: '250mb' }),
     async (req, res) => {
       req.setTimeout(600_000);
       res.setTimeout(600_000);
-      const tmpDir = path.join(os.tmpdir(), `ks-align-${crypto.randomUUID()}`);
-      await fs.promises.mkdir(tmpDir, { recursive: true });
       try {
-        const isJson =
-          typeof req.headers['content-type'] === 'string' &&
-          req.headers['content-type'].includes('application/json');
-        let audioBuf: Buffer | null = Buffer.isBuffer(req.body) ? req.body : null;
-        let ext = '.mp3';
-        let sourceLang = 'auto';
-        let whisperModel = 'large-v3-turbo';
-
-        if (isJson && audioBuf) {
-          const parsed = JSON.parse(audioBuf.toString('utf8')) as {
-            audioBase64?: string;
-            ext?: string;
-            lang?: string;
-            model?: string;
-          };
-          audioBuf = parsed.audioBase64 ? Buffer.from(parsed.audioBase64, 'base64') : null;
-          ext = sanitizeAudioExt(parsed.ext || '.mp3');
-          sourceLang = parsed.lang?.trim() || 'auto';
-          whisperModel = parsed.model?.trim() || 'large-v3-turbo';
-        } else {
-          ext = sanitizeAudioExt(
-            typeof req.headers['x-file-ext'] === 'string' ? req.headers['x-file-ext'] : '.mp3',
-          );
-          sourceLang =
-            typeof req.headers['x-source-lang'] === 'string' ? req.headers['x-source-lang'].trim() : 'auto';
-          whisperModel =
-            typeof req.headers['x-whisper-model'] === 'string' && req.headers['x-whisper-model'].trim()
-              ? req.headers['x-whisper-model'].trim()
-              : 'large-v3-turbo';
-        }
-
+        const { audioBuf, ext, sourceLang, whisperModel } = parseAlignRequest(req);
         if (!audioBuf || audioBuf.length === 0) {
           res.status(400).json({ error: 'Thiếu file audio để căn chỉnh word-level.' });
           return;
         }
-
-        const inPath = path.join(tmpDir, `audio${ext}`);
-        const wavPath = path.join(tmpDir, 'align_16k.wav');
-        await fs.promises.writeFile(inPath, audioBuf);
-        await runProcess('ffmpeg', [
-          '-y',
-          '-i',
-          inPath,
-          '-vn',
-          '-ac',
-          '1',
-          '-ar',
-          '16000',
-          '-c:a',
-          'pcm_s16le',
-          wavPath,
-        ]);
-        const durationSec = await getAudioDurationSec(wavPath);
-        const aligned = await runLocalWhisperOnWav(wavPath, {
-          sourceLang,
-          modelId: whisperModel,
-          wordLevel: true,
-          preferFasterWhisper: true,
-        });
-        const cues = aligned.segments.map((seg, idx) => ({
-          id: `align-cue-${idx + 1}`,
-          start: seg.start,
-          end: seg.end,
-          text: seg.text,
-          words: aligned.words.filter((w) => w.start >= seg.start - 0.06 && w.end <= seg.end + 0.08),
-        }));
-        res.json({
-          ok: true,
-          language: aligned.language || sourceLang,
-          modelUsed: aligned.modelUsed || whisperModel,
-          backendUsed: aligned.backendUsed || 'faster-whisper-built-in',
-          durationSec,
-          text: aligned.text,
-          segments: aligned.segments,
-          words: aligned.words,
-          cues,
-          srt: cuesToSrt(cues),
-        });
+        const out = await executeWhisperAlign(audioBuf, ext, sourceLang, whisperModel);
+        res.json(out);
       } catch (err) {
         res.status(500).json({ error: err instanceof Error ? err.message : 'Lỗi căn chỉnh Whisper Local.' });
-      } finally {
-        await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
       }
     },
   );
 
-  // ── Whisper Model Cache Status, Preload & Subtitle File Translator ───────
+  app.post(
+    '/api/subtitles/align/start',
+    express.raw({ type: () => true, limit: '250mb' }),
+    (req, res) => {
+      try {
+        const { audioBuf, ext, sourceLang, whisperModel } = parseAlignRequest(req);
+        if (!audioBuf || audioBuf.length === 0) {
+          res.status(400).json({ error: 'Thiếu file audio để căn chỉnh word-level.' });
+          return;
+        }
+        const jobId = crypto.randomUUID();
+        const jobState: AlignJobState = {
+          id: jobId,
+          status: 'running',
+          progress: 4,
+          stageLabel: `Đang chuẩn bị model ${whisperModel}...`,
+          createdAt: Date.now(),
+        };
+        alignJobs.set(jobId, jobState);
+        res.status(202).json({ ok: true, jobId });
+
+        void (async () => {
+          try {
+            const out = await executeWhisperAlign(audioBuf, ext, sourceLang, whisperModel, (pct, lbl) => {
+              jobState.progress = pct;
+              jobState.stageLabel = lbl;
+            });
+            jobState.status = 'done';
+            jobState.progress = 100;
+            jobState.stageLabel = 'Căn chỉnh Whisper hoàn tất!';
+            jobState.result = out;
+          } catch (err) {
+            jobState.status = 'error';
+            jobState.error = err instanceof Error ? err.message : 'Lỗi căn chỉnh Whisper Local.';
+          } finally {
+            setTimeout(() => alignJobs.delete(jobId), 15 * 60 * 1000).unref();
+          }
+        })();
+      } catch (err) {
+        res.status(400).json({ error: err instanceof Error ? err.message : 'Yêu cầu căn chỉnh không hợp lệ.' });
+      }
+    },
+  );
+
+  app.get('/api/subtitles/align/:jobId', (req, res) => {
+    const job = alignJobs.get(req.params.jobId);
+    if (!job) {
+      res.status(404).json({ error: 'Không tìm thấy tác vụ căn chỉnh Whisper.' });
+      return;
+    }
+    res.json({
+      ok: true,
+      id: job.id,
+      status: job.status,
+      progress: job.progress,
+      stageLabel: job.stageLabel,
+      result: job.result,
+      error: job.error,
+    });
+  });
+
+  // ── Whisper Model Cache Status, Async Preload & Async Transcribe Jobs ─────
   app.get('/api/whisper/status', async (_req, res) => {
     try {
       const status = await getWhisperCacheStatus();
@@ -1585,19 +1874,259 @@ async function startServer(): Promise<void> {
   });
 
   app.post('/api/whisper/preload', express.json({ limit: '64kb' }), async (req, res) => {
-    req.setTimeout(600_000);
-    res.setTimeout(600_000);
     try {
       const model =
         typeof req.body?.model === 'string' && req.body.model.trim()
           ? req.body.model.trim()
-          : 'large-v3-turbo';
-      const loaded = await preloadWhisperModel(model);
+          : 'Xenova/whisper-small';
+      const preloadState = startWhisperPreloadJob(model);
       const status = await getWhisperCacheStatus();
-      res.json({ ok: true, ...loaded, status });
+      res.status(202).json({ ok: true, started: true, preloadState, status });
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : 'Không tải được model Whisper.' });
     }
+  });
+
+  app.post(
+    '/api/subtitles/transcribe/start',
+    express.raw({ type: () => true, limit: '250mb' }),
+    async (req, res) => {
+      const body = req.body;
+      if (!Buffer.isBuffer(body) || body.length === 0) {
+        res.status(400).json({ error: 'Vui lòng tải lên file video hoặc audio.' });
+        return;
+      }
+
+      const ext = sanitizeMediaExt(
+        typeof req.headers['x-file-ext'] === 'string' ? req.headers['x-file-ext'] : '.mp4',
+      );
+      const sourceLang =
+        typeof req.headers['x-source-lang'] === 'string' ? req.headers['x-source-lang'].trim() : 'auto';
+      const translateLang =
+        typeof req.headers['x-translate-lang'] === 'string' ? req.headers['x-translate-lang'].trim() : 'none';
+      const engineReq =
+        typeof req.headers['x-engine'] === 'string' ? req.headers['x-engine'].trim().toLowerCase() : 'faster-whisper';
+      const whisperModel =
+        typeof req.headers['x-whisper-model'] === 'string' && req.headers['x-whisper-model'].trim()
+          ? req.headers['x-whisper-model'].trim()
+          : 'Xenova/whisper-small';
+
+      const jobId = crypto.randomUUID();
+      const jobState: TranscribeJobState = {
+        id: jobId,
+        status: 'running',
+        progress: 5,
+        stageLabel: 'Đang tách âm thanh từ Video/Audio bằng FFmpeg...',
+        createdAt: Date.now(),
+      };
+      transcribeJobs.set(jobId, jobState);
+      res.status(202).json({ ok: true, jobId });
+
+      // Run in background so proxy never hits 504 gateway timeout during first-run model downloads
+      void (async () => {
+        const tmpDir = path.join(os.tmpdir(), `ks-subjob-${jobId}`);
+        await fs.promises.mkdir(tmpDir, { recursive: true });
+        try {
+          const inputPath = path.join(tmpDir, `input${ext}`);
+          const wavPath = path.join(tmpDir, 'extracted_16k.wav');
+          const mp3Path = path.join(tmpDir, 'extracted.mp3');
+          await fs.promises.writeFile(inputPath, body);
+
+          await runProcess('ffmpeg', [
+            '-y',
+            '-i',
+            inputPath,
+            '-vn',
+            '-ac',
+            '1',
+            '-ar',
+            '16000',
+            '-c:a',
+            'pcm_s16le',
+            wavPath,
+          ]);
+          await runProcess('ffmpeg', [
+            '-y',
+            '-i',
+            wavPath,
+            '-c:a',
+            'libmp3lame',
+            '-b:a',
+            '48k',
+            mp3Path,
+          ]);
+
+          const mp3Buf = await fs.promises.readFile(mp3Path);
+          const totalDur = await getAudioDurationSec(wavPath);
+          const apiKey = process.env.GEMINI_API_KEY || '';
+
+          let rawSegs: Array<{ start: number; end: number; text: string; translation?: string }> = [];
+          let detectedLang = sourceLang;
+          let engineUsed = 'faster-whisper (Built-in)';
+          let translationEngineUsed = '';
+          let whisperWords: Array<{ word: string; start: number; end: number }> = [];
+
+          if (engineReq === 'gemini' && apiKey) {
+            jobState.stageLabel = 'Đang gửi audio lên Gemini AI để bóc phụ đề...';
+            try {
+              const langHint =
+                sourceLang && sourceLang !== 'auto'
+                  ? `The spoken language is ${sourceLang}.`
+                  : 'Auto-detect the spoken language accurately.';
+              const translateHint =
+                translateLang && translateLang !== 'none'
+                  ? `Also provide a natural translation into ${translateLang} in the "translation" field.`
+                  : 'Leave "translation" empty.';
+              const prompt = [
+                'Transcribe the audio into timestamped subtitle segments suitable for short-form 9:16 videos (1–2 short clauses per segment).',
+                langHint,
+                translateHint,
+                'Return ONLY valid JSON with shape: { "language": "detected code", "segments": [{ "start": 0.0, "end": 2.5, "text": "...", "translation": "..." }] }.',
+                `Audio total duration is approximately ${totalDur.toFixed(2)} seconds.`,
+              ].join(' ');
+              const { GoogleGenAI } = await import('@google/genai');
+              const ai = new GoogleGenAI({
+                apiKey,
+                httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+              });
+              for (const modelName of ['gemini-4-hydrogen', 'gemini-3.1-flash-lite']) {
+                try {
+                  const aiRes = await ai.models.generateContent({
+                    model: modelName,
+                    contents: [
+                      { inlineData: { mimeType: 'audio/mp3', data: mp3Buf.toString('base64') } },
+                      { text: prompt },
+                    ],
+                    config: { responseMimeType: 'application/json' },
+                  });
+                  const parsed = JSON.parse((aiRes.text || '{}').trim()) as {
+                    language?: string;
+                    segments?: Array<{ start?: number; end?: number; text?: string; translation?: string }>;
+                  };
+                  detectedLang = parsed.language || sourceLang;
+                  rawSegs = (Array.isArray(parsed.segments) ? parsed.segments : []).map((s) => ({
+                    start: Number(s.start ?? 0),
+                    end: Number(s.end ?? 0),
+                    text: String(s.text || '').trim(),
+                    translation: String(s.translation || '').trim(),
+                  }));
+                  engineUsed = `gemini (${modelName})`;
+                  if (translateLang && translateLang !== 'none') {
+                    translationEngineUsed = `gemini (${modelName})`;
+                  }
+                  break;
+                } catch {
+                  // try next model or fallback to Whisper
+                }
+              }
+            } catch {
+              // fallback to Whisper below
+            }
+          }
+
+          if (rawSegs.length === 0) {
+            jobState.progress = 15;
+            jobState.stageLabel = `Đang nạp model ${whisperModel} & nhận diện lời thoại (lần đầu sẽ tự tải model)...`;
+            const wRes = await runLocalWhisperOnWav(wavPath, {
+              sourceLang,
+              modelId: whisperModel,
+              wordLevel: true,
+              preferFasterWhisper: engineReq !== 'whisper',
+              onProgress: (pct, lbl) => {
+                jobState.progress = Math.min(88, Math.max(15, Math.round(15 + pct * 0.7)));
+                jobState.stageLabel = lbl;
+              },
+            });
+            rawSegs = wRes.segments;
+            detectedLang = wRes.language || sourceLang;
+            whisperWords = wRes.words.map((w) => ({ word: w.text, start: w.start, end: w.end }));
+            engineUsed = `${wRes.backendUsed || 'faster-whisper (Built-in)'} · ${wRes.modelUsed || whisperModel}`;
+
+            if (rawSegs.length > 0 && translateLang && translateLang !== 'none') {
+              jobState.progress = 90;
+              jobState.stageLabel = `Đang dịch phụ đề sang ${translateLang}...`;
+              try {
+                const tr = await translateLinesWithGeminiOrFree(
+                  rawSegs.map((s) => s.text),
+                  translateLang,
+                );
+                translationEngineUsed = tr.engineUsed;
+                rawSegs = rawSegs.map((s, idx) => ({
+                  ...s,
+                  translation: String(tr.translations?.[idx] || '').trim(),
+                }));
+              } catch {
+                // keep original text
+              }
+            }
+          }
+
+          if (rawSegs.length === 0) {
+            throw new Error('Không nhận diện được lời thoại trong file này (có thể file không có giọng nói).');
+          }
+
+          const cues = rawSegs
+            .map((s, idx) => {
+              const st = Math.max(0, Number(s.start ?? 0));
+              const en = Math.max(st + 0.3, Number(s.end ?? st + 2.0));
+              const mainText = String(s.text || '').trim();
+              const trans = String(s.translation || '').trim();
+              const fullText = trans && translateLang !== 'none' ? `${mainText}\n${trans}` : mainText;
+              const segWords = whisperWords.filter((w) => w.start >= st - 0.05 && w.end <= en + 0.08);
+              return {
+                id: `sub-cue-${idx + 1}`,
+                start: Number(st.toFixed(3)),
+                end: Number(en.toFixed(3)),
+                text: fullText,
+                words:
+                  segWords.length >= 2
+                    ? segWords
+                    : interpolateWordTimings(mainText || fullText, st, en),
+              };
+            })
+            .filter((c) => c.text.length > 0);
+
+          jobState.status = 'done';
+          jobState.progress = 100;
+          jobState.stageLabel = 'Hoàn tất bóc tách phụ đề!';
+          jobState.result = {
+            ok: true,
+            engineUsed,
+            translationEngineUsed: translationEngineUsed || undefined,
+            language: detectedLang,
+            durationSec: totalDur,
+            cues,
+            srt: cuesToSrt(cues),
+            vtt: cuesToVtt(cues),
+            audioBase64: mp3Buf.length <= 12 * 1024 * 1024 ? mp3Buf.toString('base64') : undefined,
+            audioMimeType: 'audio/mpeg',
+          };
+        } catch (err) {
+          jobState.status = 'error';
+          jobState.error = err instanceof Error ? err.message : 'Lỗi bóc tách phụ đề.';
+        } finally {
+          await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+          setTimeout(() => transcribeJobs.delete(jobId), 15 * 60 * 1000).unref();
+        }
+      })();
+    },
+  );
+
+  app.get('/api/subtitles/transcribe/:jobId', (req, res) => {
+    const job = transcribeJobs.get(req.params.jobId);
+    if (!job) {
+      res.status(404).json({ error: 'Không tìm thấy tác vụ bóc tách phụ đề.' });
+      return;
+    }
+    res.json({
+      ok: true,
+      id: job.id,
+      status: job.status,
+      progress: job.progress ?? (job.status === 'done' ? 100 : 12),
+      stageLabel: job.stageLabel,
+      result: job.result,
+      error: job.error,
+    });
   });
 
   app.post('/api/subtitles/translate', express.json({ limit: '5mb' }), async (req, res) => {
@@ -1693,6 +2222,119 @@ async function startServer(): Promise<void> {
     } catch (err) {
       res.status(500).json({
         error: err instanceof Error ? err.message : 'Lỗi gọi Gemini API',
+      });
+    }
+  });
+
+  app.post('/api/ai/generate-reading', express.json({ limit: '2mb' }), async (req, res) => {
+    try {
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+        res.status(400).json({
+          error:
+            'Chưa cấu hình GEMINI_API_KEY trong Settings > Secrets trên server để AI tạo hoặc chuyển thể bài đọc.',
+        });
+        return;
+      }
+
+      const mode = req.body?.mode === 'adapt-url' ? 'adapt-url' : 'generate';
+      const levelRaw = typeof req.body?.level === 'string' ? req.body.level.trim().toUpperCase() : 'B1';
+      const level = ['A1', 'A2', 'B1', 'B2', 'C1'].includes(levelRaw) ? levelRaw : 'B1';
+      const topic = typeof req.body?.topic === 'string' ? req.body.topic.trim() : '';
+      const sourceText = typeof req.body?.sourceText === 'string' ? req.body.sourceText.trim() : '';
+      const sourceTitle = typeof req.body?.sourceTitle === 'string' ? req.body.sourceTitle.trim() : '';
+      const wordCountRaw = Number(req.body?.wordCount ?? 110);
+      const wordCount = Number.isFinite(wordCountRaw)
+        ? Math.max(40, Math.min(260, Math.round(wordCountRaw)))
+        : 110;
+
+      if (mode === 'adapt-url' && !sourceText) {
+        res.status(400).json({ error: 'Thiếu nội dung trang web nguồn để chuyển thể.' });
+        return;
+      }
+      if (mode === 'generate' && !topic) {
+        res.status(400).json({ error: 'Vui lòng nhập chủ đề bài đọc tiếng Anh.' });
+        return;
+      }
+
+      const levelGuidance: Record<string, string> = {
+        A1: 'CEFR A1 Beginner: very short everyday sentences (6-10 words per sentence), high-frequency basic vocabulary, simple present/past.',
+        A2: 'CEFR A2 Elementary: clear simple sentences (8-13 words per sentence), practical daily vocabulary, easy connectors.',
+        B1: 'CEFR B1 Intermediate: natural connected English (10-16 words per sentence), everyday academic/lifestyle vocabulary.',
+        B2: 'CEFR B2 Upper-Intermediate: fluent varied structures, clear idiomatic expressions, engaging storytelling.',
+        C1: 'CEFR C1 Advanced: sophisticated natural prose, rich lexical precision, smooth rhetorical cadence.',
+      };
+
+      const prompt =
+        mode === 'adapt-url'
+          ? `You are an expert ESL curriculum designer for Read-Along karaoke videos.
+Convert and adapt the scraped webpage content below into a clean, engaging English read-along passage tailored to ${levelGuidance[level]}
+Target total length: around ${wordCount} words.
+Source title: ${sourceTitle || 'Web Article'}
+Source content:
+"""
+${sourceText.slice(0, 9000)}
+"""
+Return ONLY valid JSON with keys:
+{
+  "title": "Concise engaging English title",
+  "topicBadge": "SHORT UPPERCASE BADGE (2-3 words, e.g. CEFR ${level} · SCIENCE)",
+  "level": "${level}",
+  "text": "Clean English sentences separated by \\n (1 sentence per line, no bullet symbols, no markdown, no HTML, no timestamps)."
+}`
+          : `You are an expert ESL curriculum designer for Read-Along karaoke videos.
+Write an original, engaging English read-along passage about: "${topic}"
+Target proficiency: ${levelGuidance[level]}
+Target total length: around ${wordCount} words.
+Return ONLY valid JSON with keys:
+{
+  "title": "Concise engaging English title",
+  "topicBadge": "SHORT UPPERCASE BADGE (2-3 words, e.g. CEFR ${level} · READING)",
+  "level": "${level}",
+  "text": "Clean English sentences separated by \\n (1 sentence per line, no bullet symbols, no markdown, no timestamps)."
+}`;
+
+      const { GoogleGenAI } = await import('@google/genai');
+      const ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+      });
+      const response = await ai.models.generateContent({
+        model: 'gemini-4-hydrogen',
+        contents: prompt,
+        config: {
+          responseMimeType: 'application/json',
+        },
+      });
+      const rawJson = (response.text || '').trim();
+      if (!rawJson) {
+        res.status(502).json({ error: 'Gemini không trả về nội dung bài đọc.' });
+        return;
+      }
+      const parsed = JSON.parse(rawJson) as {
+        title?: string;
+        topicBadge?: string;
+        level?: string;
+        text?: string;
+      };
+      const cleanLines = (parsed.text || '')
+        .split(/\r?\n/)
+        .map((line) => line.replace(/^[-•*\d.)\s]+/, '').trim())
+        .filter(Boolean);
+      if (cleanLines.length === 0) {
+        res.status(502).json({ error: 'AI trả về bài đọc rỗng.' });
+        return;
+      }
+      res.json({
+        ok: true,
+        title: (parsed.title || sourceTitle || topic || 'Reading Along').trim(),
+        topicBadge: (parsed.topicBadge || `CEFR ${level} · READING`).trim(),
+        level,
+        text: cleanLines.join('\n'),
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Lỗi AI tạo bài đọc.',
       });
     }
   });
@@ -1846,12 +2488,18 @@ async function startServer(): Promise<void> {
         await fs.promises.mkdir(targetDir, { recursive: true });
         const diskPath = path.join(targetDir, `${safeBaseName}.mp4`);
         await fs.promises.copyFile(outputPath, diskPath);
+        const relPath = path.relative(baseDir, diskPath).replace(/\\/g, '/');
+        const sourceTab = typeof req.body?.sourceTab === 'string' ? req.body.sourceTab.trim() : '';
+        if (sourceTab) {
+          await recordOutputMeta(relPath, sourceTab);
+        }
         await cleanupJob(job.id);
         res.json({
           ok: true,
           savedPath: diskPath,
-          relativePath: path.relative(baseDir, diskPath).replace(/\\/g, '/'),
+          relativePath: relPath,
           bytes: outStat.size,
+          sourceTab: sourceTab || undefined,
         });
         return;
       }
@@ -1897,13 +2545,36 @@ async function startServer(): Promise<void> {
       const jobId = crypto.randomUUID();
       const dir = getStudioJobDir(jobId);
       await fs.promises.mkdir(dir, { recursive: true });
-      const job: StudioJob = { id: jobId, dir, createdAt: Date.now(), files: {} };
+      const job: StudioJob = {
+        id: jobId,
+        dir,
+        createdAt: Date.now(),
+        files: {},
+        status: 'idle',
+        progress: 0,
+        stageLabel: 'Đã khởi tạo Studio job.',
+      };
       studioJobs.set(jobId, job);
       await fs.promises.writeFile(path.join(dir, 'meta.json'), JSON.stringify(job), 'utf8');
       res.json({ ok: true, jobId });
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : 'Không tạo được Studio job.' });
     }
+  });
+
+  app.get('/api/studio/job/:jobId/status', async (req, res) => {
+    const job = await loadStudioJob(req.params.jobId);
+    if (!job) {
+      res.status(404).json({ error: 'Studio job không tồn tại hoặc đã hoàn tất.' });
+      return;
+    }
+    res.json({
+      ok: true,
+      id: job.id,
+      status: job.status ?? 'idle',
+      progress: job.progress ?? 0,
+      stageLabel: job.stageLabel ?? '',
+    });
   });
 
   app.post(
@@ -1964,7 +2635,11 @@ async function startServer(): Promise<void> {
         durationMode === 'loop-video' ? aMeta.duration : Math.min(vMeta.duration, aMeta.duration),
       );
 
-      const watermarkText = typeof req.body?.watermarkText === 'string' ? req.body.watermarkText.trim() : '';
+      const watermarkEnabled = req.body?.watermarkEnabled !== false;
+      const watermarkText =
+        watermarkEnabled && typeof req.body?.watermarkText === 'string'
+          ? req.body.watermarkText.trim()
+          : '';
       const watermarkCorner = typeof req.body?.watermarkCorner === 'string' ? req.body.watermarkCorner : 'bottom-right';
       const watermarkOpacity = Math.max(0.1, Math.min(1, Number(req.body?.watermarkOpacity ?? 0.65)));
       const outroText = typeof req.body?.outroText === 'string' ? req.body.outroText.trim() : '';
@@ -2057,28 +2732,51 @@ async function startServer(): Promise<void> {
       }
       args.push('-t', duration.toFixed(3), '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', outLocal);
 
-      await spawnTrackedFfmpeg(args, job.dir, (p) => activeStudioProcs.set(job.id, p));
-      activeStudioProcs.delete(job.id);
+      job.status = 'running';
+      job.progress = 8;
+      job.stageLabel = 'FFmpeg đang ghép Video + Audio...';
 
-      const rawOutName = typeof req.body?.outputName === 'string' ? req.body.outputName : 'merged_video';
-      const stem = sanitizeOutputStem(rawOutName.replace(/\.mp4$/i, ''), 'merged_video');
-      const fileName = stem.endsWith('_merged') ? `${stem}.mp4` : `${stem}_merged.mp4`;
-      const saveSubPath = typeof req.body?.savePath === 'string' ? req.body.savePath : 'edu-studio';
+      await spawnTrackedFfmpeg(
+        args,
+        job.dir,
+        (p) => activeStudioProcs.set(job.id, p),
+        (sec) => {
+          const pct = Math.min(96, Math.max(10, Math.round(10 + (sec / Math.max(0.5, duration)) * 86)));
+          job.progress = pct;
+          job.stageLabel = `Đang ghép Video + Audio (${pct}%)...`;
+        },
+      );
+      activeStudioProcs.delete(job.id);
+      job.progress = 98;
+      job.stageLabel = 'Đang lưu file vào thư mục Output...';
+
+      const rawOutName = typeof req.body?.outputName === 'string' ? req.body.outputName : '';
+      const origBase = path.basename(videoPath, path.extname(videoPath)).replace(/^video_/, '');
+      const stem = sanitizeOutputStem(rawOutName.replace(/\.mp4$/i, ''), origBase || 'video_merged');
+      const fileName = `${stem}.mp4`;
+      const saveSubPath = typeof req.body?.savePath === 'string' ? req.body.savePath : '';
       const { baseDir, targetDir } = resolveSafeOutputDir(saveSubPath);
       await fs.promises.mkdir(targetDir, { recursive: true });
       const diskPath = path.join(targetDir, fileName);
       await fs.promises.copyFile(outLocal, diskPath);
       const stat = await fs.promises.stat(diskPath);
+      const relPath = path.relative(baseDir, diskPath).replace(/\\/g, '/');
+      await recordOutputMeta(relPath, 'Edu Merge');
+      job.progress = 100;
+      job.status = 'done';
+      job.stageLabel = 'Ghép Video hoàn tất!';
       await cleanupStudioJob(job.id);
 
       res.json({
         ok: true,
         fileName,
-        relativePath: path.relative(baseDir, diskPath).replace(/\\/g, '/'),
+        relativePath: relPath,
         savedPath: diskPath,
         bytes: stat.size,
+        sourceTab: 'Edu Merge',
       });
     } catch (err) {
+      job.status = 'error';
       await cleanupStudioJob(job.id);
       res.status(500).json({ error: err instanceof Error ? err.message : 'Lỗi FFmpeg ghép Video + Audio.' });
     }
@@ -2109,6 +2807,16 @@ async function startServer(): Promise<void> {
       const fadeOutStart = outroSeconds > 0 ? Math.max(0, duration - outroSeconds) : Math.max(0, duration - 0.35);
       const fadeOutDur = Math.max(0.25, duration - fadeOutStart);
 
+      const watermarkEnabled = req.body?.watermarkEnabled !== false;
+      const watermarkText =
+        watermarkEnabled && typeof req.body?.watermarkText === 'string'
+          ? req.body.watermarkText.trim()
+          : '';
+      const watermarkCorner =
+        typeof req.body?.watermarkCorner === 'string' ? req.body.watermarkCorner : 'bottom-right';
+      const watermarkOpacity = Math.max(0.15, Math.min(1, Number(req.body?.watermarkOpacity ?? 0.65)));
+      const outroText = typeof req.body?.outroText === 'string' ? req.body.outroText.trim() : '';
+
       const vFilters: string[] = [];
       if (effect === 'Fade cinematic') {
         vFilters.push('fade=t=in:st=0:d=0.65', `fade=t=out:st=${fadeOutStart.toFixed(3)}:d=${fadeOutDur.toFixed(3)}`);
@@ -2119,7 +2827,6 @@ async function startServer(): Promise<void> {
       } else if (effect === 'Cool tech + fade') {
         vFilters.push('eq=contrast=1.05:saturation=1.08', 'colorbalance=rs=-0.025:gs=0.005:bs=0.035', 'fade=t=in:st=0:d=0.7', `fade=t=out:st=${fadeOutStart.toFixed(3)}:d=${fadeOutDur.toFixed(3)}`);
       } else if (effect === 'Slow zoom + fade') {
-        // Fixed Educational Studio 1.19 bug: preserve source probed FPS instead of dead regex + hardcoded 30
         const srcFps = Math.max(24, Math.min(60, vMeta.fps || 30));
         vFilters.push(
           `fps=${srcFps}`,
@@ -2132,18 +2839,90 @@ async function startServer(): Promise<void> {
         vFilters.push(`subtitles=filename=${path.basename(assPath)}`);
       }
 
+      if (watermarkText || (outroSeconds > 0 && outroText)) {
+        const toAssTimeOverlay = (sec: number) => {
+          const s = Math.max(0, sec);
+          const cs = Math.round(s * 100);
+          const hh = Math.floor(cs / 360000);
+          const mm = Math.floor((cs % 360000) / 6000);
+          const ss = Math.floor((cs % 6000) / 100);
+          const cc = cs % 100;
+          return `${hh}:${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}.${String(cc).padStart(2, '0')}`;
+        };
+        const escAssOverlay = (s: string) =>
+          s.replace(/\\/g, '\\\\').replace(/\{/g, '(').replace(/\}/g, ')');
+
+        const overlayLines: string[] = [
+          '[Script Info]',
+          'ScriptType: v4.00+',
+          `PlayResX: ${vMeta.width}`,
+          `PlayResY: ${vMeta.height}`,
+          'WrapStyle: 2',
+          '',
+          '[V4+ Styles]',
+          'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
+          `Style: Watermark,Noto Sans,${Math.max(18, Math.round(vMeta.height * 0.022))},&H00FFFFFF,&H00FFFFFF,&H800F172A,&H00000000,-1,0,0,0,100,100,0,0,1,2,1,3,36,36,28,1`,
+          `Style: Outro,Noto Sans,${Math.max(26, Math.round(vMeta.height * 0.044))},&H00FFFFFF,&H00FFFFFF,&H400F172A,&H00000000,-1,0,0,0,100,100,0,0,1,3,1,5,40,40,40,1`,
+          '',
+          '[Events]',
+          'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text',
+        ];
+
+        if (watermarkText) {
+          const anCode =
+            watermarkCorner === 'top-left'
+              ? 7
+              : watermarkCorner === 'top-right'
+                ? 9
+                : watermarkCorner === 'bottom-left'
+                  ? 1
+                  : 3;
+          const alphaHex = Math.round((1 - watermarkOpacity) * 255)
+            .toString(16)
+            .toUpperCase()
+            .padStart(2, '0');
+          overlayLines.push(
+            `Dialogue: 1,0:00:00.00,${toAssTimeOverlay(duration)},Watermark,,0,0,0,,{\\an${anCode}\\alpha&H${alphaHex}&}${escAssOverlay(watermarkText)}`,
+          );
+        }
+        if (outroSeconds > 0 && outroText) {
+          const startOutro = Math.max(0, duration - outroSeconds);
+          const joined = outroText
+            .split(/\r?\n/)
+            .map((l: string) => escAssOverlay(l.trim()))
+            .filter(Boolean)
+            .slice(0, 2)
+            .join('\\N');
+          if (joined) {
+            overlayLines.push(
+              `Dialogue: 2,${toAssTimeOverlay(startOutro)},${toAssTimeOverlay(duration)},Outro,,0,0,0,,{\\an5\\fad(450,450)}${joined}`,
+            );
+          }
+        }
+        const wmOverlayPath = path.join(job.dir, 'wm_outro.ass');
+        await fs.promises.writeFile(wmOverlayPath, '\uFEFF' + overlayLines.join('\n'), 'utf8');
+        vFilters.push(`subtitles=filename=${path.basename(wmOverlayPath)}`);
+      }
+
+      const musicPreset = typeof req.body?.musicPreset === 'string' ? req.body.musicPreset.trim() : '';
+      const sfxPreset = typeof req.body?.sfxPreset === 'string' ? req.body.sfxPreset.trim() : '';
+      const resolvedMusicPath =
+        job.files.music || (musicPreset && musicPreset !== 'none' ? await ensureDefaultStudioAudio(musicPreset) : null);
+      const resolvedSfxPath =
+        job.files.sfx || (sfxPreset && sfxPreset !== 'none' ? await ensureDefaultStudioAudio(sfxPreset) : null);
+
       const cmd: string[] = ['-y', '-hide_banner', '-loglevel', 'error', '-i', videoPath];
       let nextIdx = 1;
       let musicIdx: number | null = null;
       let sfxIdx: number | null = null;
       let voiceIdx: number | null = null;
 
-      if (job.files.music) {
-        cmd.push('-stream_loop', '-1', '-i', job.files.music);
+      if (resolvedMusicPath) {
+        cmd.push('-stream_loop', '-1', '-i', resolvedMusicPath);
         musicIdx = nextIdx++;
       }
-      if (job.files.sfx) {
-        cmd.push('-stream_loop', '-1', '-i', job.files.sfx);
+      if (resolvedSfxPath) {
+        cmd.push('-stream_loop', '-1', '-i', resolvedSfxPath);
         sfxIdx = nextIdx++;
       }
       if (job.files.voice) {
@@ -2231,30 +3010,75 @@ async function startServer(): Promise<void> {
       else cmd.push('-an');
       cmd.push('-movflags', '+faststart', outLocal);
 
-      await spawnTrackedFfmpeg(cmd, job.dir, (p) => activeStudioProcs.set(job.id, p));
-      activeStudioProcs.delete(job.id);
+      job.status = 'running';
+      job.progress = 8;
+      job.stageLabel = 'FFmpeg đang render Karaoke & Mix âm thanh...';
 
-      const rawOutName = typeof req.body?.outputName === 'string' ? req.body.outputName : 'karaoke_mix';
-      const stem = sanitizeOutputStem(rawOutName.replace(/\.mp4$/i, ''), 'karaoke_mix');
-      const fileName = `${stem}_karaoke.mp4`;
-      const saveSubPath = typeof req.body?.savePath === 'string' ? req.body.savePath : 'edu-studio';
+      await spawnTrackedFfmpeg(
+        cmd,
+        job.dir,
+        (p) => activeStudioProcs.set(job.id, p),
+        (sec) => {
+          const pct = Math.min(96, Math.max(10, Math.round(10 + (sec / Math.max(0.5, duration)) * 86)));
+          job.progress = pct;
+          job.stageLabel = `Đang render Karaoke & Mix (${pct}%)...`;
+        },
+      );
+      activeStudioProcs.delete(job.id);
+      job.progress = 98;
+      job.stageLabel = 'Đang lưu file vào thư mục Output...';
+
+      const rawOutName = typeof req.body?.outputName === 'string' ? req.body.outputName : '';
+      const origBase = path.basename(videoPath, path.extname(videoPath)).replace(/^video_/, '');
+      const stem = sanitizeOutputStem(rawOutName.replace(/\.mp4$/i, ''), origBase || 'karaoke_mix');
+      const fileName = `${stem}.mp4`;
+      const saveSubPath = typeof req.body?.savePath === 'string' ? req.body.savePath : '';
       const { baseDir, targetDir } = resolveSafeOutputDir(saveSubPath);
       await fs.promises.mkdir(targetDir, { recursive: true });
       const diskPath = path.join(targetDir, fileName);
       await fs.promises.copyFile(outLocal, diskPath);
       const stat = await fs.promises.stat(diskPath);
+      const relPath = path.relative(baseDir, diskPath).replace(/\\/g, '/');
+      await recordOutputMeta(relPath, 'Edu Karaoke');
+      job.progress = 100;
+      job.status = 'done';
+      job.stageLabel = 'Render Karaoke & Mix hoàn tất!';
       await cleanupStudioJob(job.id);
 
       res.json({
         ok: true,
         fileName,
-        relativePath: path.relative(baseDir, diskPath).replace(/\\/g, '/'),
+        relativePath: relPath,
         savedPath: diskPath,
         bytes: stat.size,
+        sourceTab: 'Edu Karaoke',
       });
     } catch (err) {
+      job.status = 'error';
       await cleanupStudioJob(job.id);
       res.status(500).json({ error: err instanceof Error ? err.message : 'Lỗi FFmpeg render Karaoke & Mix.' });
+    }
+  });
+
+  app.get('/api/studio/default-audio', async (req, res) => {
+    try {
+      const preset = typeof req.query.preset === 'string' ? req.query.preset.trim() : '';
+      if (!preset || preset === 'none') {
+        res.status(400).json({ error: 'Vui lòng chọn preset âm thanh mặc định.' });
+        return;
+      }
+      const filePath = await ensureDefaultStudioAudio(preset);
+      if (!filePath) {
+        res.status(404).json({ error: 'Preset âm thanh mặc định không hợp lệ.' });
+        return;
+      }
+      res.setHeader('Content-Type', 'audio/mpeg');
+      res.setHeader('Cache-Control', 'public, max-age=3600');
+      res.sendFile(filePath);
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Không tạo được âm thanh mặc định.',
+      });
     }
   });
 
@@ -2288,6 +3112,11 @@ async function startServer(): Promise<void> {
       res.status(status).json({ error: message });
     },
   );
+
+  // Never fall through to HTML for unmatched /api/* endpoints
+  app.use('/api', (_req, res) => {
+    res.status(404).json({ error: 'API endpoint không tồn tại.' });
+  });
 
   if (process.env.NODE_ENV === 'production') {
     const distDir = path.resolve('dist');

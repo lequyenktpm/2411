@@ -8,12 +8,21 @@ import {
   Loader2,
   Mic,
   Play,
-  RefreshCw,
   Sparkles,
   Upload,
   X,
 } from 'lucide-react';
-import { parseTranscriptAuto, stripTimestampsFromScript } from '../engine/transcriptParser';
+import {
+  cuesToBlockTranscript,
+  cuesToSrt,
+  parseTranscriptAuto,
+  refineCuesWithWhisperWords,
+  stripTimestampsFromScript,
+} from '../engine/transcriptParser';
+import {
+  alignAudioWithProgressJob,
+  synthesizeAudioWithProgressJob,
+} from '../engine/ttsSyncHelper';
 import { TranscriptCue } from '../engine/types';
 
 export interface TtsVoiceOption {
@@ -115,10 +124,14 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
     return cleaned || SAMPLE_TTS_SCRIPT;
   });
   const [autoAlignWhisper, setAutoAlignWhisper] = useState<boolean>(true);
-  const [ttsWhisperModel, setTtsWhisperModel] = useState<string>('large-v3-turbo');
+  const [ttsWhisperModel, setTtsWhisperModel] = useState<string>('Xenova/whisper-small');
   const [ttsAlignNote, setTtsAlignNote] = useState<string | null>(null);
+  const [ttsCleanedNotice, setTtsCleanedNotice] = useState<string | null>(null);
+  const [ttsPreviewMode, setTtsPreviewMode] = useState<'block' | 'srt'>('block');
   const [isSynthesizing, setIsSynthesizing] = useState(false);
   const [isAligningTts, setIsAligningTts] = useState(false);
+  const [ttsProgress, setTtsProgress] = useState(0);
+  const [ttsStageLabel, setTtsStageLabel] = useState('');
   const [ttsError, setTtsError] = useState<string | null>(null);
   const [ttsResult, setTtsResult] = useState<{
     audioFile: File;
@@ -126,19 +139,22 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
     audioBase64: string;
     cues: TranscriptCue[];
     srt: string;
+    blockTranscript: string;
     providerUsed: string;
     detectedLanguage?: string;
     durationSec: number;
   } | null>(null);
 
-  // Transcribe state (defaults: faster-whisper Built-in, large-v3-turbo, .srt)
+  // Transcribe state (defaults: faster-whisper Built-in, Xenova/whisper-small for fast CPU/ONNX, .srt)
   const [mediaFile, setMediaFile] = useState<File | null>(null);
   const [sttService, setSttService] = useState<'faster-whisper' | 'whisper' | 'gemini'>('faster-whisper');
-  const [whisperModel, setWhisperModel] = useState<string>('large-v3-turbo');
+  const [whisperModel, setWhisperModel] = useState<string>('Xenova/whisper-small');
   const [outputFormat, setOutputFormat] = useState<'srt' | 'vtt'>('srt');
   const [sourceLang, setSourceLang] = useState<string>('auto');
   const [translateLang, setTranslateLang] = useState<string>('none');
   const [isTranscribing, setIsTranscribing] = useState(false);
+  const [transcribeProgress, setTranscribeProgress] = useState(0);
+  const [transcribeStageLabel, setTranscribeStageLabel] = useState<string | null>(null);
   const [transcribeError, setTranscribeError] = useState<string | null>(null);
   const [subFormatTab, setSubFormatTab] = useState<'srt' | 'vtt'>('srt');
   const [transcribeResult, setTranscribeResult] = useState<{
@@ -157,6 +173,7 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
   // Whisper cache status & standalone translation state
   const [cachedOnnxModels, setCachedOnnxModels] = useState<string[]>([]);
   const [isPreloadingWhisper, setIsPreloadingWhisper] = useState(false);
+  const [whisperPreloadProgress, setWhisperPreloadProgress] = useState(0);
   const [whisperPreloadMsg, setWhisperPreloadMsg] = useState<string | null>(null);
 
   const [standaloneTargetLang, setStandaloneTargetLang] = useState<string>('Vietnamese');
@@ -169,6 +186,14 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
 
   const mediaInputRef = useRef<HTMLInputElement>(null);
   const srtFileInputRef = useRef<HTMLInputElement>(null);
+  const isMountedRef = useRef<boolean>(true);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   const refreshWhisperStatus = () => {
     fetch('/api/whisper/status')
@@ -239,28 +264,18 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
   const selectedVoiceObj = availableVoices.find((v) => v.id === voice);
 
   const alignAudioWithWhisperAuto = async (audioBase64: string, modelId: string) => {
-    const res = await fetch('/api/subtitles/align', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    return alignAudioWithProgressJob(
+      {
         audioBase64,
         ext: '.mp3',
         lang: 'auto',
         model: modelId,
-      }),
-    });
-    const data = await parseApiJson<{
-      cues?: TranscriptCue[];
-      srt?: string;
-      language?: string;
-      backendUsed?: string;
-      modelUsed?: string;
-      error?: string;
-    }>(res, 'Không thể căn chỉnh word-level bằng Whisper');
-    if (!res.ok) {
-      throw new Error(data?.error || 'Không thể căn chỉnh word-level bằng Whisper.');
-    }
-    return data;
+      },
+      (pct, lbl) => {
+        setTtsProgress(Math.min(99, Math.round(74 + pct * 0.25)));
+        setTtsStageLabel(lbl);
+      },
+    );
   };
 
   const handleSynthesize = async () => {
@@ -271,66 +286,76 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
     }
     if (clean !== ttsText.trim()) {
       setTtsText(clean);
+      setTtsCleanedNotice('Đã tự động loại bỏ timestamp/chỉ số dòng khỏi văn bản để TTS không đọc nhầm.');
+    } else {
+      setTtsCleanedNotice(null);
     }
     setTtsError(null);
     setTtsAlignNote(null);
     setIsSynthesizing(true);
+    setTtsProgress(4);
+    setTtsStageLabel('Đang khởi tạo tác vụ đọc TTS...');
     try {
-      const res = await fetch('/api/tts/synthesize', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const data = await synthesizeAudioWithProgressJob(
+        {
           provider,
           voice,
           lang: selectedVoiceObj?.lang || 'en-US',
           rate,
           text: clean,
-        }),
-      });
-      const data = await parseApiJson<{
-        audioBase64?: string;
-        mimeType?: string;
-        cues?: TranscriptCue[];
-        srt?: string;
-        providerUsed?: string;
-        durationSec?: number;
-        error?: string;
-      }>(res, 'Không thể sinh Audio TTS');
-      if (!res.ok || !data?.audioBase64) {
+        },
+        (pct, lbl) => {
+          const scaled = autoAlignWhisper ? Math.round(pct * 0.72) : pct;
+          setTtsProgress(Math.max(4, scaled));
+          setTtsStageLabel(lbl);
+        },
+      );
+      if (!data?.audioBase64) {
         throw new Error(data?.error || 'Không thể sinh Audio TTS.');
       }
 
+      // Start from exact per-line timestamps measured from actual TTS MP3 segments
       let finalCues: TranscriptCue[] = data.cues || [];
-      let finalSrt = data.srt || '';
       let providerUsed = data.providerUsed || provider;
       let detectedLanguage: string | undefined;
 
-      if (autoAlignWhisper) {
+      if (autoAlignWhisper && finalCues.length > 0) {
         setIsAligningTts(true);
+        setTtsProgress(74);
+        setTtsStageLabel(`Đang đồng bộ từng từ qua Whisper (${ttsWhisperModel})...`);
         try {
           const aligned = await alignAudioWithWhisperAuto(data.audioBase64, ttsWhisperModel);
-          if (Array.isArray(aligned?.cues) && aligned.cues.length > 0) {
-            finalCues = aligned.cues;
-            finalSrt = aligned.srt || finalSrt;
-            detectedLanguage = aligned.language;
-            providerUsed = `${providerUsed} + ${aligned.backendUsed || 'whisper'} (${aligned.modelUsed || ttsWhisperModel})`;
-            setTtsAlignNote(
-              `Đã tự động đồng bộ word-level qua Whisper (${aligned.modelUsed || ttsWhisperModel}) · Ngôn ngữ nhận diện: ${aligned.language || 'auto'}.`,
-            );
+          const whisperWords = Array.isArray(aligned?.words) ? aligned.words : [];
+          if (whisperWords.length > 0) {
+            finalCues = refineCuesWithWhisperWords(finalCues, whisperWords);
           }
+          detectedLanguage = aligned?.language;
+          providerUsed = `${providerUsed} + ${aligned?.backendUsed || 'whisper'} (${aligned?.modelUsed || ttsWhisperModel})`;
+          setTtsAlignNote(
+            `Đã khớp 100% thời lượng Audio cho ${finalCues.length} dòng & tinh chỉnh word-level qua Whisper (${aligned?.modelUsed || ttsWhisperModel})${aligned?.language ? ` · Nhận diện ngôn ngữ: ${aligned.language}` : ''}.`,
+          );
         } catch (alignErr) {
           setTtsAlignNote(
-            `Đã tạo MP3 chuẩn FFmpeg (${alignErr instanceof Error ? `Whisper bỏ qua: ${alignErr.message}` : 'dùng timing đo trực tiếp theo câu'}).`,
+            `Đã khớp 100% thời lượng Audio theo từng câu đo từ FFmpeg (${alignErr instanceof Error ? `Whisper bỏ qua: ${alignErr.message}` : 'dùng timing đo trực tiếp'}).`,
           );
         } finally {
           setIsAligningTts(false);
         }
+      } else {
+        setTtsAlignNote(
+          `Đã tự động tính lại toàn bộ mốc thời gian cho ${finalCues.length} dòng khớp 100% thời lượng Audio (${Number(data.durationSec || 0).toFixed(1)}s).`,
+        );
       }
+
+      const finalSrt = finalCues.length > 0 ? cuesToSrt(finalCues) : (data.srt || '');
+      const blockTranscript = finalCues.length > 0 ? cuesToBlockTranscript(finalCues) : '';
 
       const safeName = `${ttsTitle.trim().replace(/[^a-zA-Z0-9-_]+/g, '_').slice(0, 32) || 'tts_audio'}.mp3`;
       const audioFile = base64ToFile(data.audioBase64, safeName, data.mimeType || 'audio/mpeg');
       const audioUrl = URL.createObjectURL(audioFile);
 
+      setTtsProgress(100);
+      setTtsStageLabel('Hoàn tất sinh Audio & Phụ đề!');
       setTtsResult((prev) => {
         if (prev?.audioUrl) URL.revokeObjectURL(prev.audioUrl);
         return {
@@ -339,6 +364,7 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
           audioBase64: data.audioBase64!,
           cues: finalCues,
           srt: finalSrt,
+          blockTranscript,
           providerUsed,
           detectedLanguage,
           durationSec: Number(data.durationSec || 0),
@@ -348,36 +374,8 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
       setTtsError(err instanceof Error ? err.message : 'Lỗi khi tạo Audio TTS.');
     } finally {
       setIsSynthesizing(false);
-    }
-  };
-
-  const handleAlignTtsWithWhisper = async () => {
-    if (!ttsResult?.audioBase64) return;
-    setTtsError(null);
-    setTtsAlignNote(null);
-    setIsAligningTts(true);
-    try {
-      const data = await alignAudioWithWhisperAuto(ttsResult.audioBase64, ttsWhisperModel);
-      if (Array.isArray(data?.cues) && data.cues.length > 0) {
-        setTtsResult((prev) =>
-          prev
-            ? {
-                ...prev,
-                cues: data.cues!,
-                srt: data.srt || prev.srt,
-                detectedLanguage: data.language || prev.detectedLanguage,
-                providerUsed: `${prev.providerUsed.split(' + ')[0]} + ${data.backendUsed || 'whisper'} (${data.modelUsed || ttsWhisperModel})`,
-              }
-            : null,
-        );
-        setTtsAlignNote(
-          `Đã căn chỉnh lại qua Whisper (${data.modelUsed || ttsWhisperModel}) · Ngôn ngữ: ${data.language || 'auto'}.`,
-        );
-      }
-    } catch (err) {
-      setTtsError(err instanceof Error ? err.message : 'Lỗi căn chỉnh Whisper.');
-    } finally {
-      setIsAligningTts(false);
+      setTtsProgress(0);
+      setTtsStageLabel('');
     }
   };
 
@@ -385,30 +383,81 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
     if (isPreloadingWhisper) return;
     setIsPreloadingWhisper(true);
     setTranscribeError(null);
-    setWhisperPreloadMsg(`Đang tải & cache model ${whisperModel} trên server (lần đầu có thể mất 1-3 phút)...`);
+    setWhisperPreloadProgress(3);
+    setWhisperPreloadMsg(`Đang khởi tạo tải model ${whisperModel} trên server...`);
     try {
       const res = await fetch('/api/whisper/preload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ model: whisperModel }),
       });
-      const data = await parseApiJson<{
-        backendUsed?: string;
-        modelUsed?: string;
-        status?: { fasterWhisperAvailable?: boolean; cachedOnnxModels?: string[] };
+      const startData = await parseApiJson<{
+        preloadState?: {
+          status?: 'idle' | 'downloading' | 'ready' | 'error';
+          modelUsed?: string | null;
+          backendUsed?: string | null;
+          progress?: number;
+          progressLabel?: string | null;
+          error?: string | null;
+        };
+        status?: { cachedOnnxModels?: string[] };
         error?: string;
       }>(res, 'Không tải trước được model Whisper');
       if (!res.ok) {
-        throw new Error(data?.error || 'Không tải trước được model Whisper.');
+        throw new Error(startData?.error || 'Không tải trước được model Whisper.');
       }
-      if (data?.status?.cachedOnnxModels) {
-        setCachedOnnxModels(data.status.cachedOnnxModels);
+      if (startData?.status?.cachedOnnxModels) {
+        setCachedOnnxModels(startData.status.cachedOnnxModels);
       }
-      setWhisperPreloadMsg(
-        `Model sẵn sàng trong cache: ${data.modelUsed || whisperModel} (${data.backendUsed || 'built-in'}).`,
-      );
+
+      // Poll /api/whisper/status so long downloads never hit HTTP proxy timeouts
+      const deadline = Date.now() + 10 * 60 * 1000;
+      let done = startData?.preloadState?.status === 'ready';
+      if (done) {
+        setWhisperPreloadProgress(100);
+        setWhisperPreloadMsg(
+          `Model sẵn sàng trong cache: ${startData.preloadState?.modelUsed || whisperModel} (${startData.preloadState?.backendUsed || 'built-in'}).`,
+        );
+      }
+      while (!done && isMountedRef.current && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 900));
+        const stRes = await fetch('/api/whisper/status');
+        const st = await parseApiJson<{
+          cachedOnnxModels?: string[];
+          preloadState?: {
+            status?: 'idle' | 'downloading' | 'ready' | 'error';
+            modelUsed?: string | null;
+            backendUsed?: string | null;
+            progress?: number;
+            progressLabel?: string | null;
+            error?: string | null;
+          };
+        }>(stRes, 'Lỗi kiểm tra tiến trình tải Whisper');
+
+        if (Array.isArray(st?.cachedOnnxModels)) {
+          setCachedOnnxModels(st.cachedOnnxModels);
+        }
+        const ps = st?.preloadState;
+        if (ps?.status === 'ready') {
+          setWhisperPreloadProgress(100);
+          setWhisperPreloadMsg(
+            `Model sẵn sàng trong cache: ${ps.modelUsed || whisperModel} (${ps.backendUsed || 'built-in'}).`,
+          );
+          done = true;
+          break;
+        }
+        if (ps?.status === 'error') {
+          throw new Error(ps.error || 'Tải model Whisper thất bại.');
+        }
+        const dlPct = Math.max(4, Math.min(99, Number(ps?.progress ?? 10)));
+        setWhisperPreloadProgress(dlPct);
+        setWhisperPreloadMsg(
+          ps?.progressLabel || `Đang tải & cache model ${whisperModel} (${dlPct}%)...`,
+        );
+      }
     } catch (err) {
       setWhisperPreloadMsg(null);
+      setWhisperPreloadProgress(0);
       setTranscribeError(err instanceof Error ? err.message : 'Lỗi tải trước model Whisper.');
     } finally {
       setIsPreloadingWhisper(false);
@@ -423,12 +472,14 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
     setTranscribeError(null);
     setTranslateSubError(null);
     setTranslateSubStatus(null);
+    setTranscribeProgress(4);
+    setTranscribeStageLabel('Đang gửi file lên server...');
     setIsTranscribing(true);
     try {
       const extMatch = mediaFile.name.match(/(\.[a-z0-9]+)$/i);
       const ext = extMatch ? extMatch[1].toLowerCase() : '.mp4';
       const buf = await mediaFile.arrayBuffer();
-      const res = await fetch('/api/subtitles/transcribe', {
+      const startRes = await fetch('/api/subtitles/transcribe/start', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/octet-stream',
@@ -441,7 +492,15 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
         },
         body: buf,
       });
-      const data = await parseApiJson<{
+      const startData = await parseApiJson<{ jobId?: string; error?: string }>(
+        startRes,
+        'Không thể khởi tạo tác vụ bóc phụ đề',
+      );
+      if (!startRes.ok || !startData.jobId) {
+        throw new Error(startData?.error || 'Không thể khởi tạo tác vụ bóc phụ đề.');
+      }
+
+      type TranscribeJobPayload = {
         language?: string;
         durationSec?: number;
         cues?: TranscriptCue[];
@@ -452,36 +511,75 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
         engineUsed?: string;
         translationEngineUsed?: string;
         modelUsed?: string;
-        error?: string;
-      }>(res, 'Không thể bóc tách phụ đề');
-      if (!res.ok) {
-        throw new Error(data?.error || 'Không thể bóc tách phụ đề.');
+      };
+
+      const deadline = Date.now() + 15 * 60 * 1000;
+      let finalPayload: TranscribeJobPayload | null = null;
+
+      while (isMountedRef.current && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 900));
+        const pollRes = await fetch(`/api/subtitles/transcribe/${startData.jobId}`);
+        const pollData = await parseApiJson<{
+          status?: 'running' | 'done' | 'error';
+          progress?: number;
+          stageLabel?: string;
+          error?: string;
+          result?: TranscribeJobPayload;
+        }>(pollRes, 'Lỗi theo dõi tiến trình bóc phụ đề');
+
+        if (!pollRes.ok) {
+          throw new Error(pollData?.error || 'Lỗi theo dõi tiến trình bóc phụ đề.');
+        }
+        if (typeof pollData.progress === 'number') {
+          setTranscribeProgress(Math.max(5, Math.min(99, pollData.progress)));
+        }
+        if (pollData.stageLabel) {
+          setTranscribeStageLabel(pollData.stageLabel);
+        }
+        if (pollData.status === 'error') {
+          throw new Error(pollData.error || 'Bóc tách phụ đề thất bại.');
+        }
+        if (pollData.status === 'done' && pollData.result) {
+          setTranscribeProgress(100);
+          finalPayload = pollData.result;
+          break;
+        }
+      }
+
+      if (!finalPayload) {
+        throw new Error('Quá thời gian chờ bóc tách phụ đề.');
       }
 
       let extractedAudio: File | null = mediaFile.type.startsWith('audio/') ? mediaFile : null;
-      if (data?.audioBase64) {
+      if (finalPayload.audioBase64) {
         const base = mediaFile.name.replace(/\.[^.]+$/, '') || 'extracted';
-        extractedAudio = base64ToFile(data.audioBase64, `${base}.mp3`, data.audioMimeType || 'audio/mpeg');
+        extractedAudio = base64ToFile(
+          finalPayload.audioBase64,
+          `${base}.mp3`,
+          finalPayload.audioMimeType || 'audio/mpeg',
+        );
       }
 
       setTranscribeResult({
-        language: data.language || sourceLang,
-        durationSec: Number(data.durationSec || 0),
-        cues: data.cues || [],
-        srt: data.srt || '',
-        vtt: data.vtt || '',
+        language: finalPayload.language || sourceLang,
+        durationSec: Number(finalPayload.durationSec || 0),
+        cues: finalPayload.cues || [],
+        srt: finalPayload.srt || '',
+        vtt: finalPayload.vtt || '',
         audioFile: extractedAudio,
-        engineUsed: data.engineUsed,
-        translationEngineUsed: data.translationEngineUsed,
-        modelUsed: data.modelUsed,
+        engineUsed: finalPayload.engineUsed,
+        translationEngineUsed: finalPayload.translationEngineUsed,
+        modelUsed: finalPayload.modelUsed,
       });
       setSubFormatTab(outputFormat);
-      setEditableSrt(data.srt || '');
+      setEditableSrt(finalPayload.srt || '');
       refreshWhisperStatus();
     } catch (err) {
       setTranscribeError(err instanceof Error ? err.message : 'Lỗi bóc phụ đề.');
     } finally {
       setIsTranscribing(false);
+      setTranscribeProgress(0);
+      setTranscribeStageLabel(null);
     }
   };
 
@@ -619,8 +717,13 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
         <div className="flex-1 overflow-y-auto p-6 space-y-4">
           {tab === 'tts' ? (
             <>
-              <div className="px-3.5 py-2 rounded-xl bg-indigo-50/70 border border-indigo-200/80 text-[11px] text-indigo-900">
-                <strong>Tab 1 (Từ chữ → Audio + Sub):</strong> Chỉ nhập lời thoại (đã tự động bỏ dòng timestamp như <code className="font-mono">00:00:00.000</code> để TTS không đọc nhầm). Sau khi tạo MP3, hệ thống sẽ tự đồng bộ từng từ bằng Whisper với chế độ nhận diện ngôn ngữ tự động (<code className="font-mono">auto</code>).
+              <div className="px-3.5 py-2.5 rounded-xl bg-indigo-50/70 border border-indigo-200/80 text-[11px] text-indigo-900 space-y-1">
+                <div>
+                  <strong>Tab 1 (Từ lời thoại → Audio MP3 + Sub khớp 100%):</strong> Tự loại bỏ mốc thời gian cũ khi dán để TTS không đọc timestamp. Sau khi tạo MP3, hệ thống đo thời lượng từng câu và tự đồng bộ từng từ bằng Whisper Local (<code className="font-mono">auto</code> nhận diện ngôn ngữ), đồng thời cập nhật lại toàn bộ mốc thời gian khớp 100% audio.
+                </div>
+                <div className="text-indigo-700">
+                  Các giọng <strong>Edge Neural, Google &amp; Polly</strong> hoạt động miễn phí 100% không cần API key.
+                </div>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
@@ -634,17 +737,11 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
                     className="w-full px-3 py-2 text-xs bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   >
                     <option value="auto">Tự động miễn phí (Edge Neural → Google → Polly)</option>
-                    {providers
-                      .filter(
-                        (p) =>
-                          (p.id !== 'gemini' || hasGeminiKey) &&
-                          (p.id !== 'elevenlabs' || hasElevenLabsKey),
-                      )
-                      .map((p) => (
-                        <option key={p.id} value={p.id}>
-                          {p.name}
-                        </option>
-                      ))}
+                    {providers.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}
+                      </option>
+                    ))}
                   </select>
                 </div>
 
@@ -681,6 +778,15 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
                 </div>
               </div>
 
+              {((provider === 'elevenlabs' && !hasElevenLabsKey) ||
+                (provider === 'gemini' && !hasGeminiKey)) && (
+                <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                  {provider === 'elevenlabs'
+                    ? 'Để dùng ElevenLabs AI Voice, hãy cấu hình biến ELEVENLABS_API_KEY trong Environment Secrets / .env trên server (hoặc dùng Edge Neural / Google / Polly miễn phí ngay).'
+                    : 'Để dùng Gemini Flash TTS, hãy cấu hình biến GEMINI_API_KEY trong Environment Secrets / .env trên server.'}
+                </p>
+              )}
+
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
                 <div className="md:col-span-2">
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
@@ -705,12 +811,18 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
               <div>
                 <div className="flex items-center justify-between mb-1">
                   <label className="text-xs font-semibold text-slate-700">
-                    Lời thoại đọc (tự bỏ dòng timestamp nếu dán từ SRT/transcript)
+                    Lời thoại đọc (tự bỏ dòng timestamp khi dán từ .SRT / Transcript)
                   </label>
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
-                      onClick={() => setTtsText((prev) => stripTimestampsFromScript(prev) || prev)}
+                      onClick={() => {
+                        const stripped = stripTimestampsFromScript(ttsText);
+                        if (stripped) {
+                          setTtsText(stripped);
+                          setTtsCleanedNotice('Đã làm sạch toàn bộ timestamp khỏi nội dung đọc.');
+                        }
+                      }}
                       className="text-[11px] font-medium text-indigo-600 hover:underline"
                     >
                       Làm sạch timestamp
@@ -721,12 +833,32 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
                   </div>
                 </div>
                 <textarea
-                  rows={6}
+                  rows={5}
                   value={ttsText}
+                  onPaste={(e) => {
+                    const pasted = e.clipboardData.getData('text');
+                    if (pasted && /\d{1,2}:\d{2}|-->|^WEBVTT/im.test(pasted)) {
+                      e.preventDefault();
+                      const cleaned = stripTimestampsFromScript(pasted);
+                      const el = e.currentTarget;
+                      const start = el.selectionStart ?? ttsText.length;
+                      const end = el.selectionEnd ?? ttsText.length;
+                      const nextVal = `${ttsText.slice(0, start)}${cleaned}${ttsText.slice(end)}`;
+                      setTtsText(nextVal);
+                      setTtsCleanedNotice(
+                        'Đã tự động bỏ các mốc thời gian khi dán — sau khi sinh Audio sẽ tính lại mốc thời gian khớp 100% Audio mới.',
+                      );
+                    }
+                  }}
                   onChange={(e) => setTtsText(e.target.value)}
                   placeholder="Nhập mỗi câu 1 dòng để sinh Audio + đồng bộ từng từ tự động..."
                   className="w-full p-3 text-xs bg-slate-50 border border-slate-200 rounded-xl leading-relaxed focus:outline-none focus:ring-2 focus:ring-indigo-500"
                 />
+                {ttsCleanedNotice && (
+                  <p className="mt-1 text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1">
+                    {ttsCleanedNotice}
+                  </p>
+                )}
               </div>
 
               {/* Integrated Whisper auto-sync toggle right inside Tab 1 */}
@@ -739,7 +871,7 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
                     className="rounded border-slate-300 text-indigo-600"
                   />
                   <span>
-                    Tự động đồng bộ từng từ bằng Whisper Local sau khi sinh Audio (nhận diện ngôn ngữ <code className="font-mono text-indigo-700">auto</code>)
+                    Tự đồng bộ word-level qua Whisper Local ngay khi tạo Audio (nhận diện ngôn ngữ <code className="font-mono text-indigo-700">auto</code>)
                   </span>
                 </label>
                 <select
@@ -749,9 +881,10 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
                   onChange={(e) => setTtsWhisperModel(e.target.value)}
                   className="px-2.5 py-1 text-[11px] font-mono bg-white border border-slate-200 rounded-lg disabled:opacity-50"
                 >
-                  <option value="large-v3-turbo">large-v3-turbo</option>
-                  <option value="Xenova/whisper-small">whisper-small (Nhanh)</option>
+                  <option value="Xenova/whisper-small">whisper-small (Word-level nhanh)</option>
+                  <option value="Xenova/whisper-base">whisper-base</option>
                   <option value="Xenova/whisper-tiny">whisper-tiny (Siêu nhẹ)</option>
+                  <option value="large-v3-turbo">large-v3-turbo (Python faster-whisper)</option>
                 </select>
               </div>
 
@@ -764,6 +897,21 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
                 <p className="text-xs text-indigo-800 bg-indigo-50 border border-indigo-200 rounded-lg p-2.5">
                   {ttsAlignNote}
                 </p>
+              )}
+
+              {isSynthesizing && (
+                <div className="p-3 rounded-xl bg-indigo-50 border border-indigo-200 space-y-1.5">
+                  <div className="flex items-center justify-between text-xs font-medium text-indigo-900">
+                    <span className="truncate">{ttsStageLabel || 'Đang tổng hợp Audio TTS...'}</span>
+                    <span className="font-mono tabular-nums shrink-0 ml-2">{ttsProgress}%</span>
+                  </div>
+                  <div className="w-full h-2 bg-indigo-200 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-indigo-600 transition-all duration-200"
+                      style={{ width: `${Math.max(4, ttsProgress)}%` }}
+                    />
+                  </div>
+                </div>
               )}
 
               <div className="flex flex-wrap items-center justify-between gap-3">
@@ -780,12 +928,12 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
                   )}
                   <span>
                     {isAligningTts
-                      ? `Đang đồng bộ từng từ qua Whisper (${ttsWhisperModel})...`
+                      ? `Đang đồng bộ Whisper (${ttsProgress}%)...`
                       : isSynthesizing
-                        ? 'Đang tạo giọng đọc & đo timestamp...'
+                        ? `Đang tạo Audio TTS (${ttsProgress}%)...`
                         : autoAlignWhisper
                           ? `Sinh Audio MP3 + Đồng bộ Whisper (${ttsWhisperModel})`
-                          : 'Sinh Audio MP3 + Sub (.srt)'}
+                          : 'Sinh Audio MP3 + Sub khớp 100% Audio'}
                   </span>
                 </button>
               </div>
@@ -795,7 +943,7 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <span className="text-xs font-bold text-emerald-900 inline-flex items-center gap-1.5">
                       <Check className="w-4 h-4 text-emerald-600" />
-                      Đã tạo xong Audio ({ttsResult.durationSec.toFixed(1)}s · {ttsResult.cues.length} câu
+                      Đã tạo Audio ({ttsResult.durationSec.toFixed(1)}s · {ttsResult.cues.length} câu
                       {ttsResult.detectedLanguage ? ` · ${ttsResult.detectedLanguage}` : ''} · {ttsResult.providerUsed})
                     </span>
                     <div className="flex items-center gap-2">
@@ -820,25 +968,41 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
 
                   <audio controls src={ttsResult.audioUrl} className="w-full h-9" />
 
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <button
-                      type="button"
-                      disabled={isAligningTts}
-                      onClick={() => void handleAlignTtsWithWhisper()}
-                      className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-indigo-700 bg-white border border-indigo-200 rounded-lg hover:bg-indigo-50 disabled:opacity-50"
-                    >
-                      {isAligningTts ? (
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      ) : (
-                        <RefreshCw className="w-3.5 h-3.5" />
-                      )}
-                      <span>
-                        {isAligningTts
-                          ? 'Đang căn chỉnh Whisper...'
-                          : `Chạy lại đồng bộ Whisper (${ttsWhisperModel})`}
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-semibold text-emerald-900">
+                        Timestamp đã tự động điều chỉnh khớp 100% Audio ({ttsResult.durationSec.toFixed(2)}s):
                       </span>
-                    </button>
+                      <div className="inline-flex rounded-md border border-emerald-300 bg-white overflow-hidden">
+                        <button
+                          type="button"
+                          onClick={() => setTtsPreviewMode('block')}
+                          className={`px-2 py-0.5 text-[10px] font-semibold ${
+                            ttsPreviewMode === 'block' ? 'bg-emerald-600 text-white' : 'text-slate-600'
+                          }`}
+                        >
+                          Mốc câu
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setTtsPreviewMode('srt')}
+                          className={`px-2 py-0.5 text-[10px] font-semibold ${
+                            ttsPreviewMode === 'srt' ? 'bg-emerald-600 text-white' : 'text-slate-600'
+                          }`}
+                        >
+                          .SRT
+                        </button>
+                      </div>
+                    </div>
+                    <textarea
+                      readOnly
+                      rows={4}
+                      value={ttsPreviewMode === 'block' ? ttsResult.blockTranscript : ttsResult.srt}
+                      className="w-full p-2.5 text-[11px] font-mono bg-white border border-emerald-200 rounded-lg leading-relaxed text-slate-700"
+                    />
+                  </div>
 
+                  <div className="flex flex-wrap items-center justify-end gap-2">
                     <button
                       type="button"
                       onClick={() => {
@@ -906,7 +1070,11 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
                   >
                     <option value="faster-whisper">faster-whisper (Built-in)</option>
                     <option value="whisper">Local Whisper (ONNX Built-in)</option>
-                    {hasGeminiKey && <option value="gemini">Gemini AI (Server Secret)</option>}
+                    <option value="gemini">
+                      {hasGeminiKey
+                        ? 'Gemini AI (Đã kết nối Secrets)'
+                        : 'Gemini AI (Cần GEMINI_API_KEY trong Secrets)'}
+                    </option>
                   </select>
                 </div>
 
@@ -920,10 +1088,10 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
                     onChange={(e) => setWhisperModel(e.target.value)}
                     className="w-full px-3 py-2 text-xs bg-white border border-slate-200 rounded-lg font-mono disabled:opacity-50"
                   >
-                    <option value="large-v3-turbo">large-v3-turbo</option>
-                    <option value="Xenova/whisper-small">whisper-small (Nhanh)</option>
+                    <option value="Xenova/whisper-small">whisper-small (Mặc định · Word-level)</option>
                     <option value="Xenova/whisper-base">whisper-base</option>
                     <option value="Xenova/whisper-tiny">whisper-tiny (Siêu nhẹ)</option>
+                    <option value="large-v3-turbo">large-v3-turbo (Tự tải / Python faster-whisper)</option>
                   </select>
                 </div>
 
@@ -952,7 +1120,7 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
                       ? `Đã có sẵn ${cachedOnnxModels.join(', ')}`
                       : fasterWhisperAvailable
                         ? 'Python faster-whisper sẵn sàng (tự tải model lần đầu)'
-                        : 'Chưa cache model nào — bấm tải trước hoặc bóc sub lần đầu sẽ tự tải.'}
+                        : 'Chưa cache model nào — bấm tải trước hoặc bóc sub lần đầu sẽ tự động tải về.'}
                   </div>
                   <button
                     type="button"
@@ -965,13 +1133,30 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
                     ) : (
                       <Download className="w-3 h-3" />
                     )}
-                    <span>{isPreloadingWhisper ? 'Đang tải model...' : `Tải trước ${whisperModel}`}</span>
+                    <span>
+                      {isPreloadingWhisper
+                        ? `Đang tải ${whisperPreloadProgress}%...`
+                        : `Tải trước ${whisperModel}`}
+                    </span>
                   </button>
                 </div>
                 {whisperPreloadMsg && (
-                  <p className="sm:col-span-3 text-[11px] text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-1.5 font-medium">
-                    {whisperPreloadMsg}
-                  </p>
+                  <div className="sm:col-span-3 text-[11px] text-emerald-900 bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-2 space-y-1.5 font-medium">
+                    <div className="flex items-center justify-between">
+                      <span className="truncate">{whisperPreloadMsg}</span>
+                      {isPreloadingWhisper && (
+                        <span className="font-mono tabular-nums ml-2">{whisperPreloadProgress}%</span>
+                      )}
+                    </div>
+                    {isPreloadingWhisper && (
+                      <div className="w-full h-1.5 bg-emerald-200 rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-emerald-600 transition-all duration-200"
+                          style={{ width: `${Math.max(4, whisperPreloadProgress)}%` }}
+                        />
+                      </div>
+                    )}
+                  </div>
                 )}
               </div>
 
@@ -998,7 +1183,7 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
 
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Dịch song ngữ thêm vào phụ đề ({hasGeminiKey ? 'Gemini LLM + Miễn phí' : 'Dịch miễn phí tự động'})
+                    Dịch song ngữ thêm vào phụ đề ({hasGeminiKey ? 'Dùng Gemini LLM' : 'Dùng Google Translate miễn phí'})
                   </label>
                   <select
                     value={translateLang}
@@ -1015,6 +1200,21 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
                 </div>
               </div>
 
+              {isTranscribing && (
+                <div className="p-3 rounded-xl bg-indigo-50 border border-indigo-200 space-y-1.5">
+                  <div className="flex items-center justify-between text-xs font-medium text-indigo-900">
+                    <span className="truncate">{transcribeStageLabel || `Đang xử lý (${whisperModel})...`}</span>
+                    <span className="font-mono tabular-nums ml-2">{transcribeProgress}%</span>
+                  </div>
+                  <div className="w-full h-2 bg-indigo-200 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-indigo-600 transition-all duration-200"
+                      style={{ width: `${Math.max(4, transcribeProgress)}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+
               <button
                 type="button"
                 disabled={isTranscribing || !mediaFile}
@@ -1028,7 +1228,7 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
                 )}
                 <span>
                   {isTranscribing
-                    ? `Đang chạy ${sttService} (${whisperModel})...`
+                    ? `${transcribeStageLabel || `Đang chạy ${sttService}`} (${transcribeProgress}%)`
                     : `Bóc phụ đề (${sttService} · ${whisperModel} → .${outputFormat})`}
                 </span>
               </button>
@@ -1048,7 +1248,7 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
                       <span>Dịch file gốc (.SRT / .VTT / Script) sang ngôn ngữ đích</span>
                     </div>
                     <p className="text-[11px] text-slate-500 mt-0.5">
-                      Tự dùng Gemini LLM nếu server có cấu hình, hoặc tự chuyển sang dịch miễn phí (không cần API key). Có thể tải file <code className="font-mono">.srt</code> rời hoặc dịch trực tiếp kết quả vừa bóc.
+                      Cơ chế dịch: {hasGeminiKey ? 'Ưu tiên Gemini LLM (đã có Secret trên server) & tự dự phòng Google Translate' : 'Dùng Google Translate miễn phí tự động (hoặc Gemini LLM khi cấu hình GEMINI_API_KEY)'}. Nạp file <code className="font-mono">.srt</code>/<code className="font-mono">.vtt</code>/<code className="font-mono">.txt</code> hoặc dán nội dung để dịch ngay.
                     </p>
                   </div>
                   <div>
@@ -1077,6 +1277,16 @@ export const AudioSubtitleStudioModal: React.FC<AudioSubtitleStudioModalProps> =
                     </button>
                   </div>
                 </div>
+
+                {!transcribeResult && (
+                  <textarea
+                    rows={3}
+                    value={standaloneSourceText}
+                    onChange={(e) => setStandaloneSourceText(e.target.value)}
+                    placeholder="Hoặc dán trực tiếp nội dung .SRT / .VTT / từng dòng câu gốc tại đây để dịch..."
+                    className="w-full p-2.5 text-[11px] font-mono bg-white border border-slate-200 rounded-lg leading-relaxed"
+                  />
+                )}
 
                 <div className="flex flex-wrap items-center gap-2.5">
                   <select

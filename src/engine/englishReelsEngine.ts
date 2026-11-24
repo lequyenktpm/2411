@@ -7,7 +7,7 @@ import {
   parseScenePlanJson,
   scenePlanToProject,
 } from './scenePlanAdapter';
-import { interpolateWordTimings } from './transcriptParser';
+import { interpolateWordTimings, stripTimestampsFromScript } from './transcriptParser';
 import {
   CanvasThemeId,
   IllustrationPropData,
@@ -17,6 +17,7 @@ import {
   LayoutCompositionId,
   LessonProject,
   TranscriptCue,
+  WatermarkOutroConfig,
 } from './types';
 import {
   getCatalogSummaryForPrompt,
@@ -173,7 +174,8 @@ function isMetadataNoiseLine(line: string): boolean {
 }
 
 export function sanitizeTtsSpeech(raw: string): string {
-  const keptLines = String(raw || '')
+  const withoutTimestamps = stripTimestampsFromScript(String(raw || ''));
+  const keptLines = withoutTimestamps
     .split(/\r?\n/)
     .map((l) => l.trim())
     .filter((l) => {
@@ -1040,6 +1042,7 @@ export function reelCardsToLessonProject(
     cardTimings?: ReelCardTimingMeta[];
     audioFileName?: string;
     sceneJsonOverride?: FlexibleSceneDocument | null;
+    watermark?: WatermarkOutroConfig;
   },
 ): LessonProject {
   const safeCards =
@@ -1154,18 +1157,30 @@ export function reelCardsToLessonProject(
     }
   });
 
-  const totalDuration = Number(Math.max(3, cursor).toFixed(2));
+  const baseTotalDuration = Number(Math.max(3, cursor).toFixed(2));
+  const hasActiveOutro = Boolean(
+    options?.watermark &&
+      options.watermark.outroSeconds > 0 &&
+      (options.watermark.outroLine1.trim() || options.watermark.outroLine2.trim()),
+  );
+  const outroExtraSec = hasActiveOutro ? Math.max(0, Number(options?.watermark?.outroSeconds || 0)) : 0;
+  const totalDuration = Number((baseTotalDuration + outroExtraSec).toFixed(2));
   const theme: CanvasThemeId = options?.theme ?? 'pastel-sunrise';
   const isDark = isDarkCanvasTheme(theme);
 
   if (options?.sceneJsonOverride && !options.compositionId) {
     const words = cues.flatMap((c) => c.words);
-    return scenePlanToProject(words, options.sceneJsonOverride, {
+    const built = scenePlanToProject(words, options.sceneJsonOverride, {
       title: options.title || options.sceneJsonOverride.title || 'English Reels Studio',
       theme,
       audioFileName: options.audioFileName,
       cuesOverride: cues,
     });
+    return {
+      ...built,
+      duration: Number((built.duration + outroExtraSec).toFixed(2)),
+      watermark: options?.watermark,
+    };
   }
 
   const hasQuiz = safeCards.some((c) => c.type === 'quiz');
@@ -1591,6 +1606,7 @@ export function reelCardsToLessonProject(
     audioFileName: options?.audioFileName,
     cues,
     elements: resolvedElements,
+    watermark: options?.watermark,
   };
 }
 
